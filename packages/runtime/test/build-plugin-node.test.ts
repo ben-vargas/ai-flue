@@ -1,7 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { type ChildProcess, spawn } from 'node:child_process';
 import * as fs from 'node:fs';
+import { createServer } from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { describe, expect, it } from 'vitest';
 import { build } from '../../cli/src/lib/build.ts';
 import { NodePlugin } from '../../cli/src/lib/build-plugin-node.ts';
 import type { BuildContext, BuildPlugin } from '../../cli/src/lib/types.ts';
@@ -11,8 +13,43 @@ describe('Node build plugin', () => {
 		const entry = new NodePlugin().generateEntryPoint(testBuildContext());
 
 		expect(entry).toContain("import * as handler_triage_0 from '/tmp/triage.ts'");
+		expect(entry).toContain("import * as workflow_daily_report_0 from '/tmp/daily-report.ts'");
+		expect(entry).toContain('const workflowHandlers = {};');
 		expect(entry).toContain('const normalized = normalizeBuiltModules(agentModules, workflowModules);');
 		expect(entry).not.toContain('channelModules');
+	});
+
+	it('starts a generated server and invokes an HTTP workflow', async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), 'flue-workflow-server-'));
+		fs.mkdirSync(path.join(root, 'workflows'));
+		fs.mkdirSync(path.join(root, 'node_modules', '@flue'), { recursive: true });
+		fs.symlinkSync(process.cwd(), path.join(root, 'node_modules', '@flue', 'runtime'), 'dir');
+		fs.writeFileSync(
+			path.join(root, 'workflows', 'smoke.ts'),
+			`import { http } from '@flue/runtime';\n` +
+				`export const channels = [http()];\n` +
+				`export async function run() { return { ok: true }; }\n`,
+		);
+		await build({ root, target: 'node' });
+
+		const port = await findAvailablePort();
+		const child = spawn('node', [path.join(root, 'dist', 'server.mjs')], {
+			cwd: root,
+			stdio: ['ignore', 'pipe', 'pipe'],
+			env: { ...process.env, PORT: String(port), FLUE_MODE: 'local' },
+		});
+		try {
+			await waitForServer(child, port);
+			const response = await fetch(`http://localhost:${port}/workflows/smoke?wait=result`, {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({}),
+			});
+			expect(response.status).toBe(200);
+			expect(await response.json()).toMatchObject({ result: { ok: true } });
+		} finally {
+			child.kill('SIGTERM');
+		}
 	});
 
 	it('rejects duplicate agent basenames', async () => {
@@ -75,13 +112,51 @@ const parserOnlyPlugin: BuildPlugin = {
 	},
 };
 
+async function findAvailablePort(): Promise<number> {
+	return new Promise((resolve, reject) => {
+		const server = createServer();
+		server.listen(0, () => {
+			const address = server.address();
+			if (address && typeof address === 'object') {
+				server.close(() => resolve(address.port));
+				return;
+			}
+			server.close(() => reject(new Error('Could not determine port')));
+		});
+		server.on('error', reject);
+	});
+}
+
+async function waitForServer(child: ChildProcess, port: number): Promise<void> {
+	let output = '';
+	child.stderr?.on('data', (chunk) => {
+		output += chunk.toString();
+	});
+	child.stdout?.on('data', (chunk) => {
+		output += chunk.toString();
+	});
+	for (let attempt = 0; attempt < 50; attempt++) {
+		if (child.exitCode !== null) {
+			throw new Error(`Generated server exited before listening:\n${output}`);
+		}
+		try {
+			const response = await fetch(`http://localhost:${port}/runs/not-found`);
+			await response.text();
+			return;
+		} catch {
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+	}
+	throw new Error(`Generated server did not begin listening:\n${output}`);
+}
+
 function testBuildContext(): BuildContext {
 	return {
 		agents: [{ name: 'triage', filePath: '/tmp/triage.ts', hasChannels: true, hasReceive: true, hasDefaultAgent: true }],
-		workflows: [],
+		workflows: [{ name: 'daily-report', filePath: '/tmp/daily-report.ts', hasChannels: true }],
 		manifest: {
 			agents: [{ name: 'triage', channels: {}, receive: true, created: true }],
-			workflows: [],
+			workflows: [{ name: 'daily-report', channels: {} }],
 		},
 		root: '/tmp/flue-test',
 		output: '/tmp/flue-test/dist',

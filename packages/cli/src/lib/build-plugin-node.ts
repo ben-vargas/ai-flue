@@ -76,6 +76,7 @@ function normalizeBuiltModules(agentModules, workflowModules) {
   const directHandlers = {};
   const receiveHandlers = {};
   const createdAgents = {};
+  const workflowHandlers = {};
   for (const [name, mod] of Object.entries(agentModules)) {
     if (!mod.default || mod.default.__flueCreatedAgent !== true || typeof mod.default.initialize !== 'function') throw new Error('[flue] Agent "' + name + '" must default-export createAgent(...).');
     const channels = normalizeChannelList(mod.channels, 'agent "' + name + '"');
