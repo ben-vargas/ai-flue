@@ -75,39 +75,34 @@ npx wrangler deploy
 
 ### 4. Add your API key
 
-Put provider API keys in a `.env` file at the project root:
+For local Cloudflare development, put provider API keys in `.dev.vars` beside your Wrangler configuration:
 
 ```bash
-cat > .env <<'EOF'
+cat > .dev.vars <<'EOF'
 ANTHROPIC_API_KEY="your-api-key"
 EOF
 
-printf '\n.env\n' >> .gitignore
+printf '\n.dev.vars*\n.env*\n' >> .gitignore
 ```
 
-Use the env var name your provider expects — `ANTHROPIC_API_KEY` for Anthropic, `OPENAI_API_KEY` for OpenAI, and so on. Do not commit `.env`.
+Use the variable name your provider expects — `ANTHROPIC_API_KEY` for Anthropic, `OPENAI_API_KEY` for OpenAI, and so on. Do not commit local secret files. Cloudflare also supports `.env`-based local variables, but use either `.dev.vars` or `.env`, not both; when `.dev.vars` exists, `.env` values are not loaded into local Worker bindings.
 
-Pass the file explicitly with `--env <path>`. Flue loads it for both `flue dev` and `flue run` (the same flag works for Node and Cloudflare targets):
-
-```bash
-npx flue dev --target cloudflare --env .env
-```
-
-For deploying, Wrangler reads the same file:
+For a deployed Worker, add secrets through Wrangler rather than treating a local-development file as production configuration:
 
 ```bash
+npx wrangler secret put ANTHROPIC_API_KEY
 npx flue build --target cloudflare
-npx wrangler deploy --secrets-file .env
+npx wrangler deploy
 ```
 
-> **Note on `.dev.vars`.** Wrangler's docs use `.dev.vars` as the convention for local secrets. The format is identical to `.env`, and you can call your file whatever you like — Flue just needs a path. We use `.env` in these examples because it's the broader Node/Web convention and works the same way regardless of which target you're using.
+For CI or a managed deployment pipeline, `wrangler deploy --secrets-file <path>` is also available when your pipeline provides a protected secrets file.
 
 ### 5. Try it locally
 
-For local development, use `flue dev --target cloudflare`. It builds your project root, then starts a Cloudflare Workers dev server (via wrangler) on port 3583 and watches for changes:
+For local development, use `flue dev --target cloudflare`. It builds your project root, then starts a Cloudflare Workers development server through the official Vite integration on port 3583 and watches for changes:
 
 ```bash
-npx flue dev --target cloudflare --env .env
+npx flue dev --target cloudflare
 ```
 
 Then test it:
@@ -407,14 +402,15 @@ const { data } = await session.skill('greet', {
 Flue compiles your project into a deployable artifact. For Cloudflare, this means a Workers-compatible bundle:
 
 ```bash
-# Local development (build + watch + dev server on port 3583)
-npx flue dev --target cloudflare --env .env
+# Local development (reads local variables from .dev.vars or .env)
+npx flue dev --target cloudflare
 
 # One-off build for Cloudflare
 npx flue build --target cloudflare
 
-# Deploy to production (Wrangler reads the same .env as a secrets bundle)
-npx wrangler deploy --secrets-file .env
+# Configure a deployed secret interactively, then deploy
+npx wrangler secret put ANTHROPIC_API_KEY
+npx wrangler deploy
 ```
 
 Every workflow that exports `route` gets an HTTP endpoint automatically. The middleware may authenticate the request and call `next()` to admit it. The route follows the pattern `/workflows/<name>` — for example, `.flue/workflows/translate.ts` becomes `/workflows/translate`.

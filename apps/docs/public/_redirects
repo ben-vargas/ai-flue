@@ -1,2 +1,11 @@
 /docs /docs/getting-started/quickstart/ 302
 /docs/ /docs/getting-started/quickstart/ 302
+/docs/guide/durable-execution /docs/guide/harness/ 301
+/docs/guide/durable-execution/ /docs/guide/harness/ 301
+/docs/guide/durable-execution.md/ /docs/guide/harness.md/ 301
+/docs/guide/sandboxed-compute /docs/guide/sandboxes/ 301
+/docs/guide/sandboxed-compute/ /docs/guide/sandboxes/ 301
+/docs/guide/sandboxed-compute.md/ /docs/guide/sandboxes.md/ 301
+/docs/guide/tools-and-skills /docs/guide/tools/ 301
+/docs/guide/tools-and-skills/ /docs/guide/tools/ 301
+/docs/guide/tools-and-skills.md/ /docs/guide/tools.md/ 301

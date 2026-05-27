@@ -32,7 +32,7 @@ This separation keeps platform protocols and conversational behavior out of the 
 | Model execution, tools, sandboxes, and session history | Flue agent |
 | Replies and other external side effects | Explicit tools using Chat SDK or native provider clients |
 
-The repository includes a verified GitHub issue-comment integration in `examples/chat-sdk/`. The same boundary applies to platforms such as Slack, Microsoft Teams, Google Chat, Discord, Telegram, WhatsApp, Messenger, Linear, and GitHub, subject to each adapter's supported features and deployment requirements.
+The repository includes a verified minimal GitHub issue-comment integration in `examples/chat-sdk/`: a mention is normalized, dispatched to a Flue agent, and answered through a Chat SDK-backed tool. The same boundary applies to platforms such as Slack, Microsoft Teams, Google Chat, Discord, Telegram, WhatsApp, Messenger, Linear, and GitHub, subject to each adapter's supported features and deployment requirements.
 
 ## What Chat SDK contributes
 
@@ -50,7 +50,7 @@ Flue does not need to introduce a universal `reply()` abstraction to use these c
 
 ## Keep the bot at the application boundary
 
-A shared bot module can own adapter configuration and inbound chat routing. For a project using the `.flue/` source layout, this module belongs alongside `app.ts` rather than inside an agent definition:
+A shared bot module can own adapter configuration and inbound chat routing. For a project using the `.flue/` source layout, this module belongs alongside `app.ts` rather than inside an agent definition. The following version expands the repository's minimal mention-only fixture into a subscription-based thread conversation pattern supported by Chat SDK:
 
 ```ts title=".flue/chat.ts"
 import { createGitHubAdapter } from '@chat-adapter/github';

@@ -1,28 +1,209 @@
 ---
 title: Getting Started
-description: Create your first Flue workflow and understand the pieces involved.
+description: Create your first Flue agent with a coding agent and verify it locally.
 ---
+
+Flue is designed for building agents in TypeScript, but you do not need to assemble your first project by hand. In this tutorial, you will give Flue's starter prompt to a coding agent, answer a few choices about the agent you want, and let that agent create and validate the smallest useful project for you.
+
+By the end, you will have a generated Flue project containing one starter agent workflow, configured with a model you selected, and you will have exercised it locally. This tutorial stops before deployment.
 
 ## Prerequisites
 
-TODO: State the runtime, package-manager, and model-provider requirements for beginning with Flue.
+Before you begin, have the following ready:
 
-## Create a project
+- **A coding editor or coding agent that can fetch a URL and modify a project.** For example, use the agent mode in the editor or CLI tool where you normally ask an assistant to write code and run commands.
+- **A destination for the project.** You can start in a new directory, an empty directory, or add Flue to an existing TypeScript application. The choice affects where generated source files live.
+- **Node.js compatible with the Flue packages that will be installed.** The current `@flue/runtime` and `@flue/cli` packages require Node.js `>=22.18.0`. If your coding agent selects additional packages for a target, it should also check their requirements.
+- **npm, pnpm, or the package manager already used by your project.** Let your coding agent preserve an existing project's package-manager conventions.
+- **Access to an LLM provider.** You will choose an exact provider/model identifier during setup and supply that provider's API key for local testing. You do not need to put a secret in the initial prompt.
 
-TODO: Establish the smallest project that can run a workflow locally.
+You can decide on a deployment target during setup even though you will not deploy in this tutorial. That choice lets the generated project use the right dependencies, configuration, and local validation path from the beginning.
 
-## Write your first workflow
+## 1. Give the starter prompt to your coding agent
 
-TODO: Introduce a created agent, `run()`, `init()`, a session, and one prompt operation.
+On the [Flue homepage](https://flueframework.com/), choose **Copy Prompt**, then paste the copied text into your coding editor or coding agent. The copied prompt is exactly:
 
-## Run it locally
+```text
+fetch https://flueframework.com/start.md to create a new agent
+```
 
-TODO: Show the primary local workflow execution path and where credentials are supplied.
+Send that message as-is. The fetched `start.md` is an instruction set for your coding agent: rather than giving you a generic code sample to transcribe, it guides the agent through discovering your requirements, selecting the appropriate Flue setup, creating files, and checking its work.
 
-## What you just built
+The coding agent should first read the Flue introduction and relevant target guidance, then ask for choices it cannot infer from your existing conversation or project. You remain in control of those choices and of the resulting file changes.
 
-TODO: Name the authored workflow, harness, session, operation, and workflow run without expanding into reference material.
+## 2. Answer the setup questions
+
+Your coding agent will establish four requirements before it writes the starter project. Keep the first agent simple: the goal is to see a complete working path before expanding its responsibilities.
+
+### Choose what your agent does
+
+Describe one small, testable behavior. A greeter, translator, summarizer, or support-answer starter is a better first project than a production automation with many tools and integrations.
+
+For example, you might answer:
+
+> Create a translator agent that receives text and a target language and returns a translation.
+
+The coding agent uses this purpose to name and shape one minimal workflow around an agent. It should not add unrelated production architecture during the quickstart.
+
+### Confirm where it should create files
+
+The coding agent inspects your requested destination before choosing a Flue source layout:
+
+| Destination | Generated source layout | Example workflow location |
+| --- | --- | --- |
+| A directory that does not exist yet | Root layout | `workflows/translate.ts` |
+| An existing empty directory | Root layout | `workflows/translate.ts` |
+| An existing project that already has files | `.flue/` layout | `.flue/workflows/translate.ts` |
+
+This rule is important when you add Flue to an existing application: `.flue/` keeps authored agent and workflow modules together without mixing them into existing application source folders. If `.flue/` exists, Flue uses that source layout rather than also reading root-level `agents/` or `workflows/` modules.
+
+When the coding agent proposes a destination and layout, check that it is about to edit the directory you intended. If you want a different location, say so before it scaffolds anything; it should inspect the new location and infer the layout again.
+
+### Pick a target
+
+Choose the environment you ultimately expect to run the project on, such as Node.js or Cloudflare Workers. The coding agent uses target-specific guidance to add only required dependencies and configuration, and to select an appropriate local validation command.
+
+You do not need to deploy now. Picking a target here only prevents you from validating a Node-shaped starter when your actual next step is a Worker-shaped project, or vice versa.
+
+### Pick a provider and model
+
+Flue agents use an explicitly configured model; Flue does not silently select one for a new agent. You can tell your coding agent which provider and model you already intend to use, or ask it to present an available model identifier appropriate for your provider.
+
+The starter instructions recommend exact identifiers including:
+
+- `anthropic/claude-sonnet-4-6`
+- `anthropic/claude-opus-4-7`
+- `openai/gpt-5.5`
+- `openrouter/moonshotai/kimi-k2.6`
+
+If you ask for another model, the coding agent should verify the exact supported identifier before using it. If your chosen model is unavailable, it should ask before substituting another one.
+
+Do not paste an API key into this conversation merely to select a model. Model selection establishes the identifier in source code; credentials are supplied separately through local environment configuration or your eventual hosting platform's secret mechanism.
+
+## 3. Review the plan before files are written
+
+Once you answer its questions, your coding agent should be able to restate a compact implementation contract. Before allowing broad edits, make sure its plan includes:
+
+- the simple purpose of your starter agent;
+- the project directory you selected;
+- either the root layout or the `.flue/` layout, inferred from that directory;
+- the workflow file path it will create;
+- the target you selected; and
+- the exact provider/model identifier you approved.
+
+If any of these are wrong, correct them now. A model change or a directory/layout correction is simpler before dependencies and configuration files have been updated.
+
+## 4. Let the coding agent create the starter project
+
+After the plan is correct, let the coding agent implement it. The starter prompt instructs it to create the smallest useful Flue project for your selections, following the setup guidance for the selected target.
+
+For a typical first project, expect it to do the following:
+
+1. **Create one workflow module** in `workflows/` or `.flue/workflows/`, according to the inferred layout. This module contains the small example behavior you selected.
+2. **Create and initialize an agent inside that workflow.** In the generated TypeScript, look for `createAgent(...)` configured with your exact `model` value, followed by `init(agent)`, an initialized `harness`, a session, and a prompt operation.
+3. **Install or update only the dependencies and configuration needed by the selected target.** A Node.js starter and a Cloudflare Workers starter do not require identical project configuration.
+4. **Make the TypeScript source visible to your editor and type checker.** If the project has no `tsconfig.json`, the coding agent may add a minimal one. If it already has one, it should avoid replacing your configuration and make only a safe inclusion change when necessary. In particular, TypeScript projects using the `.flue/` layout may need `.flue/**/*.ts` included explicitly.
+5. **Keep secrets out of generated source and committed configuration.** It may tell you which provider environment variable is required, but it must not invent an API key or hard-code one into the project.
+6. **Run a relevant validation step where possible.** It should attempt a build, type check, or local Flue execution appropriate to the target and report exactly what ran and whether it passed.
+
+This is still a minimal starter. The agent does not need custom tools, a remote sandbox, persistence, deployment automation, or production authentication to demonstrate one successful Flue operation.
+
+## 5. Inspect what was generated
+
+Before running the project with your credential, review the coding agent's final checklist and the files it changed.
+
+### Check the file placement
+
+The generated workflow must match the layout decision:
+
+- For a new or empty destination, expect `workflows/<name>.ts`.
+- For a previously populated application, expect `.flue/workflows/<name>.ts`.
+
+If the coding agent added `.flue/` to an existing application, do not also move generated Flue modules into root-level `workflows/`; one project uses one authored-module layout.
+
+### Check the agent and model configuration
+
+Open the generated workflow and confirm that it configures the exact model you selected. A first workflow generally includes these concepts:
+
+| Generated concept | What it does in your starter |
+| --- | --- |
+| Created agent | Declares the model and other harness defaults for the model-driven work. |
+| Workflow `run(...)` function | Defines the finite operation you can invoke with starter input. |
+| `init(agent)` | Initializes that created agent as a harness for this workflow invocation. |
+| Harness | Provides the configured agent environment and opens sessions. |
+| Session | Holds the conversation context in which the prompt runs. |
+| Prompt operation | Sends your starter task to the selected model and receives its result. |
+
+The generated file is your first agent-powered workflow: running it creates a workflow run with one or more session operations. Later, if you build an addressable agent for ongoing conversations, direct agent prompts are persistent session interactions rather than workflow runs. See [Agents](/docs/concepts/agents/) for that distinction.
+
+### Check dependencies and TypeScript configuration
+
+Review `package.json`, a lockfile change if one was made, and any target configuration added by the coding agent. The dependency set should correspond to the target it said it was following, not to every possible deployment platform.
+
+Also confirm that your workflow is inside the TypeScript project. This is particularly important in an existing project with `.flue/workflows/<name>.ts`: if your editor does not report types inside that file or type checking omits it, ask the coding agent to check the existing `tsconfig.json` inclusion rules without discarding your application's settings.
+
+### Check secrets handling
+
+The project should contain no real or made-up provider key in TypeScript files, prompts, checked-in configuration, or the coding agent's scaffolded sample data. Your coding agent should instead tell you the provider-specific variable to supply locally, such as `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`, based on the model you selected.
+
+Keep local credential files out of version control. If you are adding Flue to an existing repository, review its ignore rules before creating or updating an environment file.
+
+## 6. Supply your provider key and validate locally
+
+Follow the exact local-development and credential instructions returned by your coding agent, because they reflect the target, package manager, workflow name, and input shape it generated. The successful outcome for this tutorial is a local invocation that reaches your selected model and returns an answer from your starter workflow.
+
+### If you chose the Node.js target
+
+For a Node-target project, the local flow should use a provider key in local environment configuration and either a watching server or a one-shot workflow invocation. Common generated validation commands use the following forms:
+
+```bash
+pnpm exec flue dev --target node --env .env
+pnpm exec flue run <workflow-name> --target node --env .env --payload '<json-payload>'
+```
+
+If your generated project uses npm instead of pnpm, your coding agent may provide equivalent `npx flue ...` commands. Use its concrete workflow name and payload rather than copying the placeholders above.
+
+A development server listens on port `3583` by default and rebuilds when workflow files change. If the generated workflow exposes an HTTP route, your coding agent may also give you a request to its `/workflows/<name>` endpoint as the validation step.
+
+### If you chose the Cloudflare Workers target
+
+For a Cloudflare-target project, local development should use the Cloudflare local variable conventions selected in its generated setup, such as `.dev.vars` or `.env`, and start the Worker development server with this form:
+
+```bash
+pnpm exec flue dev --target cloudflare
+```
+
+Your coding agent should then give you a local request appropriate to its generated workflow. Use that request to confirm the starter responds through the Worker development environment.
+
+Do not try to validate a Cloudflare starter with `flue run --target cloudflare`: `flue run` supports the Node target, while Cloudflare projects are exercised locally through `flue dev --target cloudflare`.
+
+### Confirm the result
+
+A completed validation should establish each of the following:
+
+- dependencies install successfully under your Node.js and package-manager setup;
+- the generated TypeScript builds or type-checks when that validation is available;
+- the local Flue process starts or the one-shot invocation runs;
+- your provider credential is available to that process without being committed to source;
+- the configured model answers the workflow's starter prompt; and
+- the coding agent reports the validation result, including any step it could not run on your behalf.
+
+If validation fails, give the error back to your coding agent and ask it to repair the generated starter while preserving your selected directory, layout, target, and model. Common first-run causes are a missing provider variable, a model identifier that does not match the credential's provider, a `.flue/` workflow excluded by existing TypeScript configuration, or using a Node-only validation command for a Cloudflare-target project.
+
+## What you created
+
+You began with one prompt rather than manually assembling a starter. That prompt directed your coding agent to turn four product choices into a small Flue project:
+
+1. **Purpose:** the initial behavior the agent should perform.
+2. **Location and layout:** where Flue-authored source belongs in your project.
+3. **Target:** which runtime-specific setup and local development path to follow.
+4. **Model:** the explicit LLM provider/model used when the workflow invokes the agent.
+
+The resulting workflow is a bounded, locally testable entry point around an initialized agent harness and session. It is intentionally small: after it works, you can decide whether your application needs continuing addressable agents, additional workflows, tools, skills, or a more capable sandbox.
 
 ## Next steps
 
-TODO: Direct readers to Agents, Workflows, and Project Layout.
+- Read [Agents](/docs/concepts/agents/) to understand created agents, agent instances, and continuing interactions.
+- Read [Workflows](/docs/guide/workflows/) to expand finite, invocable orchestration around your agent.
+- Read [Project Layout](/docs/guide/project-layout/) before adding more authored modules to either a root or `.flue/` layout.
+- Read [LLMs & Models](/docs/guide/models/) when you need another model, provider settings, or model choices for individual operations.

@@ -3,30 +3,262 @@ title: Agents
 description: Understand persistent, addressable agents and how they relate to sessions and workflows.
 ---
 
+An agent is a deployed, addressable behavior that can continue working with the same conversational state over time. Callers choose an agent by its module name and an instance `id`, then send direct prompts or asynchronous input into a session within that instance.
+
+This makes an agent a good fit for an assistant associated with a customer, a support case, a chat thread, a repository, or another continuing application identity. Unlike a [workflow](/docs/guide/workflows/), an agent is not defined by one bounded invocation that begins, produces a result, and ends as a run.
+
 ## What is an agent?
 
-TODO: Introduce agents as deployed, addressable behavior for ongoing interactions and event-driven work.
+In Flue, an agent combines authored behavior with a runtime environment:
+
+- A **profile** describes reusable model behavior and capabilities, such as instructions, skills, tools, subagents, reasoning level, and compaction configuration.
+- A **created agent** is an initializer that resolves the runtime configuration for an agent instance, including its profile and runtime concerns such as a working directory, sandbox, or session store.
+- An **agent module** makes a created agent addressable by default-exporting it from `agents/<name>.ts` or `.flue/agents/<name>.ts`.
+- An **agent instance** is selected by the caller-provided URL `id`. It is the stable identity under which sessions are addressed.
+- A **harness** is the initialized agent environment within an instance. It contains sessions and the configured capability boundary.
+- A **session** is a named continuing conversation within a harness.
+- An **operation** is one call such as `prompt()`, `skill()`, `task()`, or `shell()` within a session.
+- A **turn** is one model round trip inside a model-driven operation. An operation may require several turns when the model uses tools or continues reasoning.
+
+The runtime hierarchy is therefore:
+
+```text
+agent module: agents/support.ts
+  └─ created agent: createAgent(...)
+      └─ agent instance: id = "customer-123"
+          └─ harness: "default"
+              └─ session: "billing"
+                  └─ operation: prompt / skill / task / shell
+                      └─ turn: one model round trip
+```
+
+An instance is persistent in the application model: later interactions can target the same identity and session. Actual durability depends on the target and configured persistence, rather than on the word “agent” alone.
 
 ## Define an agent
 
-TODO: Explain the roles of an agent profile, a created agent, and an exported agent module.
+An agent profile is one reusable `defineAgentProfile(...)` value. It is behavior and capability configuration, not an addressable instance, session, or running process.
 
-## Agent instances
+A created agent is the value returned by `createAgent(...)`. Its initializer receives creation context and returns the runtime configuration used to initialize a harness. For an addressable agent interaction, its `id` is the selected agent instance id; when a workflow initializes the created agent, its `id` is that workflow's `runId`.
 
-TODO: Explain that a caller-provided instance `id` identifies a stable runtime scope.
+An agent module default-exports that created agent so Flue can discover and address it by the module filename:
 
-## Sessions and operations
+```ts title=".flue/agents/support.ts"
+import { createAgent, defineAgentProfile, type AgentRouteHandler } from '@flue/runtime';
 
-TODO: Preview the harness/session model without duplicating the Harness guide.
+export const route: AgentRouteHandler = async (_c, next) => next();
 
-## Interact with an agent
+const support = defineAgentProfile({
+  model: 'anthropic/claude-haiku-4-5',
+  instructions: 'Help customers understand and resolve their support cases.',
+});
 
-TODO: Introduce direct HTTP/WebSocket prompts and asynchronous dispatched input.
+export default createAgent(() => ({ profile: support }));
+```
+
+In this module:
+
+1. `support` is an agent profile. It can be reused or composed into a created agent configuration.
+2. `createAgent(...)` returns the created agent. This is the runtime-initializable value.
+3. The default export makes the created agent the addressable `support` agent module.
+4. The exported `route` middleware opts this module into direct HTTP exposure and provides a place to apply route-specific policy. See [Routing](/docs/guide/routing/) for exposed surfaces and authentication.
+
+Profiles and created agents have different reasons to exist. A profile describes reusable model-facing behavior; a created agent can additionally bind that behavior to an instance-aware runtime boundary. For example, its initializer can select capabilities or resources using `{ id, env }`, or configure `cwd`, `sandbox`, and `persist` for the harness it creates.
+
+Scalar runtime options returned by `createAgent(...)` can replace profile defaults, while capability lists such as skills, tools, and subagents are combined with those from the profile. This allows a reusable profile to become a deployment-specific agent without turning the profile itself into an exposed endpoint.
+
+A created agent can also be used locally by a workflow through `init(agent)`. It becomes a deployed, independently addressable agent only when it is the discovered default export of an agent module. See [Project Layout](/docs/guide/project-layout/) for how agent and workflow modules are discovered.
+
+## Agent instances are stable identities
+
+The `id` segment in an agent URL selects an agent instance:
+
+```text
+/agents/support/customer-123
+                └────────── instance id
+```
+
+The application chooses what that identity means. It might identify:
+
+- one customer assistant,
+- one issue or incident,
+- one team or repository,
+- one chat thread,
+- one device, tenant, or long-lived automation actor.
+
+A useful mental model is that the agent name chooses **behavior**, while the instance `id` chooses **whose continuing context and capability scope** receives the work.
+
+The instance `id` is supplied to the `createAgent(({ id }))` initializer and participates in session identity. Under one instance, an application can retain separate sessions for separate conversations:
+
+```text
+support / customer-123
+  └─ harness "default"
+      ├─ session "default"
+      ├─ session "billing-case-42"
+      └─ session "renewal-discussion"
+```
+
+Reusing an `id` should be deliberate. If tools close over instance-scoped destinations or credentials, allowing an untrusted caller to choose someone else's `id` can select capabilities intended for another scope. The surrounding application owns authentication and authorization before an exposed agent route or socket is reached.
+
+An instance is not a promise that one JavaScript object remains alive forever. The runtime can initialize the created agent again while loading the same logical instance and session state. This distinction matters in deployed environments: identity may remain stable across requests even when compute is restarted or relocated.
+
+## Harnesses, sessions, operations, and turns
+
+When Flue processes work for a created agent, it initializes a **harness**. Documentation calls the return value from `init()` a `harness` because it is more than a model: it carries sessions, filesystem and execution surfaces where configured, discovered workspace context, tools, skills, and persistence wiring.
+
+A harness has a name. Unless code explicitly requests another name, its name is `"default"`. Inside a harness, `harness.session(name?)` gets or creates a named session; omitting the name selects the `"default"` session.
+
+For direct HTTP, WebSocket, and dispatched input, Flue selects the created agent's default harness, then uses the requested session or `"default"` when none is given. Within a workflow, application code can call `init(agent, { name: ... })` to maintain multiple named harnesses for orchestration. The detailed programming interface belongs in the [Harness](/docs/guide/harness/) guide.
+
+### Sessions are conversation boundaries
+
+A session holds the continuing model conversation for a particular `(instance, harness, session)` identity. A later operation in the same session can use earlier conversational history. A different session in the same agent instance is a separate conversational thread, even though it is initialized from the same created agent configuration.
+
+This separation lets an application choose its conversational granularity. For example, a customer-level instance could contain one session per support ticket; a chat-thread instance could simply use its default session.
+
+### Operations are units of requested work
+
+Operations happen inside a session. The main operation kinds are:
+
+| Operation | Meaning within a session |
+| --- | --- |
+| `prompt(...)` | Ask the agent to process interactive input using the continuing conversation. |
+| `skill(...)` | Invoke an available skill in the session context. |
+| `task(...)` | Delegate focused work into a detached child session. |
+| `shell(...)` | Execute configured shell work as a session operation, when that capability exists. |
+
+A direct user message is processed as a prompt operation in the selected session. A dispatched input is also processed within the selected persistent session, but begins from asynchronous application input rather than an attached prompt connection.
+
+### Turns are not operations
+
+One operation is not necessarily one model request. During a prompt, for example, the model may make a tool call, receive its result, and make another response. Each model round trip is a **turn** within the encompassing operation.
+
+This distinction is useful when reasoning about latency, cost, observability, and context: the caller initiates an operation, while the runtime may execute multiple turns to complete it. See [Observability](/docs/guide/observability/) for the associated event and identifier model.
+
+## Persistence and capability boundaries
+
+Agents are designed around continuing sessions, but several kinds of state must not be conflated.
+
+### Session continuity depends on a session store
+
+Flue addresses session conversation state using the instance id, harness name, and session name. The created agent can provide `persist` to select a `SessionStore`; otherwise the target supplies its default session store. Whether a conversation survives process restart, deployment, or movement between compute locations depends on that store and the deployment target.
+
+This means “persistent agent” describes the addressable, continuing interaction model. It does not mean every deployment automatically gives every session durable storage.
+
+### A sandbox is a separate boundary
+
+A created agent can configure a sandbox and working directory for tools, shell operations, or filesystem surfaces. That environment defines what code and files an agent is permitted to touch.
+
+Session persistence and sandbox filesystem durability are separate concerns. A durable conversation record does **not** by itself imply that files created in the default sandbox survive later operations, restarts, or another execution environment. If an application needs durable files or durable external side effects, choose and configure those resources deliberately. See [Sandboxes](/docs/guide/sandboxes/) for the compute and filesystem choices.
+
+### Capabilities belong at the application boundary
+
+An agent only has the skills, tools, subagents, sandbox access, environment bindings, and exposed transports that the application supplies. This lets applications keep privileged actions explicit: an agent might have a tool that posts to the chat thread identified by its instance `id`, rather than receiving broad credentials and being asked to invent a destination.
+
+The same principle applies to exposure. An agent module can expose direct HTTP or WebSocket interaction, while application-owned routes can validate provider events and call `dispatch(...)`. Authentication, authorization, input selection, and outbound side-effect controls remain application responsibilities.
+
+## Direct interaction with an agent
+
+Direct interaction is attached: a caller sends input to a specific deployed agent instance and remains connected for its result or streamed events.
+
+### HTTP prompts
+
+An HTTP-exposed module accepts a prompt for an instance at `POST /agents/<name>/<id>`. The JSON body carries a message and can select a session:
+
+```http title="Direct agent prompt"
+POST /agents/support/customer-123
+Content-Type: application/json
+
+{
+  "message": "Can you summarize the open issues in my case?",
+  "session": "billing-case-42"
+}
+```
+
+If `session` is omitted, Flue selects the `"default"` session. A synchronous request returns the result of that attached interaction. A caller that requests server-sent events receives operation and model activity while the attached prompt is processed.
+
+Both modes target the same instance/session model: they are two ways to observe a direct operation, not different persistence models.
+
+### WebSocket prompts
+
+An agent module can instead, or additionally, export WebSocket middleware:
+
+```ts title=".flue/agents/chat.ts"
+import { createAgent, type AgentWebSocketHandler } from '@flue/runtime';
+
+export const websocket: AgentWebSocketHandler = async (_c, next) => next();
+
+export default createAgent(() => ({
+  model: 'anthropic/claude-haiku-4-5',
+}));
+```
+
+A WebSocket client connects to `/agents/<name>/<id>`, receives readiness for that agent instance, and can send sequential prompt messages over the same socket. Each message selects an optional session and receives correlated events and a result. Keeping a socket open is convenient for interactive applications, but session identity remains explicit: the same stable instance and session can also be addressed by a later connection.
+
+HTTP and WebSocket details, middleware, and authentication belong in [Routing](/docs/guide/routing/) and the future SDK guides for `client.agents.invoke()` and `client.agents.connect()`.
+
+## Asynchronous dispatched input
+
+Not every incoming event has a caller waiting for a model response. A webhook handler, queue consumer, scheduled integration, or application event handler may want to accept input and let an addressable agent process it asynchronously. For this case, application code calls `dispatch(...)`.
+
+```ts title=".flue/chat-events.ts"
+import { dispatch } from '@flue/runtime';
+import moderator from './agents/moderator.ts';
+
+const receipt = await dispatch(moderator, {
+  id: 'guild:1',
+  session: 'case:1',
+  input: {
+    type: 'message.flagged',
+    messageId: 'msg-42',
+    reason: 'possible secret',
+  },
+});
+
+console.log(receipt.dispatchId, receipt.acceptedAt);
+```
+
+Here, `id` selects the target agent instance and `session` selects the continuing conversation within it. If `session` is omitted, dispatch uses `"default"`. The input is JSON-serializable application data accepted for later processing; the receipt identifies that accepted delivery with a `dispatchId` and `acceptedAt` timestamp.
+
+Dispatch is deliberately different from a direct prompt:
+
+- It does not hold the incoming application request open while agent work completes.
+- It does not return an attached assistant result or attached event stream to the caller.
+- It places input into the selected session so the agent can process it asynchronously and continue that session's context.
+- Its delivery durability depends on the configured target and queue path. For example, a process-memory admission queue cannot preserve accepted work across process exit.
+
+This design is especially useful when external systems retry deliveries or expect fast acknowledgment. The application can verify and normalize an incoming event, select an authorized agent instance and session, dispatch it, and expose any allowed outbound action through explicit tools. The [Chat](/docs/guide/chat/) guide applies this pattern to conversational provider integrations.
 
 ## Agents are not workflow runs
 
-TODO: State that direct agent interactions and dispatches belong to persistent sessions, not `/runs`.
+A persistent session and a workflow run solve different problems. A direct prompt performs finite work, and a dispatched input performs finite work, but neither creates a workflow run.
+
+| Interaction | Continuing identity | Finite correlation identifier | Creates a workflow run? | Appears in `/runs` or `flue logs`? |
+| --- | --- | --- | --- | --- |
+| Direct HTTP or WebSocket agent prompt | `instanceId` and session | `operationId` | No | No |
+| Dispatched agent input | `instanceId` and session | `dispatchId` and `operationId` | No | No |
+| Workflow invocation | workflow invocation | `runId` | Yes | Yes |
+
+Only a workflow invocation creates a run lifecycle with a `runId`, `run_start`, and `run_end`. When a workflow initializes a created agent and performs session operations inside the workflow, those operations are nested activity in that workflow run.
+
+Direct agent prompts and dispatched input are instead attached to an agent instance and session. Direct streams carry instance-correlated agent events without a `runId`; dispatched processing is correlated through `dispatchId`, instance/session identity, and operation events. Use observation integrations for this traffic rather than expecting it in workflow run history. See [Observability](/docs/guide/observability/) for tracing these forms of execution.
 
 ## When to use an agent
 
-TODO: Contrast continuing assistants and event-driven agents with bounded workflows.
+Choose an addressable agent when ongoing identity or continuing conversation is central to the behavior:
+
+- A product assistant should remember the user's previous exchanges in the same selected session.
+- A customer support or incident assistant should continue work associated with one case.
+- A chat integration should accept messages into one thread-aligned conversation and act through controlled reply tools.
+- An event-driven moderator or triage assistant should receive asynchronous events over time for the same account, repository, or queue partition.
+- Tools or resources should be scoped to a stable application identity chosen before model execution begins.
+
+Choose a workflow when the application is primarily invoking a bounded job:
+
+- summarize a document and return a result,
+- review a pull request as one inspectable execution,
+- run a finite extraction or transformation pipeline,
+- coordinate multiple steps whose outcome should be tracked as one `runId`.
+
+The two primitives compose. A workflow can initialize a created agent to carry out model-driven steps during one finite run. An application can also expose a long-lived agent for conversation while separately invoking workflows for one-off background tasks. The important distinction is ownership of identity: an agent centers on an addressable instance and its sessions; a workflow centers on one observable invocation and its run history.
+
+Continue with [Harness](/docs/guide/harness/) for initialized environments and sessions, [Routing](/docs/guide/routing/) for exposed transports, or [Workflows](/docs/guide/workflows/) for bounded orchestration and run history.

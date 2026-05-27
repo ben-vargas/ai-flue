@@ -16,7 +16,7 @@ Flue exposes three complementary surfaces:
 2. **Structured application logs** emitted through a workflow context.
 3. **`observe(...)` events** for cross-cutting logging, metrics, tracing, and error reporting across workflows and agent interactions.
 
-Start with logs and `console.log`. Add an event observer when you need common behavior across your application or want to export telemetry to another system.
+Start with `observe(...)` and log only the terminal or diagnostic events you need. Add run-history inspection for workflows and an external telemetry exporter when operations need durable debugging, metrics, or tracing.
 
 ## Start with `observe(...)`
 
@@ -267,7 +267,7 @@ export async function run(ctx: FlueContext) {
 
 `info`, `warn`, and `error` events accept structured attributes. Prefer attributes for values you will search, aggregate, or forward to monitoring tools.
 
-During workflows, these log events are persisted with the run. During persistent-agent activity, observable log events are still available to attached streams and `observe(...)`, but they are not workflow run history because agent processing is not a run.
+During workflows, `ctx.log` events are persisted with the run. Runtime diagnostic `log` events emitted during persistent-agent activity are observable through attached streams and `observe(...)`, but they are not workflow run history because agent processing is not a run.
 
 ## Inspect workflow runs locally
 
