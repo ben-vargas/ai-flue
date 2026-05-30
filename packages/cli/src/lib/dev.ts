@@ -15,8 +15,8 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { parseEnv } from 'node:util';
 import { build, cloudflareViteConfigPath, cloudflareViteInputDir, createCloudflareViteConfig } from './build.ts';
+import { createEnvLoader, type EnvLoader, selectEnvFile } from './env.ts';
 import type { BuildOptions } from './types.ts';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -32,23 +32,8 @@ export interface DevOptions {
 	target: 'node' | 'cloudflare';
 	/** Defaults to 3583 ("FLUE" on a phone keypad). */
 	port?: number;
-	/**
-	 * Absolute paths to env files (`.env`-format) to load before starting the
-	 * dev server. Repeatable; later files override earlier ones on key
-	 * collision (matching wrangler's `envFiles` semantics and standard
-	 * dotenv composition patterns).
-	 *
-	 * - Node: parsed with `node:util.parseEnv` and merged into the child
-	 *   server process's env. Shell-set env vars win over file values.
-	 * - Cloudflare: unsupported; the official Vite integration loads local
-	 *   variables from `.dev.vars` or `.env` beside the project config.
-	 *
-	 * If empty/undefined, Node performs no explicit env loading and Cloudflare
-	 * uses the official Vite/Workers local variable behavior.
-	 *
-	 * Each path must exist; otherwise dev fails fast with a clear error.
-	 */
-	envFiles?: string[];
+	envFile?: string;
+	envLoader?: EnvLoader;
 }
 
 /** Default port for `flue dev`. F=3, L=5, U=8, E=3 on a phone keypad. */
@@ -99,16 +84,9 @@ export async function dev(options: DevOptions): Promise<void> {
 	const output = path.resolve(options.output ?? path.join(root, 'dist'));
 	const port = options.port ?? DEFAULT_DEV_PORT;
 
-	// Resolve env files up front so a typo errors before we kick off a build.
-	// Resolved against root (the project root) so relative paths feel
-	// natural — "the path they look like from where I ran flue".
-	if (options.target === 'cloudflare' && options.envFiles?.length) {
-		throw new Error('[flue] Cloudflare dev uses the official Vite integration and does not support --env <path>. Put local variables in .dev.vars or .env beside your wrangler config; use CLOUDFLARE_ENV for environment-specific files.');
-	}
-	const envFiles = options.target === 'node' ? resolveEnvFiles(options.envFiles, root) : [];
-	for (const f of envFiles) {
-		console.error(`[flue] Loading env from: ${f}`);
-	}
+	const envFile = options.envLoader?.file ?? selectEnvFile(options.envFile, root);
+	const envLoader = options.envLoader ?? createEnvLoader(envFile);
+	if (!options.envLoader) envLoader.apply();
 
 	const buildOptions: BuildOptions = {
 		root,
@@ -124,7 +102,11 @@ export async function dev(options: DevOptions): Promise<void> {
 
 	const initialStart = Date.now();
 	try {
-		await build(buildOptions);
+		if (options.target === 'cloudflare') {
+			await envLoader.withApplied(() => build(buildOptions));
+		} else {
+			await build(buildOptions);
+		}
 	} catch (err) {
 		throw new Error(
 			`[flue] Initial build failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -132,9 +114,10 @@ export async function dev(options: DevOptions): Promise<void> {
 	}
 	console.error(`[flue] Built in ${Date.now() - initialStart}ms`);
 
+	if (options.target === 'cloudflare') envLoader.restore();
 	const reloader: DevReloader =
 		options.target === 'node'
-			? new NodeReloader({ root, output, port, envFiles })
+			? new NodeReloader({ root, output, port })
 			: await createCloudflareReloader({ root, sourceRoot, port });
 
 	await reloader.start();
@@ -151,16 +134,26 @@ export async function dev(options: DevOptions): Promise<void> {
 
 	// ─── Watch loop ──────────────────────────────────────────────────────────
 
-	const rebuilder = createRebuilder(buildOptions, reloader);
-	const envFileSet = new Set(envFiles);
+	const rebuild = options.target === 'cloudflare'
+		? () => envLoader.withApplied(() => build(buildOptions))
+		: () => build(buildOptions);
+	const rebuilder = createRebuilder(buildOptions, reloader, rebuild);
 	const watcher = createWatcher({
 		root,
 		sourceRoot,
 		output,
-		envFiles,
+		envFile,
 		onChange: (relPath) => {
-			if (!reloader.shouldRebuildOn(relPath)) return;
-			const isEnvFile = envFileSet.has(relPath);
+			const isEnvFile = relPath === envFile;
+			if (!isEnvFile && !reloader.shouldRebuildOn(relPath)) return;
+			if (isEnvFile && options.target === 'node') {
+				try {
+					envLoader.apply();
+				} catch (err) {
+					console.error(`[flue] Environment reload failed: ${err instanceof Error ? err.message : String(err)}`);
+					return;
+				}
+			}
 			console.error(`[flue] Change detected: ${relPath}`);
 			rebuilder.schedule(isEnvFile);
 		},
@@ -215,13 +208,17 @@ interface Rebuilder {
 	 * `forceReload`: if any scheduled call within a debounce window passes
 	 * `true`, the resulting reload is treated as forced — the reloader is
 	 * told `buildChanged: true` even if the build wrote nothing new. This keeps
-	 * explicit Node env-file changes able to refresh runtime behavior even if
+	 * selected env-file changes able to refresh Node runtime behavior even if
 	 * generated output is otherwise unchanged.
 	 */
 	schedule(forceReload?: boolean): void;
 }
 
-function createRebuilder(buildOptions: BuildOptions, reloader: DevReloader): Rebuilder {
+function createRebuilder(
+	buildOptions: BuildOptions,
+	reloader: DevReloader,
+	rebuild: () => Promise<{ changed: boolean }> = () => build(buildOptions),
+): Rebuilder {
 	let running = false;
 	let queued = false;
 	let queuedForce = false;
@@ -233,7 +230,7 @@ function createRebuilder(buildOptions: BuildOptions, reloader: DevReloader): Reb
 		const start = Date.now();
 		console.error(`[flue] Rebuilding...`);
 		try {
-			const { changed } = await build(buildOptions);
+			const { changed } = await rebuild();
 			await reloader.reload(changed || force);
 			console.error(`[flue] Reloaded in ${Date.now() - start}ms\n`);
 		} catch (err) {
@@ -283,8 +280,8 @@ interface WatcherOptions {
 	 * trigger spurious rebuilds (and an infinite loop).
 	 */
 	output: string;
-	/** Absolute paths of env files to watch. Empty means none. */
-	envFiles: string[];
+	/** Absolute path of the selected env file to watch. */
+	envFile: string;
 	onChange: (relPath: string) => void;
 }
 
@@ -308,7 +305,7 @@ interface WatcherHandle {
  *   - Editor backup/swap suffixes
  */
 function createWatcher(options: WatcherOptions): WatcherHandle {
-	const { root, sourceRoot, output, envFiles, onChange } = options;
+	const { root, sourceRoot, output, envFile, onChange } = options;
 	const watchers: fs.FSWatcher[] = [];
 	const watchesDotFlue = sourceRoot === path.join(root, '.flue');
 
@@ -363,16 +360,14 @@ function createWatcher(options: WatcherOptions): WatcherHandle {
 		);
 	}
 
-	// Watch user-supplied Node env files. Edits trigger a full reload since env
-	// values affect runtime behavior the bundler cannot see. Path passed to
-	// onChange is absolute so reload selection is deterministic.
-	for (const envPath of envFiles) {
-		try {
-			const w = fs.watch(envPath, () => onChange(envPath));
-			watchers.push(w);
-		} catch {
-			// Best-effort; continue without this watch.
-		}
+	try {
+		const envDirectory = path.dirname(envFile);
+		const envBasename = path.basename(envFile);
+		const w = fs.watch(envDirectory, (_event, filename) => {
+			if (filename?.toString() === envBasename) onChange(envFile);
+		});
+		watchers.push(w);
+	} catch {
 	}
 
 	return {
@@ -395,18 +390,15 @@ class NodeReloader implements DevReloader {
 	private readonly serverPath: string;
 	private readonly root: string;
 	private readonly port: number;
-	private readonly envFiles: string[];
 	url: string;
 
 	constructor(opts: {
 		root: string;
 		output: string;
 		port: number;
-		envFiles: string[];
 	}) {
 		this.root = opts.root;
 		this.port = opts.port;
-		this.envFiles = opts.envFiles;
 		this.serverPath = path.join(opts.output, 'server.mjs');
 		this.url = `http://localhost:${this.port}`;
 	}
@@ -446,18 +438,10 @@ class NodeReloader implements DevReloader {
 	// ── Internals ──
 
 	private async spawnAndWait(): Promise<void> {
-		// Compose env: parsed env-file values first, then process.env on top so
-		// shell-set vars win over file values (matches dotenv-cli convention),
-		// then explicit Flue overrides last. Re-read env files on every spawn
-		// so mid-session edits to the file are picked up on the next reload.
-		const fromFiles = parseEnvFiles(this.envFiles);
 		const child = spawn('node', [this.serverPath], {
 			stdio: ['ignore', 'pipe', 'pipe'],
 			cwd: this.root,
-			// FLUE_MODE=local keeps local/dev error envelopes verbose. Direct agent
-			// HTTP routing is being rebuilt around the new init/session model.
 			env: {
-				...fromFiles,
 				...process.env,
 				PORT: String(this.port),
 				FLUE_MODE: 'local',
@@ -601,47 +585,6 @@ export function isSourceStructurePath(root: string, sourceRoot: string, relPath:
 	if (sourceRelative.startsWith('agents/') || sourceRelative.startsWith('workflows/')) return true;
 	return /^app\.(?:ts|mts|js|mjs)$/.test(sourceRelative);
 }
-
-/**
- * Resolve and validate a list of env-file paths. Returns absolute paths.
- *
- * Throws a friendly `[flue]`-prefixed error if any path doesn't exist. The
- * goal of `--env` is explicitness — silent skip on a typo would defeat
- * the purpose.
- */
-export function resolveEnvFiles(envFiles: string[] | undefined, cwd: string): string[] {
-	if (!envFiles || envFiles.length === 0) return [];
-	return envFiles.map((p) => {
-		const abs = path.isAbsolute(p) ? p : path.resolve(cwd, p);
-		if (!fs.existsSync(abs)) {
-			throw new Error(`[flue] --env points at a path that doesn't exist: ${p}`);
-		}
-		return abs;
-	});
-}
-
-/**
- * Parse one or more `.env`-format files and return their merged contents.
- * Later files override earlier files on key collision.
- *
- * Uses Node's built-in `util.parseEnv` (Node 20.6+; Flue requires Node 22+).
- * No `dotenv` package needed.
- *
- * Parse-only — doesn't touch `process.env`. Caller composes with
- * `process.env` as needed (typical pattern: spread file vars first, then
- * `process.env`, so shell-set values win).
- */
-export function parseEnvFiles(absolutePaths: string[]): Record<string, string> {
-	const merged: Record<string, string> = {};
-	for (const p of absolutePaths) {
-		const content = fs.readFileSync(p, 'utf-8');
-		const parsed = parseEnv(content) as Record<string, string>;
-		Object.assign(merged, parsed);
-	}
-	return merged;
-}
-
-
 
 function pickExampleAgentName(sourceRoot: string): string | null {
 	try {

@@ -407,13 +407,13 @@ An exported `websocket` middleware can authenticate its own agent or workflow so
 
 #### Loading environment variables
 
-For Node, pass `--env <path>` to load a `.env`-format file:
+`flue build`, `flue dev`, `flue run`, and `flue connect` load project-root `.env` before configuration when it exists:
 
 ```bash
-flue dev --target node --env .env
+flue dev --target node
 ```
 
-Repeatable; later files override earlier ones on key collision. Shell-set env vars win over file values. The same flag works for Node `flue run`. For Cloudflare development, use the official `.dev.vars` or `.env` files and `CLOUDFLARE_ENV` convention; `flue dev --target cloudflare --env ...` is not supported.
+Use `--env <path>` to select one alternate file instead; shell-set values win. `flue build` may use loaded values while evaluating configuration, but emitted artifacts do not load `.env` at deployment runtime. For Cloudflare development, Worker runtime bindings continue to use the official `.dev.vars` or `.env` files and `CLOUDFLARE_ENV` convention.
 
 ### Trigger From the CLI (`flue run`)
 

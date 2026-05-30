@@ -97,7 +97,7 @@ npx flue build --target cloudflare
 npx wrangler deploy --secrets-file .env
 ```
 
-> **Note on local variables.** Cloudflare local development follows the official Vite/Workers `.dev.vars` and `.env` conventions; custom `flue dev --env <path>` files are supported for Node only.
+> **Note on local variables.** Flue loads `.env` or one explicitly selected `--env` file before CLI configuration and build evaluation. Cloudflare Worker runtime variables still follow the official Vite/Workers `.dev.vars` and `.env` conventions.
 
 ### 5. Try it locally
 

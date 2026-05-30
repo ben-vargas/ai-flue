@@ -15,7 +15,7 @@ Some highlights include:
 - **[Agents](/docs/concepts/agents/):** Autonomous agents that keep context across conversations and events.
 - **[Workflows](/docs/guide/workflows/):** Structured automations from a clear input to a finished result.
 - **[Sandboxes](/docs/guide/sandboxes/):** A secure environment where agents act and run code.
-- **[Develop & build](/docs/guide/deployment/):** Develop locally, run applications or jobs, and deploy them.
+- **[Develop & build](/docs/guide/develop-and-build/):** Develop locally, run applications or jobs, and deploy them.
 - **[Subagents](/docs/guide/subagents/):** Delegate specialized tasks to the right expert.
 - **[Tools](/docs/guide/tools/):** Typed actions for calling APIs and changing data.
 - **[Skills](/docs/guide/skills/):** Reusable expertise agents load on demand.
@@ -51,7 +51,7 @@ Flue is deliberately open:
 - **Open sandboxes:** Connect to a remote provider, or use the built-in virtual sandbox.
 - **Open deploys:** Build your agent for Node.js, Cloudflare, GitHub, GitLab, etc.
 
-See [Sandboxes](/docs/guide/sandboxes/) and [Develop & Build](/docs/guide/deployment/) for more details.
+See [Sandboxes](/docs/guide/sandboxes/) and [Develop & Build](/docs/guide/develop-and-build/) for more details.
 
 ### AI-first
 

@@ -5,7 +5,7 @@ description: Store Flue session conversation state through the public persistenc
 
 The data persistence API controls **session conversation state**: recorded messages, task relationships, compaction summaries, and metadata needed to reopen a session. It does not store sandbox files or create workflow run history.
 
-For deciding what must survive deployment, see [Agents](/docs/guide/building-agents/) and [Sandboxes](/docs/guide/sandboxes/). For build output and the deployment handoff, see [Develop & Build](/docs/guide/deployment/).
+For deciding what must survive deployment, see [Agents](/docs/guide/building-agents/) and [Sandboxes](/docs/guide/sandboxes/). For build output and the deployment handoff, see [Develop & Build](/docs/guide/develop-and-build/).
 
 ## Imports
 

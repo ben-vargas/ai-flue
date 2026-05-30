@@ -6,9 +6,11 @@
 
 - Authored source discovery now selects one source directory in priority order: `.flue/`, `src/`, then the project root. `src/` is the canonical layout for examples and documentation; existing `src/` directories now take precedence over root-level agent and workflow modules.
 - **Model provider identity now matches the provider ID in the selected model specifier.** Flue consistently treats configured model values as `provider-id/model-id`: `registerProvider(providerId, ...)` no longer accepts a separate `provider` override, `configureProvider(providerId, ...)` is keyed by that same provider ID, and binding-backed `cloudflare/...` models now identify as `cloudflare` rather than `workers-ai`. `PromptResponse.model` and `PromptResultResponse.model` now expose `{ provider, id }`, while turn events continue to expose `provider` and `model` as the provider ID and model ID respectively. Existing persisted Cloudflare binding session history may cross this identity boundary on its next resumed turn.
+- **`--env` now selects one alternate environment file.** Repeated `--env` flags are rejected; combine values into one file or provide shell overrides instead.
 
 ### Fixes & Other Changes
 
+- **Flue application commands now load local environment values before configuration.** `flue build`, `flue dev`, `flue run`, and `flue connect` load project-root `.env` automatically when present, while `--env <path>` selects one alternate file. Build-time loading does not add `.env` loading to emitted deployment artifacts, and Cloudflare Worker runtime variables continue to follow the official `.env` / `.dev.vars` behavior.
 - **Binding-backed Workers AI now forwards reasoning effort.** For reasoning-capable `cloudflare/...` models, Flue passes `thinkingLevel` through `env.AI.run(...)` using Cloudflare's shared `reasoning_effort` option, mapping `'minimal'` to `low` and `'xhigh'` to `high`.
 
 ## 0.8.1 - 2026-05-28

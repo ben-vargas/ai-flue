@@ -85,7 +85,7 @@ EOF
 printf '\n.dev.vars*\n.env*\n' >> .gitignore
 ```
 
-Use the variable name your provider expects — `ANTHROPIC_API_KEY` for Anthropic, `OPENAI_API_KEY` for OpenAI, and so on. Do not commit local secret files. Cloudflare also supports `.env`-based local variables, but use either `.dev.vars` or `.env`, not both; when `.dev.vars` exists, `.env` values are not loaded into local Worker bindings.
+Use the variable name your provider expects — `ANTHROPIC_API_KEY` for Anthropic, `OPENAI_API_KEY` for OpenAI, and so on. Do not commit local secret files. Cloudflare also supports `.env`-based local variables, but use either `.dev.vars` or `.env`, not both; when `.dev.vars` exists, `.env` values are not loaded into local Worker bindings. Flue loads `.env` or one explicitly selected `--env` file before CLI configuration and builds, but Worker runtime variables continue to follow Cloudflare's local-variable rules.
 
 For a deployed Worker, add secrets through Wrangler rather than treating a local-development file as production configuration:
 

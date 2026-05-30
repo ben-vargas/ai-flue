@@ -11,8 +11,35 @@ import {
 	resolveConfigPath,
 	type UserFlueConfig,
 } from '../src/lib/config.ts';
-import { DEFAULT_DEV_PORT, dev, parseEnvFiles, resolveEnvFiles } from '../src/lib/dev.ts';
+import { DEFAULT_DEV_PORT, dev } from '../src/lib/dev.ts';
+import { createEnvLoader, type EnvLoader, selectEnvFile } from '../src/lib/env.ts';
 import { CATEGORY_ROOTS, CONNECTORS } from './_connectors.generated.ts';
+
+interface ApplicationConfigArgs {
+	target?: 'node' | 'cloudflare';
+	explicitRoot: string | undefined;
+	explicitOutput: string | undefined;
+	configFile: string | undefined;
+	envFile: string | undefined;
+}
+
+function loadCliEnvironment(args: ApplicationConfigArgs): EnvLoader {
+	try {
+		const cwd = process.cwd();
+		const searchFrom = args.explicitRoot ?? cwd;
+		const configPath = args.configFile !== undefined
+			? resolveConfigPath({ cwd, configFile: args.configFile })
+			: resolveConfigPath({ cwd: searchFrom, configFile: undefined });
+		const baseDir = configPath ? path.dirname(configPath) : searchFrom;
+		const envLoader = createEnvLoader(selectEnvFile(args.envFile, baseDir));
+		if (fs.existsSync(envLoader.file)) console.error(`[flue] Loading env from: ${envLoader.file}`);
+		envLoader.apply();
+		return envLoader;
+	} catch (err) {
+		console.error(err instanceof Error ? err.message : String(err));
+		process.exit(1);
+	}
+}
 
 /** Resolve CLI flags, config file values, and defaults into one config. */
 async function resolveCliConfig(args: {
@@ -43,15 +70,21 @@ async function resolveCliConfig(args: {
 	}
 }
 
+async function resolveApplicationCommand(args: ApplicationConfigArgs): Promise<{ cfg: FlueConfig; envLoader: EnvLoader }> {
+	const envLoader = loadCliEnvironment(args);
+	const cfg = await resolveCliConfig(args);
+	return { cfg, envLoader };
+}
+
 // ─── Arg Parsing ────────────────────────────────────────────────────────────
 
 function printUsage() {
 	console.error(
 		'Usage:\n' +
-			'  flue dev   [--target <node|cloudflare>] [--root <path>] [--output <path>] [--config <path>] [--port <number>] [--env <path>]...\n' +
-			'  flue run     <workflow> [--target node] [--payload <json>] [--root <path>] [--output <path>] [--config <path>] [--env <path>]...\n' +
-			'  flue connect <agent> <instance-id> [--target node] [--session <name>] [--root <path>] [--output <path>] [--config <path>] [--env <path>]...\n' +
-			'  flue build   [--target <node|cloudflare>] [--root <path>] [--output <path>] [--config <path>]\n' +
+			'  flue dev   [--target <node|cloudflare>] [--root <path>] [--output <path>] [--config <path>] [--port <number>] [--env <path>]\n' +
+			'  flue run     <workflow> [--target node] [--payload <json>] [--root <path>] [--output <path>] [--config <path>] [--env <path>]\n' +
+			'  flue connect <agent> <instance-id> [--target node] [--session <name>] [--root <path>] [--output <path>] [--config <path>] [--env <path>]\n' +
+			'  flue build   [--target <node|cloudflare>] [--root <path>] [--output <path>] [--config <path>] [--env <path>]\n' +
 			'  flue init  --target <node|cloudflare> [--root <path>] [--force]\n' +
 			'  flue add   [<name>|<url>] [--category <category>] [--print]\n' +
 			'  flue logs  <workflowRunId> [--server <url>] [--follow|-f|--no-follow] [--since <eventIndex>] [--types a,b,c] [--limit <n>] [--format pretty|json|ndjson]\n' +
@@ -72,9 +105,10 @@ function printUsage() {
 			'                       Default: search the root dir (or cwd) for `flue.config.*`.\n' +
 			'                       CLI flags always override values set in the config file.\n' +
 			`  --port <number>      Port for the dev server. Default: ${DEFAULT_DEV_PORT}\n` +
-			'  --env <path>         Load Node env vars from a .env-format file. Repeatable; later files override earlier on key collision.\n' +
+			'  --env <path>         Select one alternate .env-format file for build/dev/run/connect before config loads.\n' +
+			'                       Without --env, these commands load <project>/.env when present. Shell values win.\n' +
 			'  --session <name>     (flue connect) Session name used for agent prompts. Default: default.\n' +
-			'                       Cloudflare dev uses the official .dev.vars/.env and CLOUDFLARE_ENV conventions instead.\n' +
+			'                       Cloudflare runtime bindings still use official .dev.vars/.env and CLOUDFLARE_ENV conventions.\n' +
 			'  --category <name>    (flue add) Fetch the generic instructions for a connector category. Pair with a positional URL/path that\n' +
 			'                       points the agent at the provider\'s docs (e.g. `flue add https://e2b.dev --category sandbox`).\n' +
 			'  --print              (flue add) Print the raw connector markdown to stdout regardless of whether the caller is an agent.\n' +
@@ -83,9 +117,9 @@ function printUsage() {
 			'Examples:\n' +
 			'  flue dev --target node\n' +
 			'  flue dev --target cloudflare --port 8787\n' +
-			'  flue dev --target node --env .env\n' +
+			'  flue dev --target node\n' +
 			'  flue run hello --target node\n' +
-			'  flue run hello --target node --payload \'{"name": "World"}\' --env .env\n' +
+			'  flue run hello --target node --payload \'{"name": "World"}\' --env .env.staging\n' +
 			'  flue connect assistant thread-1 --target node\n' +
 			'  flue build --target node\n' +
 			'  flue build --target cloudflare --root ./my-app\n' +
@@ -115,8 +149,8 @@ interface RunArgs {
 	explicitOutput: string | undefined;
 	/** Explicit --config value, or undefined to auto-discover. */
 	configFile: string | undefined;
-	/** Resolved absolute paths from --env flags (repeatable). */
-	envFiles: string[];
+	/** Explicit --env file, or undefined to use the default project .env. */
+	envFile: string | undefined;
 }
 
 interface ConnectArgs {
@@ -127,7 +161,7 @@ interface ConnectArgs {
 	explicitRoot: string | undefined;
 	explicitOutput: string | undefined;
 	configFile: string | undefined;
-	envFiles: string[];
+	envFile: string | undefined;
 	session: string | undefined;
 }
 
@@ -141,6 +175,7 @@ interface BuildArgs {
 	explicitOutput: string | undefined;
 	/** Explicit --config value, or undefined to auto-discover. */
 	configFile: string | undefined;
+	envFile: string | undefined;
 }
 
 interface DevArgs {
@@ -155,8 +190,8 @@ interface DevArgs {
 	configFile: string | undefined;
 	/** 0 = use the library default (DEFAULT_DEV_PORT). */
 	port: number;
-	/** Raw --env values, in order; resolved/validated by the dev library. */
-	envFiles: string[];
+	/** Explicit --env file, or undefined to use the default project .env. */
+	envFile: string | undefined;
 }
 
 interface AddArgs {
@@ -205,7 +240,7 @@ function parseFlags(flags: string[]): {
 	configFile: string | undefined;
 	payload: string;
 	port: number;
-	envFiles: string[];
+	envFile: string | undefined;
 	session: string | undefined;
 } {
 	let target: 'node' | 'cloudflare' | undefined;
@@ -215,7 +250,7 @@ function parseFlags(flags: string[]): {
 	let payload = '{}';
 	let port = 0;
 	let session: string | undefined;
-	const envFiles: string[] = [];
+	let envFile: string | undefined;
 
 	for (let i = 0; i < flags.length; i++) {
 		const arg = flags[i];
@@ -267,7 +302,11 @@ function parseFlags(flags: string[]): {
 				console.error('Missing value for --env');
 				process.exit(1);
 			}
-			envFiles.push(value);
+			if (envFile !== undefined) {
+				console.error('`--env` accepts one file. Combine values into one file or provide shell overrides.');
+				process.exit(1);
+			}
+			envFile = value;
 		} else if (arg === '--session') {
 			session = flags[++i];
 			if (!session || session.trim() === '') {
@@ -290,7 +329,7 @@ function parseFlags(flags: string[]): {
 		configFile,
 		payload,
 		port,
-		envFiles,
+		envFile,
 		session,
 	};
 }
@@ -539,6 +578,7 @@ function parseArgs(argv: string[]): ParsedArgs {
 			explicitRoot: flags.explicitRoot,
 			explicitOutput: flags.explicitOutput,
 			configFile: flags.configFile,
+			envFile: flags.envFile,
 		};
 	}
 
@@ -555,7 +595,7 @@ function parseArgs(argv: string[]): ParsedArgs {
 			explicitOutput: flags.explicitOutput,
 			configFile: flags.configFile,
 			port: flags.port,
-			envFiles: flags.envFiles,
+			envFile: flags.envFile,
 		};
 	}
 
@@ -585,7 +625,7 @@ function parseArgs(argv: string[]): ParsedArgs {
 			explicitRoot: flags.explicitRoot,
 			explicitOutput: flags.explicitOutput,
 			configFile: flags.configFile,
-			envFiles: flags.envFiles,
+			envFile: flags.envFile,
 			session: flags.session,
 		};
 	}
@@ -630,7 +670,7 @@ function parseArgs(argv: string[]): ParsedArgs {
 			explicitRoot: flags.explicitRoot,
 			explicitOutput: flags.explicitOutput,
 			configFile: flags.configFile,
-			envFiles: flags.envFiles,
+			envFile: flags.envFile,
 		};
 	}
 
@@ -822,14 +862,12 @@ function startLocalProcess(
 	target: 'workflow' | 'agent',
 	name: string,
 	id: string | undefined,
-	env: Record<string, string>,
 	cwd: string,
 ): ChildProcess {
 	const child = spawn('node', [serverPath], {
 		stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
 		cwd,
 		env: {
-			...env,
 			...process.env,
 			FLUE_MODE: 'local',
 			FLUE_CLI_TARGET: target,
@@ -939,12 +977,7 @@ function sendLocalRequest(child: ChildProcess, message: Record<string, unknown>,
 // ─── Main ───────────────────────────────────────────────────────────────────
 
 async function buildCommand(args: BuildArgs) {
-	const cfg = await resolveCliConfig({
-		target: args.target,
-		explicitRoot: args.explicitRoot,
-		explicitOutput: args.explicitOutput,
-		configFile: args.configFile,
-	});
+	const { cfg } = await resolveApplicationCommand(args);
 	try {
 		await build({
 			root: cfg.root,
@@ -959,12 +992,7 @@ async function buildCommand(args: BuildArgs) {
 }
 
 async function devCommand(args: DevArgs) {
-	const cfg = await resolveCliConfig({
-		target: args.target,
-		explicitRoot: args.explicitRoot,
-		explicitOutput: args.explicitOutput,
-		configFile: args.configFile,
-	});
+	const { cfg, envLoader } = await resolveApplicationCommand(args);
 	try {
 		// dev() blocks until SIGINT/SIGTERM exits the process. We don't expect
 		// it to return; if it ever does, just exit cleanly.
@@ -974,7 +1002,8 @@ async function devCommand(args: DevArgs) {
 			output: cfg.output,
 			target: cfg.target,
 			port: args.port || undefined,
-			envFiles: args.envFiles,
+			envFile: envLoader.file,
+			envLoader,
 		});
 	} catch (err) {
 		console.error(`[flue] Dev server failed:`, err instanceof Error ? err.message : String(err));
@@ -982,37 +1011,23 @@ async function devCommand(args: DevArgs) {
 	}
 }
 
-async function buildLocalTarget(args: Pick<RunArgs | ConnectArgs, 'target' | 'explicitRoot' | 'explicitOutput' | 'configFile' | 'envFiles'>) {
-	const cfg = await resolveCliConfig({
-		target: args.target,
-		explicitRoot: args.explicitRoot,
-		explicitOutput: args.explicitOutput,
-		configFile: args.configFile,
-	});
-	if (cfg.target === 'cloudflare') return { cfg, fileEnv: undefined, serverPath: undefined };
-	let resolvedEnvFiles: string[];
-	try {
-		resolvedEnvFiles = resolveEnvFiles(args.envFiles, cfg.root);
-	} catch (err) {
-		console.error(err instanceof Error ? err.message : String(err));
-		process.exit(1);
-	}
-	for (const file of resolvedEnvFiles) console.error(`[flue] Loading env from: ${file}`);
-	const fileEnv = parseEnvFiles(resolvedEnvFiles);
+async function buildLocalTarget(args: Pick<RunArgs | ConnectArgs, 'target' | 'explicitRoot' | 'explicitOutput' | 'configFile' | 'envFile'>) {
+	const { cfg } = await resolveApplicationCommand(args);
+	if (cfg.target === 'cloudflare') return { cfg, serverPath: undefined };
 	try {
 		await build({ root: cfg.root, sourceRoot: cfg.sourceRoot, output: cfg.output, target: cfg.target });
 	} catch (err) {
 		console.error(`[flue] Build failed:`, err instanceof Error ? err.message : String(err));
 		process.exit(1);
 	}
-	return { cfg, fileEnv, serverPath: path.join(cfg.output, 'server.mjs') };
+	return { cfg, serverPath: path.join(cfg.output, 'server.mjs') };
 }
 
 async function run(args: RunArgs) {
 	const built = await buildLocalTarget(args);
 	if (built.cfg.target === 'cloudflare') printCloudflareRunUnsupported(args.workflow, args.payload);
-	if (!built.serverPath || !built.fileEnv) throw new Error('[flue] Node local workflow build did not produce an executable artifact.');
-	const child = startLocalProcess(built.serverPath, 'workflow', args.workflow, undefined, built.fileEnv, built.cfg.root);
+	if (!built.serverPath) throw new Error('[flue] Node local workflow build did not produce an executable artifact.');
+	const child = startLocalProcess(built.serverPath, 'workflow', args.workflow, undefined, built.cfg.root);
 	console.error(`[flue] Running workflow: ${args.workflow}`);
 	try {
 		await waitForLocalReady(child, (message) => message.target === 'workflow' && message.name === args.workflow);
@@ -1034,8 +1049,8 @@ async function run(args: RunArgs) {
 async function connectCommand(args: ConnectArgs) {
 	const built = await buildLocalTarget(args);
 	if (built.cfg.target === 'cloudflare') printCloudflareConnectUnsupported();
-	if (!built.serverPath || !built.fileEnv) throw new Error('[flue] Node local agent build did not produce an executable artifact.');
-	const child = startLocalProcess(built.serverPath, 'agent', args.agent, args.instanceId, built.fileEnv, built.cfg.root);
+	if (!built.serverPath) throw new Error('[flue] Node local agent build did not produce an executable artifact.');
+	const child = startLocalProcess(built.serverPath, 'agent', args.agent, args.instanceId, built.cfg.root);
 	try {
 		await waitForLocalReady(child, (message) => message.target === 'agent' && message.name === args.agent && message.instanceId === args.instanceId);
 	} catch (err) {

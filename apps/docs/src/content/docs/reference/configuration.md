@@ -85,7 +85,7 @@ The target tells Flue which server artifact and local development integration to
 
 | Target | Choose it when you need… | Development and command implications |
 | --- | --- | --- |
-| `node` | A generated Node.js server for a Node host, container, or local process. | `flue dev`, `flue build`, `flue run`, and `flue connect` can build Node output. Node local commands can load explicit `--env` files. |
+| `node` | A generated Node.js server for a Node host, container, or local process. | `flue dev`, `flue build`, `flue run`, and `flue connect` can build Node output. Application-evaluating CLI commands load `.env` or one explicitly selected env file before configuration. |
 | `cloudflare` | A Workers-compatible application integrated with Cloudflare/Wrangler configuration. | `flue dev` uses the Cloudflare Vite/Workers development environment and `flue build` produces Cloudflare deployment output. `flue run` and `flue connect` do not support this target. |
 
 Set the project's normal target once:
@@ -232,47 +232,46 @@ This is useful for intentional build variants, but prefer one ordinary `flue.con
 
 For complete option syntax, use the [CLI reference](/docs/cli/overview/).
 
-## Load local environment files for Node.js
+## Load environment files for Flue commands
 
-For Node local development and local invocation commands, pass one or more `.env`-format files with `--env`:
-
-```bash
-flue dev --target node --env .env.local
-flue run summarize --target node --env .env --env .env.local \
-  --payload '{"text":"Summarize this."}'
-flue connect assistant customer-123 --target node --env .env.local
-```
-
-`--env` is supported for Node `flue dev`, `flue run`, and `flue connect`. These commands load values into the spawned local Node server process, where authored application/runtime code can read them. `flue build` is not an environment-file loading workflow: a generated Node server receives its production environment when you start or deploy it.
-
-Environment file paths may be absolute or relative. Relative `--env` paths for these Node commands resolve from the configured project `root`, so placing local files beside project sources makes invocations consistent even when you start them from a workspace directory.
-
-When values overlap, precedence is:
-
-| Priority | Source | Example |
-| --- | --- | --- |
-| Highest | Existing process environment from the shell or process launching `flue` | `OPENAI_API_KEY=... flue dev --target node --env .env` |
-| Middle | Later repeated `--env` files | `--env .env --env .env.local` gives `.env.local` the later-file value. |
-| Lowest | Earlier repeated `--env` files | Shared local defaults in `.env`. |
-
-For example:
+`flue build`, `flue dev`, `flue run`, and `flue connect` load a project-root `.env` file when it exists. Loading happens before `flue.config.*` is imported, so configuration and build-time application evaluation can use environment values:
 
 ```dotenv title=".env"
-MODEL_REGION=us-east
-API_BASE_URL=https://development.example.invalid
+ANTHROPIC_API_KEY=your-local-key
+FLUE_OUTPUT=dist-local
 ```
 
-```dotenv title=".env.local"
-MODEL_REGION=us-west
+```ts title="flue.config.ts"
+import { defineConfig } from '@flue/cli/config';
+
+export default defineConfig({
+  target: 'node',
+  output: process.env.FLUE_OUTPUT,
+});
 ```
 
 ```bash
-API_BASE_URL=https://override.example.invalid flue dev --target node --env .env --env .env.local
+flue dev
+flue build
 ```
 
-The local Node process receives `MODEL_REGION=us-west` from the later file and `API_BASE_URL=https://override.example.invalid` from the shell. During `flue dev`, edits to explicitly loaded env files cause the Node server to reload and reread their values.
+Use `--env <path>` to select one alternate file instead of the default `.env`:
 
-Do not commit files containing provider credentials. Environment loading makes values available to your runtime application, but it does not automatically expose every variable to every sandboxed tool; any sandbox-specific environment exposure remains part of authored agent/runtime setup.
+```bash
+flue build --env .env.staging
+flue run summarize --env .env.local \
+  --payload '{"text":"Summarize this."}'
+```
+
+Before configuration is loaded, Flue finds the environment-file directory using the same starting point as configuration discovery: the directory of an explicit `--config`, otherwise explicit `--root`, otherwise the current directory. If configuration later sets `root` to another directory, that does not change which `.env` file was selected.
+
+Existing process environment values from the shell or process launching `flue` override values from the selected env file.
+
+For Node `dev`, `run`, and `connect`, loaded values are available to the local runtime process. During Node `flue dev`, creating, editing, deleting, or recreating the default `.env` reloads runtime environment values; a selected `--env` file follows the same current-file behavior after its path is validated at startup. Restart the command when an env value changes build configuration such as `target`, `root`, or `output`.
+
+`flue build` can use loaded environment values while evaluating configuration and producing output. It does not add environment-file loading to the emitted artifact: a deployed Node server receives its runtime environment when it is started, and a deployed Worker receives secrets and bindings from Cloudflare.
+
+Do not commit files containing provider credentials. Environment loading makes values available to application code, but it does not automatically expose every variable to sandboxed tools; sandbox-specific exposure remains part of authored agent/runtime setup.
 
 ## Use Cloudflare local variables and Wrangler configuration
 
@@ -306,7 +305,7 @@ These files do different jobs:
 | `wrangler.jsonc`, `wrangler.json`, or `wrangler.toml` at the project root | Cloudflare application metadata, bindings, named environments, compatibility settings, containers, and other Wrangler-owned platform configuration. |
 | Authored `app.ts`, agent, and workflow modules | Runtime provider registration, model selection, middleware, route composition, and use of platform bindings. |
 
-For Cloudflare local development, do **not** pass `--env` to `flue dev`. Cloudflare development uses the official Vite/Workers conventions: put local values in `.dev.vars` or `.env` beside the project-root Wrangler configuration, and use `CLOUDFLARE_ENV=<name>` with environment-specific local variable files such as `.dev.vars.<name>` or `.env.<name>` when selecting a Wrangler environment.
+For Cloudflare local development, runtime Worker variables use the official Vite/Workers conventions: put local values in `.dev.vars` or `.env` beside the project-root Wrangler configuration, and use `CLOUDFLARE_ENV=<name>` with environment-specific local variable files such as `.dev.vars.<name>` or `.env.<name>` when selecting a Wrangler environment. A Flue `--env` selection can affect CLI configuration and build evaluation, but does not turn an arbitrary file into Worker runtime bindings.
 
 ```bash
 flue dev --target cloudflare
@@ -326,7 +325,7 @@ The merge boundary is designed so that you maintain platform configuration while
 | Flue durable resources | Flue adds required Durable Object bindings and SQLite migration entries for discovered agents, workflows, and its registry. Named Wrangler environments are retained and receive required generated resources. |
 | Custom Durable Objects, containers, and migration maintenance | Configure application-owned resources in your Wrangler file. Do not make durable edits in `.flue-vite.wrangler.jsonc`, because it is generated build input. |
 
-The Cloudflare build merge is only enough context to configure local development correctly. Continue to [Develop & Build](/docs/guide/deployment/) for the CLI lifecycle and deployment handoff, then use [Deploy on Cloudflare](/docs/ecosystem/deploy/cloudflare/) or [Deploy on Node.js](/docs/ecosystem/deploy/node/) for target-specific setup.
+The Cloudflare build merge is only enough context to configure local development correctly. Continue to [Develop & Build](/docs/guide/develop-and-build/) for the CLI lifecycle and deployment handoff, then use [Deploy on Cloudflare](/docs/ecosystem/deploy/cloudflare/) or [Deploy on Node.js](/docs/ecosystem/deploy/node/) for target-specific setup.
 
 ## Keep runtime application setup in authored modules
 
@@ -355,8 +354,8 @@ export default defineConfig({
 ```
 
 ```bash
-flue dev --env .env.local
-flue run nightly-report --env .env.local --payload '{"day":"2026-05-26"}'
+flue dev
+flue run nightly-report --payload '{"day":"2026-05-26"}'
 flue build
 ```
 
@@ -397,8 +396,8 @@ export default defineConfig({
 ```
 
 ```bash
-flue dev --env .env.local
-flue build --output ./artifacts/support-agent-preview
+flue dev --root ./apps/support-agent
+flue build --root ./apps/support-agent --output ./artifacts/support-agent-preview
 ```
 
-Here `--env .env.local` is resolved from `apps/support-agent`, because environment files for Node local commands are project-root relative. The one-time `--output` value is resolved from the directory in which the CLI command is invoked, because it is a CLI override.
+With `--root ./apps/support-agent`, automatic `.env` discovery starts in that directory before configuration loads. The one-time `--output` value is resolved from the directory in which the CLI command is invoked, because it is a CLI override.

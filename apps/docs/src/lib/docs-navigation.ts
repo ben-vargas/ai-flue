@@ -47,7 +47,7 @@ export const docsSections: DocsSection[] = [
 					{ title: 'Subagents', slug: 'guide/subagents' },
 					{ title: 'Sandboxes', slug: 'guide/sandboxes' },
 					{ title: 'Routing', slug: 'guide/routing' },
-					{ title: 'Develop & Build', slug: 'guide/deployment' },
+					{ title: 'Develop & Build', slug: 'guide/develop-and-build' },
 					{ title: 'Chat', slug: 'guide/chat' },
 					{ title: 'Observability', slug: 'guide/observability' },
 				],

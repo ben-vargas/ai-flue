@@ -7,7 +7,7 @@ Build and deploy Flue agents as a Node.js server. This guide walks you through c
 
 By the end, you will have a Flue agent running as a Node.js server, and you will know how to add subagents, sandbox context, external CLIs, remote sandboxes, and durable session storage when your agent needs them.
 
-This guide focuses on deploying the generated Node server. First review [Develop & Build](/docs/guide/deployment/) for the CLI lifecycle and build output, then see [Routing](/docs/guide/routing/) for direct HTTP/WebSocket agent delivery, workflow endpoints, and asynchronous `dispatch(...)` from application-owned routes.
+This guide focuses on deploying the generated Node server. First review [Develop & Build](/docs/guide/develop-and-build/) for the CLI lifecycle and build output, then see [Routing](/docs/guide/routing/) for direct HTTP/WebSocket agent delivery, workflow endpoints, and asynchronous `dispatch(...)` from application-owned routes.
 
 ## Project layout
 
@@ -83,10 +83,10 @@ Use the env var name your provider expects — `OPENAI_API_KEY` for OpenAI, `ANT
 
 ### 4. Build and run
 
-For local development, `flue dev --target node --env .env` is the fastest path. It builds your project root, loads the env file, starts the server on port 3583, and watches for changes — edit an agent file, the server reloads automatically.
+For local development, `flue dev --target node` is the fastest path. It loads project-root `.env` before configuration, builds your project, starts the server on port 3583, and reloads local runtime environment values when `.env` is created, edited, deleted, or recreated.
 
 ```bash
-npx flue dev --target node --env .env
+npx flue dev --target node
 ```
 
 Test it:
@@ -101,7 +101,7 @@ The `?wait=result` mode keeps this request attached until the workflow completes
 
 Every workflow that exports `route` gets an HTTP endpoint automatically. The middleware may authenticate the request and call `next()` to admit it. The route follows the pattern `/workflows/<name>` — for example, `.flue/workflows/translate.ts` becomes `/workflows/translate`.
 
-For a one-shot production-style run (no watcher), use `flue build` + the generated server. The built server reads `process.env` directly, so source your env file in your shell or pass values explicitly:
+For a production-style server, build and then start the generated artifact. `flue build` loads `.env` for configuration and build-time evaluation, while the built server reads only the environment supplied when you start it:
 
 ```bash
 npx flue build --target node
@@ -109,7 +109,7 @@ set -a; source .env; set +a
 node dist/server.mjs
 ```
 
-`flue build --target node` compiles your project into a `./dist` directory. The built server uses [Hono](https://hono.dev/) under the hood and listens on port 3000 by default (configurable via the `PORT` environment variable). Your project's `node_modules` are still needed at runtime — the build externalizes your dependencies rather than bundling them.
+`flue build --target node` compiles your project into a `./dist` directory without packaging `.env` credentials into the server. The built server uses [Hono](https://hono.dev/) under the hood and listens on port 3000 by default (configurable via `PORT`). Your project's `node_modules` are still needed at runtime — the build externalizes your dependencies rather than bundling them.
 
 ### WebSocket endpoints
 
@@ -131,10 +131,10 @@ console.log(await job.invoke({ text: 'Hello', language: 'French' }));
 
 An exported `websocket` middleware can authenticate its own agent or workflow socket endpoint. Custom `.flue/app.ts` applications provide centralized authentication and mounted prefixes: for example, apply `app.use('/api/agents/*', authenticate)` and `app.use('/api/workflows/*', authenticate)` before `app.route('/api', flue())` to cover both socket surfaces. SDK clients can connect through that mount with `websocketBasePath: '/api'` and can attach query-token or signed handshake context with `websocketUrl: (url) => { url.searchParams.set('token', socketToken); return url; }`. HTTP `token` and `headers` options do not automatically apply to WebSocket upgrades; browsers should use cookies or application-designed URL authentication, while Node clients requiring implementation-specific headers can supply a custom `websocket` factory. Avoid header-mutating middleware such as CORS wrapping WebSocket upgrade routes, because WebSocket upgrade responses may have immutable headers.
 
-You can also invoke any workflow from the CLI without starting a server. `flue run` accepts the same `--env` flag:
+You can also invoke any workflow from the CLI without starting a server. `flue run` loads project-root `.env` automatically; pass `--env` only to select one alternate file:
 
 ```bash
-npx flue run translate --target node --env .env \
+npx flue run translate --target node \
   --payload '{"text": "Hello world", "language": "French"}'
 ```
 

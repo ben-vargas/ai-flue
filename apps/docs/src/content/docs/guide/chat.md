@@ -170,4 +170,4 @@ Provider events and asynchronous processing can also be retried. If posting a du
 - See [Agents](/docs/guide/building-agents/) for continuing agent instances and asynchronous `dispatch(...)` input.
 - See [Routing](/docs/guide/routing/) for composing webhook routes with Flue application routes.
 - See [Tools](/docs/guide/tools/) for controlling external side effects.
-- See [Develop & Build](/docs/guide/deployment/) for running the application and continuing to deployment.
+- See [Develop & Build](/docs/guide/develop-and-build/) for running the application and continuing to deployment.

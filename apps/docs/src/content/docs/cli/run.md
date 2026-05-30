@@ -6,7 +6,7 @@ description: Reference for executing one workflow invocation from the command li
 ## Synopsis
 
 ```bash
-flue run <workflow> [--target node] [--payload <json>] [--root <path>] [--output <path>] [--config <path>] [--env <path>]...
+flue run <workflow> [--target node] [--payload <json>] [--root <path>] [--output <path>] [--config <path>] [--env <path>]
 ```
 
 ## Description
@@ -21,7 +21,7 @@ A workflow invocation is a finite run with a run ID. Use it for local scripts an
 - `--root <path>` selects the project root.
 - `--output <path>` selects the build output directory.
 - `--config <path>` selects a Flue configuration file.
-- `--env <path>` loads Node environment variables; repeat for multiple files.
+- `--env <path>` selects one alternate environment file loaded before configuration; without it, project-root `.env` is loaded when present.
 - `--target node` selects the supported local execution target.
 
 ## Output and events
@@ -36,5 +36,5 @@ Local `flue run` supports Node builds. Cloudflare-target workflows must be exerc
 
 ```bash
 flue run hello --target node
-flue run summarize --target node --payload '{"text":"hello"}' --env .env
+flue run summarize --target node --payload '{"text":"hello"}' --env .env.staging
 ```

@@ -6,7 +6,7 @@ description: Reference for opening an interactive local agent-instance session f
 ## Synopsis
 
 ```bash
-flue connect <agent> <instance-id> [--target node] [--session <name>] [--root <path>] [--output <path>] [--config <path>] [--env <path>]...
+flue connect <agent> <instance-id> [--target node] [--session <name>] [--root <path>] [--output <path>] [--config <path>] [--env <path>]
 ```
 
 ## Description
@@ -21,7 +21,7 @@ The local connection uses private child-process communication. The agent does no
 - `--root <path>` selects the project root.
 - `--output <path>` selects the build output directory.
 - `--config <path>` selects a Flue configuration file.
-- `--env <path>` loads Node environment variables; repeat for multiple files.
+- `--env <path>` selects one alternate environment file loaded before configuration; without it, project-root `.env` is loaded when present.
 - `--target node` selects the supported local execution target.
 
 ## Target support
@@ -32,5 +32,5 @@ Local `flue connect` supports Node builds. Connecting to an existing deployed or
 
 ```bash
 flue connect assistant customer-123 --target node
-flue connect assistant customer-123 --session support --env .env
+flue connect assistant customer-123 --session support --env .env.staging
 ```
