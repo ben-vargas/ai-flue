@@ -52,7 +52,7 @@ Use `flue run` to execute a discovered workflow locally or from CI. The workflow
 pnpm exec flue run summarize --target node --payload '{"text":"Flue workflows complete finite agent-backed operations."}'
 ```
 
-`flue run` reports the run identity and events, and prints the successful workflow result as JSON. Local execution currently builds and runs the Node target.
+`flue run` reports the run identity and events, and prints the successful workflow result as JSON. Local execution currently builds and runs the Node target in a temporary child process. Its printed run ID is useful for correlating inline output, but the child does not publish run-inspection routes and its history disappears when the command exits.
 
 ### HTTP
 
@@ -165,7 +165,7 @@ Use structured results when later application code depends on specific fields, i
 
 ## Managing workflow runs
 
-A `runId` lets you inspect a workflow independently of the command, HTTP request, or WebSocket connection that started it. This is useful for background work, live progress, debugging, and operational tooling.
+When a workflow is invoked through a running application, its `runId` lets you inspect the run independently of the HTTP request or WebSocket connection that started it. This is useful for background work, live progress, debugging, and operational tooling.
 
 | Surface                                           | Use it for                                                              |
 | ------------------------------------------------- | ----------------------------------------------------------------------- |

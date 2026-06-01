@@ -6,7 +6,7 @@ sidebar:
 tableOfContents: false
 ---
 
-During local development, use `flue dev` for a watching server and `flue run` when you want one production-shaped workflow invocation.
+During local development, use `flue dev` for a watching server and `flue run` when you want one private one-shot workflow invocation.
 
 ## Development commands
 
