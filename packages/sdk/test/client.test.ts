@@ -31,6 +31,55 @@ describe('createFlueClient', () => {
 		expect(await seen[0]?.json()).toEqual({ message: 'Hello', session: 'chat' });
 	});
 
+	it('resolves public HTTP and SSE routes beneath the base URL pathname', async () => {
+		const requests: Request[] = [];
+		const client = createFlueClient({
+			baseUrl: 'https://flue.test/api/',
+			fetch: async (input, init) => {
+				const request = new Request(input, init);
+				requests.push(request);
+				if (request.url.endsWith('/stream')) {
+					return new Response(
+						sse('event: run_end\ndata: {"type":"run_end","isError":false,"durationMs":1}\n\n'),
+						{
+							headers: { 'content-type': 'text/event-stream' },
+						},
+					);
+				}
+				if (request.headers.get('accept') === 'text/event-stream') {
+					return new Response(sse('event: idle\ndata: {"type":"idle","instanceId":"inst-1"}\n\n'), {
+						headers: { 'content-type': 'text/event-stream' },
+					});
+				}
+				if (request.url.endsWith('/events')) return Response.json({ events: [] });
+				if (request.method === 'POST') return Response.json({ result: { ok: true } });
+				return Response.json({ runId: 'run-1' });
+			},
+		});
+
+		await client.agents.invoke('hello', 'inst-1', { mode: 'sync', payload: { message: 'Hello' } });
+		const agentEvents = [];
+		for await (const event of client.agents.invoke('hello', 'inst-1', {
+			mode: 'stream',
+			payload: { message: 'Hello' },
+		}))
+			agentEvents.push(event);
+		await client.runs.get('run-1');
+		await client.runs.events('run-1');
+		const runEvents = [];
+		for await (const event of client.runs.stream('run-1')) runEvents.push(event);
+
+		expect(agentEvents).toEqual([{ type: 'idle', instanceId: 'inst-1' }]);
+		expect(runEvents).toEqual([{ type: 'run_end', isError: false, durationMs: 1 }]);
+		expect(requests.map(({ url }) => new URL(url).pathname)).toEqual([
+			'/api/agents/hello/inst-1',
+			'/api/agents/hello/inst-1',
+			'/api/runs/run-1',
+			'/api/runs/run-1/events',
+			'/api/runs/run-1/stream',
+		]);
+	});
+
 	it('exposes structured HTTP API errors', async () => {
 		const body = {
 			error: {
@@ -217,10 +266,10 @@ describe('createFlueClient', () => {
 		).rejects.toThrow('agent failed');
 	});
 
-	it('builds admin list queries', async () => {
+	it('builds origin-relative admin list queries independently from the public mount', async () => {
 		let url = '';
 		const client = createFlueClient({
-			baseUrl: 'https://flue.test',
+			baseUrl: 'https://flue.test/api/',
 			fetch: async (input) => {
 				url = new Request(input).url;
 				return Response.json({ items: [] });
@@ -238,7 +287,7 @@ describe('createFlueClient', () => {
 	it('supports admin mounted below a custom path', async () => {
 		let url = '';
 		const client = createFlueClient({
-			baseUrl: 'https://flue.test',
+			baseUrl: 'https://flue.test/api/',
 			adminBasePath: '/internal/admin/',
 			fetch: async (input) => {
 				url = new Request(input).url;

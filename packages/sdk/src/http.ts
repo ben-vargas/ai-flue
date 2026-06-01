@@ -4,7 +4,7 @@ export type RequestHeaders =
 	| (() => Record<string, string> | Promise<Record<string, string>>);
 
 export interface HttpClientOptions {
-	/** Origin serving deployed Flue application routes. HTTP routes resolve from its root path. */
+	/** URL where the public `flue()` sub-app is mounted, including any pathname. */
 	baseUrl: string;
 	/** Custom HTTP implementation. Defaults to the global `fetch`. */
 	fetch?: typeof fetch;
@@ -62,7 +62,7 @@ export class HttpClient {
 	}
 
 	url(path: string, query?: Record<string, string | number | boolean | undefined>): string {
-		const url = new URL(path, `${this.baseUrl}/`);
+		const url = new URL(path.replace(/^\/+/, ''), `${this.baseUrl}/`);
 		for (const [key, value] of Object.entries(query ?? {})) {
 			if (value !== undefined) url.searchParams.set(key, String(value));
 		}

@@ -21,14 +21,13 @@ The live client verifies that unauthenticated agent and workflow upgrades are re
 
 ## Agent connection
 
-The `chat` agent uses Workers AI for real prompts. Because this fixture uses a custom `/api` mount and a test query-token middleware, configure the SDK socket route and handshake URL explicitly:
+The `chat` agent uses Workers AI for real prompts. Because this fixture uses a custom `/api` mount and a test query-token middleware, configure the SDK public mount URL and handshake URL explicitly:
 
 ```ts
 import { createFlueClient } from '@flue/sdk';
 
 const client = createFlueClient({
-  baseUrl: 'http://localhost:3584',
-  websocketBasePath: '/api',
+  baseUrl: 'http://localhost:3584/api',
   websocketUrl: (url) => {
     url.searchParams.set('token', 'live-test');
     return url;

@@ -5,8 +5,7 @@ const httpBaseUrl = process.env.FLUE_WS_BASE_URL ?? 'http://localhost:3584';
 const baseUrl = new URL(httpBaseUrl);
 baseUrl.protocol = baseUrl.protocol === 'https:' ? 'wss:' : 'ws:';
 const client = createFlueClient({
-	baseUrl: httpBaseUrl,
-	websocketBasePath: '/api',
+	baseUrl: new URL('/api', httpBaseUrl).toString(),
 	websocketUrl: (url) => {
 		url.searchParams.set('token', 'live-test');
 		return url;

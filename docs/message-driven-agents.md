@@ -224,6 +224,6 @@ The case/session model is application logic. For example, a moderation agent may
 
 - There is no universal reply/thread abstraction yet.
 - Provider retries may produce duplicate events; preserve provider ids in your input if idempotency matters.
-- WebSocket clients should use the published SDK/protocol surface. Configure SDK `websocketBasePath` for custom-mounted socket routes and `websocketUrl` for URL-carried or signed handshake authentication.
+- WebSocket clients should use the published SDK/protocol surface. Include any custom public mount pathname in SDK `baseUrl` and use `websocketUrl` for URL-carried or signed handshake authentication.
 - HTTP SDK `token` and `headers` options do not automatically authenticate WebSocket upgrades; browser clients should use cookies or application-designed URL authentication.
 - Exported `websocket` middleware can authenticate individual agent/workflow socket routes; use a custom `app.ts` when you need centralized authentication or a mounted prefix. Avoid middleware that mutates WebSocket upgrade response headers.

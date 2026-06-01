@@ -69,23 +69,22 @@ Creates a client for the public and read-only admin routes of a deployed Flue ap
 
 ```ts
 const client = createFlueClient({
-  baseUrl: 'https://example.com',
+  baseUrl: 'https://example.com/api',
   token: process.env.FLUE_TOKEN,
 });
 ```
 
 ### `CreateFlueClientOptions`
 
-| Field               | Type                    | Default                        | Description                                                                                                |
-| ------------------- | ----------------------- | ------------------------------ | ---------------------------------------------------------------------------------------------------------- |
-| `baseUrl`           | `string`                | —                              | Origin serving deployed Flue application routes. HTTP routes resolve from its root path.                   |
-| `fetch`             | `typeof fetch`          | global `fetch`                 | Custom HTTP implementation.                                                                                |
-| `headers`           | `RequestHeaders`        | —                              | Headers merged into each HTTP request.                                                                     |
-| `token`             | `string`                | —                              | Bearer token added to HTTP requests.                                                                       |
-| `adminBasePath`     | `string`                | `'/admin'`                     | Mount path for read-only admin routes.                                                                     |
-| `websocket`         | `WebSocketFactory`      | global `WebSocket` constructor | Custom WebSocket implementation.                                                                           |
-| `websocketBasePath` | `string`                | —                              | Optional mount path prepended to agent and workflow WebSocket routes.                                      |
-| `websocketUrl`      | `WebSocketUrlTransform` | —                              | Transforms each WebSocket URL after HTTP protocol conversion, for example to add handshake authentication. |
+| Field           | Type                    | Default                        | Description                                                                                                |
+| --------------- | ----------------------- | ------------------------------ | ---------------------------------------------------------------------------------------------------------- |
+| `baseUrl`       | `string`                | —                              | URL where the public `flue()` sub-app is mounted, including any pathname.                                  |
+| `fetch`         | `typeof fetch`          | global `fetch`                 | Custom HTTP implementation.                                                                                |
+| `headers`       | `RequestHeaders`        | —                              | Headers merged into each HTTP request.                                                                     |
+| `token`         | `string`                | —                              | Bearer token added to HTTP requests.                                                                       |
+| `adminBasePath` | `string`                | `'/admin'`                     | Origin-relative mount path for read-only admin routes.                                                     |
+| `websocket`     | `WebSocketFactory`      | global `WebSocket` constructor | Custom WebSocket implementation.                                                                           |
+| `websocketUrl`  | `WebSocketUrlTransform` | —                              | Transforms each WebSocket URL after HTTP protocol conversion, for example to add handshake authentication. |
 
 ### `RequestHeaders`
 
@@ -248,7 +247,7 @@ Streams workflow-run events over server-sent events until `run_end`, cancellatio
 
 ## Admin
 
-Admin APIs use the read-only mount path configured with `adminBasePath`. This option only tells the SDK where an already-mounted `admin()` sub-app lives. The application must [mount `admin()` explicitly and protect that mount with application-owned authorization](/docs/api/routing-api/#admin).
+Admin APIs use the origin-relative read-only mount path configured with `adminBasePath`, independently from the public `baseUrl` pathname. This option only tells the SDK where an already-mounted `admin()` sub-app lives. The application must [mount `admin()` explicitly and protect that mount with application-owned authorization](/docs/api/routing-api/#admin).
 
 ### `client.admin.agents.list()`
 
@@ -281,7 +280,7 @@ Retrieves one workflow-run record from the admin mount path.
 
 ## WebSocket configuration
 
-HTTP URLs are converted to `ws:` or `wss:` URLs before applying `websocketUrl`.
+Agent and workflow socket URLs inherit the public mount pathname from `baseUrl`. HTTP URLs are converted to `ws:` or `wss:` URLs before applying `websocketUrl`.
 
 `token` and `headers` apply only to HTTP requests. Browser socket authentication should use cookies or an application-designed URL transformation through `websocketUrl`. Node consumers that need implementation-specific handshake headers can supply a custom `websocket` factory.
 

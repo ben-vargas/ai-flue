@@ -62,10 +62,9 @@ describe('WebSocket clients', () => {
 	it('builds custom-mounted socket URLs and transforms authenticated handshakes for both targets', () => {
 		const targets: unknown[] = [];
 		const { client, sockets } = socketClient({
-			baseUrl: 'https://flue.test/http-prefix/',
+			baseUrl: 'https://flue.test/api/',
 			token: 'http-only-token',
 			headers: { authorization: 'Bearer http-only-header' },
-			websocketBasePath: 'api/',
 			websocketUrl: (url, target) => {
 				targets.push(target);
 				url.searchParams.set('token', 'socket-token');
@@ -90,7 +89,7 @@ describe('WebSocket clients', () => {
 		const { client, sockets } = socketClient();
 		const agent = client.agents.connect('assistant bot', 'customer/123');
 		const connection = sockets[0];
-		expect(connection?.url).toBe('wss://flue.test/agents/assistant%20bot/customer%2F123');
+		expect(connection?.url).toBe('wss://flue.test/api/agents/assistant%20bot/customer%2F123');
 		connection?.socket.message({
 			version: 1,
 			type: 'ready',
@@ -303,7 +302,7 @@ describe('WebSocket clients', () => {
 		const { client, sockets } = socketClient();
 		const workflow = client.workflows.connect('triage');
 		const connection = sockets[0];
-		expect(connection?.url).toBe('wss://flue.test/workflows/triage');
+		expect(connection?.url).toBe('wss://flue.test/api/workflows/triage');
 		connection?.socket.message({ version: 1, type: 'ready', target: 'workflow', name: 'triage' });
 		const events: unknown[] = [];
 		workflow.onEvent((event, context) => events.push({ event, context }));

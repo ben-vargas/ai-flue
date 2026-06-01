@@ -27,12 +27,10 @@ export type { RequestHeaders };
 
 /** Options for creating a client for deployed Flue application routes. */
 export interface CreateFlueClientOptions extends HttpClientOptions {
-	/** Mount path for read-only admin routes. Defaults to `/admin`. */
+	/** Origin-relative mount path for read-only admin routes. Defaults to `/admin`. */
 	adminBasePath?: string;
 	/** Custom WebSocket implementation. Defaults to the global `WebSocket` constructor. */
 	websocket?: WebSocketFactory;
-	/** Optional mount path prepended to agent and workflow WebSocket routes. */
-	websocketBasePath?: string;
 	/** Transforms each WebSocket URL after HTTP protocol conversion, for example to add handshake authentication. */
 	websocketUrl?: WebSocketUrlTransform;
 }
@@ -102,9 +100,12 @@ interface ListRunsOptions extends ListOptions {
 export function createFlueClient(options: CreateFlueClientOptions): FlueClient {
 	const http = new HttpClient(options);
 	const websocket = options.websocket ?? defaultWebSocketFactory;
-	const websocketBasePath = normalizeBasePath(options.websocketBasePath ?? '');
-	const websocketEndpoint = createWebSocketEndpoint(http, websocketBasePath, options.websocketUrl);
+	const websocketEndpoint = createWebSocketEndpoint(http, options.websocketUrl);
 	const adminBasePath = normalizeBasePath(options.adminBasePath ?? '/admin');
+	const adminHttp = new HttpClient({
+		...options,
+		baseUrl: new URL(`${adminBasePath}/`, http.baseUrl).toString(),
+	});
 	return {
 		runs: {
 			get: (runId) => http.json({ path: `/runs/${encodeURIComponent(runId)}` }),
@@ -140,11 +141,11 @@ export function createFlueClient(options: CreateFlueClientOptions): FlueClient {
 		},
 		admin: {
 			agents: {
-				list: () => http.json({ path: `${adminBasePath}/agents` }),
+				list: () => adminHttp.json({ path: '/agents' }),
 			},
 			runs: {
-				list: (opts = {}) => http.json({ path: `${adminBasePath}/runs`, query: runsQuery(opts) }),
-				get: (runId) => http.json({ path: `${adminBasePath}/runs/${encodeURIComponent(runId)}` }),
+				list: (opts = {}) => adminHttp.json({ path: '/runs', query: runsQuery(opts) }),
+				get: (runId) => adminHttp.json({ path: `/runs/${encodeURIComponent(runId)}` }),
 			},
 		},
 	};
@@ -156,13 +157,9 @@ function normalizeBasePath(path: string): string {
 	return `/${trimmed.replace(/^\/+|\/+$/g, '')}`;
 }
 
-function createWebSocketEndpoint(
-	http: HttpClient,
-	basePath: string,
-	transform: WebSocketUrlTransform | undefined,
-) {
+function createWebSocketEndpoint(http: HttpClient, transform: WebSocketUrlTransform | undefined) {
 	return (path: string, target: WebSocketTarget): string => {
-		const url = new URL(webSocketUrl(http.url(`${basePath}${path}`)));
+		const url = new URL(webSocketUrl(http.url(path)));
 		return String(transform?.(url, target) ?? url);
 	};
 }
