@@ -1,8 +1,8 @@
 import {
+	type FauxProviderRegistration,
 	fauxAssistantMessage,
 	fauxToolCall,
 	registerFauxProvider,
-	type FauxProviderRegistration,
 } from '@earendil-works/pi-ai';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createAgent } from '../src/index.ts';

@@ -656,7 +656,9 @@ async function openTestSocket(
 			transport.close(),
 			closeServer(server),
 		]);
-		const errors = results.flatMap((result) => (result.status === 'rejected' ? [result.reason] : []));
+		const errors = results.flatMap((result) =>
+			result.status === 'rejected' ? [result.reason] : [],
+		);
 		if (errors.length > 0) throw new AggregateError(errors, 'Failed to clean up test socket.');
 	});
 

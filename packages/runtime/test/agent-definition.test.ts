@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createAgent, defineAgentProfile, defineTool } from '../src/index.ts';
-import { createFlueContext, InMemorySessionStore } from '../src/internal.ts';
 import type { FlueContextConfig } from '../src/internal.ts';
+import { createFlueContext, InMemorySessionStore } from '../src/internal.ts';
 import type { AgentProfile, ToolDefinition } from '../src/types.ts';
 import { createNoopSessionEnv } from './fixtures/session-env.ts';
 

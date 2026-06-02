@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { observe } from '../src/index.ts';
+import type { FlueRuntime } from '../src/internal.ts';
 import {
 	configureFlueRuntime,
 	createFlueContext,
@@ -10,7 +11,6 @@ import {
 	InMemorySessionStore,
 	resetFlueRuntimeForTests,
 } from '../src/internal.ts';
-import type { FlueRuntime } from '../src/internal.ts';
 import { flue } from '../src/routing.ts';
 
 afterEach(() => {

@@ -1,7 +1,7 @@
 import {
+	type FauxProviderRegistration,
 	fauxAssistantMessage,
 	registerFauxProvider,
-	type FauxProviderRegistration,
 } from '@earendil-works/pi-ai';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createAgent } from '../src/index.ts';
@@ -17,7 +17,9 @@ afterEach(() => {
 
 describe('session.compact()', () => {
 	it('completes without changes when a session has nothing to compact', async () => {
-		const provider = registerFauxProvider({ provider: `session-compaction-${crypto.randomUUID()}` });
+		const provider = registerFauxProvider({
+			provider: `session-compaction-${crypto.randomUUID()}`,
+		});
 		providers.push(provider);
 		const events: FlueEvent[] = [];
 		const model = provider.getModel();
@@ -49,7 +51,9 @@ describe('session.compact()', () => {
 	});
 
 	it('emits manual compaction events when explicit compaction summarizes history', async () => {
-		const provider = registerFauxProvider({ provider: `session-compaction-${crypto.randomUUID()}` });
+		const provider = registerFauxProvider({
+			provider: `session-compaction-${crypto.randomUUID()}`,
+		});
 		providers.push(provider);
 		provider.setResponses([
 			fauxAssistantMessage('old response'),
@@ -96,7 +100,9 @@ describe('session.compact()', () => {
 	});
 
 	it('rejects explicit compaction when another session operation is active', async () => {
-		const provider = registerFauxProvider({ provider: `session-compaction-${crypto.randomUUID()}` });
+		const provider = registerFauxProvider({
+			provider: `session-compaction-${crypto.randomUUID()}`,
+		});
 		providers.push(provider);
 		let markStarted!: () => void;
 		let releaseResponse!: () => void;
@@ -142,7 +148,9 @@ describe('session.compact()', () => {
 	});
 
 	it('still runs explicit compaction when automatic threshold compaction is disabled', async () => {
-		const provider = registerFauxProvider({ provider: `session-compaction-${crypto.randomUUID()}` });
+		const provider = registerFauxProvider({
+			provider: `session-compaction-${crypto.randomUUID()}`,
+		});
 		providers.push(provider);
 		provider.setResponses([
 			fauxAssistantMessage('old response'),
@@ -235,9 +243,9 @@ describe('automatic compaction', () => {
 				expect.objectContaining({ type: 'compaction' }),
 			]),
 		);
-		expect(
-			events.some((event) => event.type === 'turn_request' && event.purpose !== 'agent'),
-		).toBe(true);
+		expect(events.some((event) => event.type === 'turn_request' && event.purpose !== 'agent')).toBe(
+			true,
+		);
 	});
 
 	it('skips threshold compaction when automatic compaction is disabled', async () => {
@@ -282,7 +290,9 @@ describe('automatic compaction', () => {
 	});
 
 	it('compacts and retries when the provider reports context overflow', async () => {
-		const provider = registerFauxProvider({ provider: `session-compaction-${crypto.randomUUID()}` });
+		const provider = registerFauxProvider({
+			provider: `session-compaction-${crypto.randomUUID()}`,
+		});
 		providers.push(provider);
 		provider.setResponses([
 			fauxAssistantMessage('prior response'),
@@ -330,7 +340,9 @@ describe('automatic compaction', () => {
 	});
 
 	it('still compacts and retries on context overflow when automatic threshold compaction is disabled', async () => {
-		const provider = registerFauxProvider({ provider: `session-compaction-${crypto.randomUUID()}` });
+		const provider = registerFauxProvider({
+			provider: `session-compaction-${crypto.randomUUID()}`,
+		});
 		providers.push(provider);
 		provider.setResponses([
 			fauxAssistantMessage('prior response'),
@@ -381,7 +393,9 @@ describe('automatic compaction', () => {
 	});
 
 	it('includes the summary and recent unsummarized conversation in the next model request when older history is compacted', async () => {
-		const provider = registerFauxProvider({ provider: `session-compaction-${crypto.randomUUID()}` });
+		const provider = registerFauxProvider({
+			provider: `session-compaction-${crypto.randomUUID()}`,
+		});
 		providers.push(provider);
 		let nextMessages: unknown;
 		provider.setResponses([

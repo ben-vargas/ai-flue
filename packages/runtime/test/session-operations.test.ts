@@ -1,9 +1,9 @@
 import {
+	type FauxModelDefinition,
+	type FauxProviderRegistration,
 	fauxAssistantMessage,
 	fauxToolCall,
 	registerFauxProvider,
-	type FauxModelDefinition,
-	type FauxProviderRegistration,
 } from '@earendil-works/pi-ai';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createAgent, defineAgentProfile } from '../src/index.ts';
@@ -118,7 +118,10 @@ describe('session.prompt()', () => {
 		});
 
 		expect(selectedModels).toEqual(['override-model']);
-		expect(response.model).toEqual({ provider: provider.getModel().provider, id: 'override-model' });
+		expect(response.model).toEqual({
+			provider: provider.getModel().provider,
+			id: 'override-model',
+		});
 	});
 
 	it('rejects a model operation when neither the agent nor the call configures a model', async () => {
@@ -439,6 +442,9 @@ describe('CallHandle', () => {
 
 		expect(operation.signal.aborted).toBe(true);
 		expect(operation.signal.reason).toBe('inspect signal');
-		await expect(operation).rejects.toMatchObject({ name: 'AbortError', message: 'inspect signal' });
+		await expect(operation).rejects.toMatchObject({
+			name: 'AbortError',
+			message: 'inspect signal',
+		});
 	});
 });

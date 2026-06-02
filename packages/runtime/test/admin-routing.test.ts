@@ -254,7 +254,8 @@ describe('admin()', () => {
 			error: {
 				type: 'run_registry_unavailable',
 				message: 'Run lookup is not available in this runtime.',
-				details: 'This endpoint requires the generated runtime to be configured with a run registry.',
+				details:
+					'This endpoint requires the generated runtime to be configured with a run registry.',
 			},
 		});
 	});
@@ -273,7 +274,8 @@ describe('admin()', () => {
 			error: {
 				type: 'run_registry_unavailable',
 				message: 'Run lookup is not available in this runtime.',
-				details: 'This endpoint requires the generated runtime to be configured with a run registry.',
+				details:
+					'This endpoint requires the generated runtime to be configured with a run registry.',
 			},
 		});
 	});

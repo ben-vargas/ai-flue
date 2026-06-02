@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { resetFlueRuntimeForTests } from '../src/internal.ts';
 import { InMemoryRunRegistry } from '../src/node/run-registry.ts';
 import { InMemoryRunStore } from '../src/node/run-store.ts';
+import { flue } from '../src/routing.ts';
 import { configureFlueRuntime } from '../src/runtime/flue-app.ts';
 import type { RunRegistry } from '../src/runtime/run-registry.ts';
 import type { RunRecord, RunStore } from '../src/runtime/run-store.ts';
@@ -11,7 +12,6 @@ import {
 	createRunSubscriberRegistry,
 	type RunSubscriberRegistry,
 } from '../src/runtime/run-subscribers.ts';
-import { flue } from '../src/routing.ts';
 import type { FlueEvent } from '../src/types.ts';
 
 afterEach(() => {
@@ -23,7 +23,13 @@ function createRunApp(
 	runRegistry: RunRegistry,
 	runSubscribers?: RunSubscriberRegistry,
 ) {
-	configureFlueRuntime({ target: 'node', manifest: { agents: [] }, runStore, runRegistry, runSubscribers });
+	configureFlueRuntime({
+		target: 'node',
+		manifest: { agents: [] },
+		runStore,
+		runRegistry,
+		runSubscribers,
+	});
 	const app = new Hono();
 	app.route('/', flue());
 	return app;
@@ -548,11 +554,13 @@ describe('workflow run registry', () => {
 			startedAt: '2026-06-01T10:02:00.000Z',
 		});
 
-		expect((await registry.listRuns({ status: 'errored' })).runs.map((pointer) => pointer.runId)).toEqual([
-			'workflow:daily-report:02',
-		]);
 		expect(
-			(await registry.listRuns({ workflowName: 'daily-report' })).runs.map((pointer) => pointer.runId),
+			(await registry.listRuns({ status: 'errored' })).runs.map((pointer) => pointer.runId),
+		).toEqual(['workflow:daily-report:02']);
+		expect(
+			(await registry.listRuns({ workflowName: 'daily-report' })).runs.map(
+				(pointer) => pointer.runId,
+			),
 		).toEqual(['workflow:daily-report:02', 'workflow:daily-report:01']);
 	});
 
@@ -648,7 +656,9 @@ describe('workflow run routes', () => {
 		});
 		const app = createRunApp(store, registry);
 
-		const response = await app.fetch(new Request('http://localhost/runs/workflow%3Adaily-report%3A01'));
+		const response = await app.fetch(
+			new Request('http://localhost/runs/workflow%3Adaily-report%3A01'),
+		);
 
 		expect(response.status).toBe(200);
 		expect(await response.json()).toEqual({
@@ -1099,7 +1109,9 @@ describe('workflow run routes', () => {
 	it('rejects an unknown workflow run when a run id is not registered', async () => {
 		const app = createRunApp(new InMemoryRunStore(), new InMemoryRunRegistry());
 
-		const response = await app.fetch(new Request('http://localhost/runs/workflow%3Adaily-report%3Amissing'));
+		const response = await app.fetch(
+			new Request('http://localhost/runs/workflow%3Adaily-report%3Amissing'),
+		);
 
 		expect(response.status).toBe(404);
 		expect(await response.json()).toEqual({
@@ -1135,7 +1147,9 @@ describe('workflow run routes', () => {
 		});
 		const app = createRunApp(store, registry);
 
-		const response = await app.fetch(new Request('http://localhost/runs/workflow%3Adaily-report%3A01'));
+		const response = await app.fetch(
+			new Request('http://localhost/runs/workflow%3Adaily-report%3A01'),
+		);
 
 		expect(response.status).toBe(404);
 		expect(await response.json()).toEqual({

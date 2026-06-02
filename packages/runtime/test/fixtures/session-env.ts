@@ -4,7 +4,8 @@ export function createNoopSessionEnv({
 	cwd = '/repo',
 	...overrides
 }: Partial<SessionEnv> = {}): SessionEnv {
-	const resolvePath = (path: string) => normalizePath(path.startsWith('/') ? path : `${cwd}/${path}`);
+	const resolvePath = (path: string) =>
+		normalizePath(path.startsWith('/') ? path : `${cwd}/${path}`);
 
 	return {
 		cwd,

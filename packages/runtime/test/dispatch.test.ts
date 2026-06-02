@@ -333,7 +333,9 @@ describe('dispatched session processing', () => {
 								processDispatchInput: async () => {
 									ctx.emitEvent({ type: 'idle' });
 								},
-							}) as unknown as FlueSession & { processDispatchInput(input: DispatchInput): Promise<void> },
+							}) as unknown as FlueSession & {
+								processDispatchInput(input: DispatchInput): Promise<void>;
+							},
 						sessions: {} as never,
 						shell: (() => Promise.resolve({ stdout: '', stderr: '', exitCode: 0 })) as never,
 						fs: {} as never,
@@ -383,7 +385,9 @@ describe('dispatched session processing', () => {
 							({
 								name: name ?? 'default',
 								processDispatchInput: async () => {},
-							}) as unknown as FlueSession & { processDispatchInput(input: DispatchInput): Promise<void> },
+							}) as unknown as FlueSession & {
+								processDispatchInput(input: DispatchInput): Promise<void>;
+							},
 						sessions: {} as never,
 						shell: (() => Promise.resolve({ stdout: '', stderr: '', exitCode: 0 })) as never,
 						fs: {} as never,
@@ -408,7 +412,13 @@ describe('dispatched session processing', () => {
 	// TODO(RUNTIME-27): Migrate these retry tests to a stable generated-runtime boundary.
 	it('avoids repeating model processing when the same dispatch id is retried before the session advances', async () => {
 		const store = new InMemorySessionStore();
-		const harness = new Harness('guild:retry-idempotent', 'default', testAgentConfig(), createNoopSessionEnv({ cwd: '/' }), store);
+		const harness = new Harness(
+			'guild:retry-idempotent',
+			'default',
+			testAgentConfig(),
+			createNoopSessionEnv({ cwd: '/' }),
+			store,
+		);
 		const session = await harness.session('case:retry-idempotent');
 		const agent = Reflect.get(session, 'harness') as {
 			state: { messages: AgentMessage[] };
@@ -436,7 +446,9 @@ describe('dispatched session processing', () => {
 		await dispatchedSession.processDispatchInput(input);
 		await dispatchedSession.processDispatchInput(input);
 
-		const data = await store.load('agent-session:["guild:retry-idempotent","default","case:retry-idempotent"]');
+		const data = await store.load(
+			'agent-session:["guild:retry-idempotent","default","case:retry-idempotent"]',
+		);
 		expect(modelProcessingCount).toBe(1);
 		expect(
 			data?.entries.filter((entry) => entry.type === 'message' && entry.message.role === 'user'),
@@ -449,7 +461,13 @@ describe('dispatched session processing', () => {
 
 	it('rejects a retried dispatch when later user input has already advanced the session', async () => {
 		const store = new InMemorySessionStore();
-		const harness = new Harness('guild:retry-advanced', 'default', testAgentConfig(), createNoopSessionEnv({ cwd: '/' }), store);
+		const harness = new Harness(
+			'guild:retry-advanced',
+			'default',
+			testAgentConfig(),
+			createNoopSessionEnv({ cwd: '/' }),
+			store,
+		);
 		const session = await harness.session('case:retry-advanced');
 		const agent = Reflect.get(session, 'harness') as {
 			state: { messages: AgentMessage[] };

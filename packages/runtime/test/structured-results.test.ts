@@ -1,12 +1,12 @@
 import {
+	type FauxProviderRegistration,
 	fauxAssistantMessage,
 	fauxText,
 	fauxToolCall,
 	registerFauxProvider,
-	type FauxProviderRegistration,
 } from '@earendil-works/pi-ai';
-import { afterEach, describe, expect, it } from 'vitest';
 import * as v from 'valibot';
+import { afterEach, describe, expect, it } from 'vitest';
 import { createAgent, ResultUnavailableError } from '../src/index.ts';
 import { createFlueContext, InMemorySessionStore } from '../src/internal.ts';
 import type { FlueEvent, FlueSession, Skill } from '../src/types.ts';

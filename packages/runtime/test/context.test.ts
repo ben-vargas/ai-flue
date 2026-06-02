@@ -1,12 +1,12 @@
 import {
+	type FauxProviderRegistration,
 	fauxAssistantMessage,
 	registerFauxProvider,
-	type FauxProviderRegistration,
 } from '@earendil-works/pi-ai';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createAgent } from '../src/index.ts';
-import { createFlueContext, InMemorySessionStore } from '../src/internal.ts';
 import type { FlueContextConfig } from '../src/internal.ts';
+import { createFlueContext, InMemorySessionStore } from '../src/internal.ts';
 import type { FlueEvent, SessionEnv } from '../src/types.ts';
 
 const providers: FauxProviderRegistration[] = [];

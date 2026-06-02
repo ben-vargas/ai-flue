@@ -31,9 +31,9 @@ export {
 	configureFlueRuntime,
 	createDefaultFlueApp,
 	dispatch,
-	resetFlueRuntimeForTests,
 	registeredAgentsForTransport,
 	registeredWorkflowsForTransport,
+	resetFlueRuntimeForTests,
 } from './runtime/flue-app.ts';
 export type {
 	AgentHandler,
