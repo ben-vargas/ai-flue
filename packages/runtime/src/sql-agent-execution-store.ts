@@ -8,6 +8,14 @@
  * Platform-specific wiring (opening the database, providing a transaction
  * wrapper) lives in `cloudflare/agent-execution-store.ts` and
  * `node/agent-execution-store.ts`.
+ *
+ * INTERNAL convenience, scoped to the SQLite dialect family (`node:sqlite`
+ * and Durable Object SQLite). Do NOT generalize this module across SQL
+ * dialects: there is deliberately no generic-SQL abstraction spanning
+ * SQLite and Postgres, and `@flue/postgres` implements the store contract
+ * directly on purpose. Cross-backend parity is enforced by the documented
+ * invariants on the store interfaces and the contract suites in
+ * `@flue/runtime/test-utils`, not by code sharing.
  */
 
 import type {

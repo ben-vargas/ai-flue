@@ -13,6 +13,19 @@
  * This surface is intentionally narrow: store interfaces, vocabulary types,
  * and pure adapter helper functions. It does not expose runtime orchestration,
  * provider plumbing, or generated-entry internals.
+ *
+ * There is ONE adapter contract for every backend — no SQL-only or "expert"
+ * tiers. Each store interface documents its per-method invariants in prose
+ * (atomicity, idempotency, gating conditions) so that non-SQL backends such
+ * as MongoDB are first-class implementations. An adapter is correct when the
+ * executable contract suites pass: `defineStoreContractTests`,
+ * `defineRunStoreContractTests`, and `defineEventStreamStoreContractTests`
+ * from `@flue/runtime/test-utils`.
+ *
+ * Stability: `SessionStore`, `RunStore`, and `EventStreamStore` are stable.
+ * The `AgentSubmissionStore` turn-journal, stream-chunk, and lease method
+ * groups mirror the durable-execution engine and are subject to change until
+ * 1.0 — for every backend equally.
  */
 
 // ─── Store interfaces and vocabulary types ──────────────────────────────────

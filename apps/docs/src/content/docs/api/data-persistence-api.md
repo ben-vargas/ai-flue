@@ -23,7 +23,11 @@ import { formatOffset, parseOffset } from '@flue/runtime/adapter';
 
 Application code usually configures an adapter through `db.ts` rather than implementing one; see [Database](/docs/guide/database/) for setup and target behavior. Most applications use the built-in `sqlite()` adapter or `@flue/postgres`.
 
+There is one adapter contract for every backend — no SQL-only or "expert" tiers. Every method's invariants are written in terms of observable behavior, not storage primitives, so a non-SQL backend such as MongoDB is a first-class implementation: where a method is described as atomic, concurrent callers must never both observe success, and whether that is achieved with transactions, conditional updates, or unique indexes is the adapter's choice. An adapter is correct when the [contract suites pass](#validating-your-adapter).
+
 Always typecheck a custom adapter against the real types from `@flue/runtime/adapter`. The signatures below reference vocabulary types — such as `AgentSubmission`, `AgentTurnJournal`, `RunRecord`, and `RunPointer` — exported from the same subpath. If this page drifts from the package, the package wins.
+
+**Stability:** `SessionStore`, `RunStore`, and `EventStreamStore` are stable. The `AgentSubmissionStore` turn-journal, stream-chunk, and lease method groups (and the `AgentTurnJournalPhase` union) mirror the durable-execution engine and are subject to change until 1.0. This applies to every backend equally.
 
 ## `PersistenceAdapter`
 
@@ -129,10 +133,43 @@ interface AgentSubmissionStore {
   renewLeases(ownerId: string, submissionIds: string[]): Promise<void>;
   listExpiredSubmissions(): Promise<AgentSubmission[]>;
   deleteSession(sessionKey: string, deleteSessionTree: () => Promise<void>): Promise<void>;
+  listPendingSessionDeletions(): Promise<string[]>;
 }
 ```
 
-The submission store owns ordered admission, claim ownership, turn journals, stream chunks, recovery, attempt markers, lease renewal, and deletion coordination for direct prompts and `dispatch(...)` input. Attempt markers are durable evidence that an attempt was started and has not yet settled; coordinators insert one before starting an attempt and delete it at settlement, and reconciliation treats a fresh marker as proof that the attempt may still be running.
+The submission store owns ordered admission, claim ownership, turn journals, stream chunks, recovery, attempt markers, lease renewal, and deletion coordination for direct prompts and `dispatch(...)` input.
+
+The turn-journal, stream-chunk, and lease method groups are subject to change until 1.0 (see the stability note above). The invariants, by method group:
+
+### Admission
+
+`admitDispatch()` is idempotent admission keyed by dispatch id: an exact replay (same id, same payload) returns the already-admitted submission; the same id with a different payload returns `{ kind: 'conflict' }`; an id whose settled row was removed by session deletion returns its retained receipt. `admitDirect()` admits a direct prompt as a queued submission with the same exact-replay idempotency. Both throw while the target session is being deleted.
+
+### Claim and lifecycle transitions
+
+`claimSubmission()` is an atomic compare-and-set: it transitions the submission from queued to running only when it is currently queued and is the runnable head of its session — no earlier unsettled submission exists in the same session — recording the attempt id, owner, lease expiry, and start time, incrementing `attemptCount`, resetting `maxRetry` to the system default, and initializing `timeoutAt` when still unset (a previously initialized timeout is preserved across requeue/reclaim). It returns `null` when any condition fails, and two concurrent claims for the same submission must never both succeed. `listRunnableSubmissions()` returns exactly the submissions a claim would accept: at most one queued head per session, in admission order.
+
+The remaining transitions are gated on a running submission owned by the calling attempt and return `false` otherwise: `markSubmissionInputApplied()` records once that input was canonically applied (installing the supplied durability, or defaults, on first application); `requestSubmissionRecovery()` stamps `recoveryRequestedAt` once; `requeueSubmissionBeforeInputApplied()` returns the submission to queued — clearing attempt, owner, and lease — only while input has not been applied; `completeSubmission()` and `failSubmission()` settle the submission, and the first terminal state wins — a stale attempt or an already-settled submission returns `false` and changes nothing.
+
+### Turn journal
+
+Each submission has at most one journal slot. `beginTurnJournal()` creates it or replaces an existing journal in place, resetting stream and commit state and increasing the revision. `updateTurnJournalPhase()` advances the phase of the uncommitted journal owned by the calling attempt, merging any provided options (absent options keep their stored values). `commitTurnJournal()` transitions only an uncommitted journal owned by the calling attempt — a second commit returns `false` and leaves the stored commit untouched. `markStreamConsumed()` stamps the consumption timestamp at most once, and only when the uncommitted journal stores the same stream key. `replaceTurnJournalAttempt()` is the recovery handoff: it atomically moves a running submission and its uncommitted journal to the new attempt id, increments `attemptCount`, clears any pending recovery request, and installs the new lease when given — or returns `null` without writing.
+
+### Stream chunks
+
+`appendStreamChunkSegment()` inserts a segment keyed by (`streamKey`, `segmentIndex`); when that key already exists it returns `false` **without overwriting** the stored body. `getStreamChunkSegments()` returns all segments ordered by `segmentIndex` ascending. `deleteStreamChunkSegments()` removes every segment for the stream.
+
+### Attempt markers
+
+Attempt markers are durable evidence that an attempt was started and has not yet settled; coordinators insert one before starting an attempt and delete it at settlement, and reconciliation treats a fresh marker as proof that the attempt may still be running. `insertAttemptMarker()` is idempotent — re-inserting the same (submission, attempt) pair keeps the original `createdAt`. `deleteAttemptMarker()` deletes only the exact match.
+
+### Leases
+
+`renewLeases()` extends the lease expiry (now + `LEASE_DURATION_MS`) for each listed submission that is running **and** owned by the given `ownerId`; submissions owned by another coordinator, settled, or unknown are silently skipped. `listExpiredSubmissions()` returns running submissions whose lease has expired (a positive `leaseExpiresAt` in the past); queued and settled submissions are never returned.
+
+### Session deletion
+
+`deleteSession()` deletes all settled submission state for a session in three phases: it rejects while any submission in the session is queued or running, else durably writes a deletion marker that blocks new admissions; it invokes `deleteSessionTree` (the runtime's snapshot deletion), removing the marker and rethrowing when that fails; and it finally retains a receipt for each settled dispatch admitted before the marker, removes those submissions and their journals and chunks, then removes the marker. Concurrent calls for the same session key share one in-flight deletion. `listPendingSessionDeletions()` returns the session keys whose marker survived a crash mid-deletion; coordinators resume these at startup by calling `deleteSession()` again.
 
 ## `RunStore`
 
@@ -189,6 +226,8 @@ interface EventStreamStore {
 
 `EventStreamStore` owns append-only event streams for agent instances and workflow runs. A path is typically `agents/<name>/<id>` or `runs/<runId>`. `appendEvent()` returns the new Durable Streams offset. `readEvents()` reads events strictly after `offset`; `"-1"` starts at the beginning and `"now"` starts at the current tail. `subscribe()` registers an in-process listener for appends or closure on that store instance; it is not a cross-process notification contract.
 
+Offset format: offsets are strings in the Durable Streams format `<readSeq>_<seq>` — two 16-digit zero-padded integers separated by an underscore, with the first component always `0` (Flue uses integer sequences, not segmented files) — plus the sentinel `"-1"`. Offsets must increase monotonically per stream and remain comparable across reconnects. Use the `formatOffset()` and `parseOffset()` helpers from `@flue/runtime/adapter` to produce and consume them rather than hand-rolling the encoding.
+
 ## `SessionData`
 
 ```ts
@@ -242,3 +281,47 @@ interface TaskSessionRef {
 - `parseOffset(...)`
 
 Use these helpers when implementing a backend that needs to preserve Flue's storage-key, timestamp, payload-validation, cursor, or event-stream offset semantics.
+
+## Validating your adapter
+
+`@flue/runtime/test-utils` exports the executable contract suites that the built-in SQLite and Postgres adapters themselves run. They are the acceptance test for a custom backend: your adapter is correct when these pass.
+
+```ts
+import {
+  defineEventStreamStoreContractTests,
+  defineRunStoreContractTests,
+  defineStoreContractTests,
+} from '@flue/runtime/test-utils';
+
+defineStoreContractTests('MyBackend AgentExecutionStore', {
+  async create() {
+    const adapter = myBackend();
+    await adapter.migrate?.();
+    const { executionStore } = await adapter.connect();
+    return executionStore;
+  },
+  async cleanup() {
+    // close connections, delete temp state
+  },
+});
+
+defineRunStoreContractTests('MyBackend RunStore', {
+  async create() {
+    const adapter = myBackend();
+    await adapter.migrate?.();
+    const { runStore } = await adapter.connect();
+    return runStore;
+  },
+});
+
+defineEventStreamStoreContractTests('MyBackend EventStreamStore', {
+  async create() {
+    const adapter = myBackend();
+    await adapter.migrate?.();
+    const { eventStreamStore } = await adapter.connect();
+    return eventStreamStore;
+  },
+});
+```
+
+The suites run under [Vitest](https://vitest.dev/). Each test calls `create()` for a fresh store, so back the factory with an isolated database (in-memory, a temp file, or a per-test schema). `defineStoreContractTests` exercises every `SessionStore` and `AgentSubmissionStore` invariant documented on this page — admission idempotency, claim atomicity, attempt gating, journal commit gating, lease semantics, and deletion coordination — with identical assertions regardless of the storage engine.
