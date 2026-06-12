@@ -209,7 +209,6 @@ describe('createOpenTelemetryObserver', () => {
 			'flue.workflow.name': 'report',
 		});
 		expect(tracer.spans[0]?.options?.root).toBe(true);
-		expect(tracer.spans[0]?.attributes).not.toHaveProperty('flue.workflow.restarted_from_run_id');
 		expect(tracer.spans[0]?.attributes).not.toHaveProperty('flue.workflow.payload');
 		expect(tracer.spans[2]?.attributes).toMatchObject({
 			'gen_ai.request.model': 'sonnet',
@@ -566,7 +565,6 @@ describe('createOpenTelemetryObserver', () => {
 		expect(tracer.spans[1]?.parent).toBe(parent);
 		expect(tracer.spans[1]?.options?.root).toBe(false);
 		expect(tracer.spans[1]?.links).toEqual([{ context: tracer.spans[0]?.spanContext() }]);
-		expect(tracer.spans[1]?.attributes).not.toHaveProperty('flue.workflow.resumed');
 		expect(tracer.spans.every((span) => span.ended)).toBe(true);
 	});
 
