@@ -498,6 +498,37 @@ describe('Cloudflare AI binding provider', () => {
 		]);
 	});
 
+	it('surfaces a provider error when an upstream error body mentions an abort', async () => {
+		const run = vi.fn(
+			async () =>
+				new Response('request aborted by upstream', { status: 502, statusText: 'Bad Gateway' }),
+		);
+		registerProvider('cloudflare-upstream-abort-text', {
+			api: 'cloudflare-ai-binding',
+			binding: { run },
+		});
+		const model = resolveModel('cloudflare-upstream-abort-text/@cf/meta/llama-3.1-8b-instruct');
+		expect(model).toBeDefined();
+		if (!model) throw new Error('Expected a resolved Workers AI model.');
+
+		const events = await collectEvents(
+			getCloudflareAIBindingApiProvider().streamSimple(model as Model<'cloudflare-ai-binding'>, {
+				messages: [],
+			}),
+		);
+
+		expect(events).toEqual([
+			expect.objectContaining({
+				type: 'error',
+				reason: 'error',
+				error: expect.objectContaining({
+					stopReason: 'error',
+					errorMessage: 'Cloudflare AI binding returned 502 Bad Gateway: request aborted by upstream',
+				}),
+			}),
+		]);
+	});
+
 	it('surfaces a provider error when the AI binding returns no stream body', async () => {
 		const run = vi.fn(async () => new Response(null));
 		registerProvider('cloudflare-empty-body', {

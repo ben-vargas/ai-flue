@@ -249,7 +249,7 @@ function* parseSseEvents(block: string): IterableIterator<unknown> {
 }
 
 function isAbortError(error: unknown): boolean {
-	return error instanceof Error && (error.name === 'AbortError' || /aborted/i.test(error.message));
+	return error instanceof DOMException && error.name === 'AbortError';
 }
 
 const streamCloudflareWorkersAi: StreamFunction<CloudflareAIBindingApi, SimpleStreamOptions> = (
