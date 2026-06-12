@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { createAgent } from '../src/agent-definition.ts';
 import { createFlueContext, resolveModel, type DispatchInput } from '../src/internal.ts';
 import { sqlite } from '../src/node/agent-execution-store.ts';
-import { createNodeAgentCoordinator, type NodeAgentCoordinator } from '../src/node/agent-coordinator.ts';
+import { createNodeAgentCoordinator, createNodeDispatchQueue, type NodeAgentCoordinator } from '../src/node/agent-coordinator.ts';
 import type { CreateContextFn } from '../src/runtime/handle-agent.ts';
 import type { AgentExecutionStore } from '../src/agent-execution-store.ts';
 import { createSessionStorageKey } from '../src/session-identity.ts';
@@ -671,6 +671,40 @@ leaseExpiresAt: 1,
 			expect(subOld).toMatchObject({ status: 'settled' });
 			expect(subOld?.error).toBeUndefined();
 		}, 60_000);
+	});
+
+	describe('dispatch queue admission', () => {
+		it('returns the original receipt when the same dispatch is replayed', async () => {
+			const dbPath = createTempDbPath();
+			const provider = createFauxProvider();
+			provider.setResponses([fauxAssistantMessage('Done.')]);
+			const { coordinator } = await createFauxCoordinator(dbPath, provider);
+			const queue = createNodeDispatchQueue(coordinator);
+
+			const input = makeDispatchInput({ dispatchId: 'dispatch-replay' });
+			const first = await queue.enqueue(input);
+			await coordinator.waitForIdle();
+
+			const replay = await queue.enqueue(input);
+			expect(replay).toEqual(first);
+			expect(replay).toEqual({ dispatchId: 'dispatch-replay', acceptedAt: input.acceptedAt });
+		});
+
+		it('throws when a dispatch id is replayed with a conflicting payload', async () => {
+			const dbPath = createTempDbPath();
+			const provider = createFauxProvider();
+			provider.setResponses([fauxAssistantMessage('Done.')]);
+			const { coordinator } = await createFauxCoordinator(dbPath, provider);
+			const queue = createNodeDispatchQueue(coordinator);
+
+			const input = makeDispatchInput({ dispatchId: 'dispatch-conflict' });
+			await queue.enqueue(input);
+
+			await expect(
+				queue.enqueue(makeDispatchInput({ dispatchId: 'dispatch-conflict', input: { message: 'Different' } })),
+			).rejects.toThrow();
+			await coordinator.waitForIdle();
+		});
 	});
 
 	describe('session deletion resume across restart', () => {

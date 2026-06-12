@@ -1,4 +1,4 @@
-import type { AgentSubmission, AgentSubmissionStore } from '../agent-execution-store.ts';
+import type { AgentDispatchAdmission, AgentSubmission, AgentSubmissionStore } from '../agent-execution-store.ts';
 import { LEASE_DURATION_MS } from '../agent-execution-store.ts';
 import { deleteSessionTree } from '../session.ts';
 import type { AttachedAgentEvent, CreatedAgent, DirectAgentPayload, DispatchReceipt, SessionStore } from '../types.ts';
@@ -20,7 +20,7 @@ export interface NodeAgentCoordinator {
 	/** Call once at startup to reconcile interrupted work from a previous process. */
 	reconcileSubmissions(): Promise<void>;
 	/** Admit a dispatch. The submission is persisted durably; processing is asynchronous. */
-	admitDispatch(input: DispatchInput): Promise<void>;
+	admitDispatch(input: DispatchInput): Promise<AgentDispatchAdmission>;
 	/**
 	 * Create a durable admission hook for a specific agent instance. The returned
 	 * function accepts a direct prompt payload, persists it as a durable submission,
@@ -54,14 +54,24 @@ export interface NodeAgentCoordinator {
 export function createNodeDispatchQueue(coordinator: NodeAgentCoordinator): DispatchQueue {
 	return {
 		async enqueue(input: DispatchInput): Promise<DispatchReceipt> {
-			const receipt: DispatchReceipt = {
-				dispatchId: input.dispatchId,
+			// Admission is durable — the submission is persisted in SQL. Processing
+			// happens asynchronously via the coordinator's claim loop. Admission
+			// outcomes mirror the Cloudflare coordinator: an exact replay returns
+			// the original stored receipt and a conflicting replay throws.
+			const admission = await coordinator.admitDispatch(input);
+			if (admission.kind === 'retained_receipt') {
+				return {
+					dispatchId: admission.receipt.submissionId,
+					acceptedAt: new Date(admission.receipt.acceptedAt).toISOString(),
+				};
+			}
+			if (admission.kind === 'conflict') {
+				throw new Error(`[flue] dispatch() target agent "${input.agent}" rejected a conflicting dispatch replay.`);
+			}
+			return {
+				dispatchId: admission.submission.submissionId,
 				acceptedAt: input.acceptedAt,
 			};
-			// Admission is durable — the submission is persisted in SQL. Processing
-			// happens asynchronously via the coordinator's claim loop.
-			await coordinator.admitDispatch(input);
-			return receipt;
 		},
 	};
 }
@@ -440,12 +450,13 @@ export function createNodeAgentCoordinator(options: {
 			}
 
 			const admission = await submissions.admitDispatch(input);
-			if (admission.kind !== 'submission') return;
+			if (admission.kind !== 'submission') return admission;
 
 			// Ensure the claim loop is running and wake it to pick up the
 			// new submission. Processing happens asynchronously.
 			ensureClaimLoop();
 			wake();
+			return admission;
 		},
 
 		createAdmission(agentName: string, instanceId: string): AttachedAgentSubmissionAdmission {
