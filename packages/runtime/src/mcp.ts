@@ -9,6 +9,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { AjvJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/ajv';
 import type { JsonSchemaValidator } from '@modelcontextprotocol/sdk/validation';
+import { version as runtimeVersion } from '../package.json' with { type: 'json' };
 import type { ToolDefinition, ToolParameters } from './types.ts';
 
 /** Remote MCP transport. */
@@ -26,10 +27,6 @@ export interface McpServerOptions {
 	requestInit?: RequestInit;
 	/** Custom fetch implementation used by the MCP transport. */
 	fetch?: typeof fetch;
-	/** MCP client name. Defaults to `'flue'`. */
-	clientName?: string;
-	/** MCP client version. Defaults to `'0.0.0'`. */
-	clientVersion?: string;
 	/** Per-request timeout in milliseconds for MCP requests. Defaults to the MCP SDK default (60 seconds). */
 	timeout?: number;
 	/** Reset the per-request timeout whenever the server sends a progress notification. Defaults to `false`. */
@@ -71,8 +68,8 @@ export async function connectMcpServer(
 		options.fetch,
 	);
 	const client = new Client({
-		name: options.clientName ?? 'flue',
-		version: options.clientVersion ?? '0.0.0',
+		name: 'flue',
+		version: runtimeVersion,
 	});
 
 	return connectMcpServerWithClient(name, client, transport, {

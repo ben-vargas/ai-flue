@@ -158,8 +158,6 @@ Adapted tool names use `mcp__<server>__<tool>`. Unsupported characters are repla
 | `headers`       | `HeadersInit`                | —                   | Headers merged into MCP transport requests.            |
 | `requestInit`   | `RequestInit`                | —                   | Additional MCP transport request configuration.        |
 | `fetch`         | `typeof fetch`               | —                   | Custom fetch implementation used by the MCP transport. |
-| `clientName`    | `string`                     | `'flue'`            | MCP client name.                                       |
-| `clientVersion` | `string`                     | `'0.0.0'`           | MCP client version.                                    |
 | `timeout`       | `number`                     | `60000`             | Per-request timeout in milliseconds for MCP requests.  |
 | `resetTimeoutOnProgress` | `boolean`           | `false`             | Reset the per-request timeout whenever the server sends a progress notification. |
 
