@@ -950,7 +950,7 @@ function startLocalProcess(
 	id: string | undefined,
 	cwd: string,
 ): ChildProcess {
-	const child = spawn('node', [serverPath], {
+	const child = spawn(process.execPath, [serverPath], {
 		stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
 		cwd,
 		env: {

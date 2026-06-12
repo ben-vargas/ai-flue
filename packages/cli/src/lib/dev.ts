@@ -449,7 +449,7 @@ class NodeReloader implements DevReloader {
 	// ── Internals ──
 
 	private async spawnAndWait(): Promise<void> {
-		const child = spawn('node', [this.serverPath], {
+		const child = spawn(process.execPath, [this.serverPath], {
 			stdio: ['ignore', 'pipe', 'pipe'],
 			cwd: this.root,
 			env: {
