@@ -19,8 +19,14 @@ export interface RunPointer {
 	isError?: boolean;
 }
 
+/**
+ * `owner` and `startedAt` let `recordRunEnd` upsert the full pointer, so a
+ * terminal write heals a `recordRunStart` that was lost to a transient fault.
+ */
 export interface RecordRunEndInput {
 	runId: string;
+	owner: RunOwner;
+	startedAt: string;
 	endedAt: string;
 	durationMs: number;
 	isError: boolean;

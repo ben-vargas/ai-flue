@@ -188,6 +188,12 @@ describe('workflow run registry', () => {
 		});
 		await registry.recordRunEnd({
 			runId: 'workflow:daily-report:01',
+			owner: {
+				kind: 'workflow',
+				workflowName: 'daily-report',
+				instanceId: 'workflow:daily-report:01',
+			},
+			startedAt: '2026-06-01T10:00:00.000Z',
 			endedAt: '2026-06-01T10:05:00.000Z',
 			durationMs: 300_000,
 			isError: true,
@@ -205,6 +211,36 @@ describe('workflow run registry', () => {
 			endedAt: '2026-06-01T10:05:00.000Z',
 			durationMs: 300_000,
 			isError: true,
+		});
+	});
+
+	it('creates a terminal pointer when a workflow run ends without a recorded start', async () => {
+		const registry: RunRegistry = new InMemoryRunRegistry();
+		await registry.recordRunEnd({
+			runId: 'workflow:daily-report:01',
+			owner: {
+				kind: 'workflow',
+				workflowName: 'daily-report',
+				instanceId: 'workflow:daily-report:01',
+			},
+			startedAt: '2026-06-01T10:00:00.000Z',
+			endedAt: '2026-06-01T10:05:00.000Z',
+			durationMs: 300_000,
+			isError: false,
+		});
+
+		expect(await registry.lookupRun('workflow:daily-report:01')).toEqual({
+			runId: 'workflow:daily-report:01',
+			owner: {
+				kind: 'workflow',
+				workflowName: 'daily-report',
+				instanceId: 'workflow:daily-report:01',
+			},
+			status: 'completed',
+			startedAt: '2026-06-01T10:00:00.000Z',
+			endedAt: '2026-06-01T10:05:00.000Z',
+			durationMs: 300_000,
+			isError: false,
 		});
 	});
 
@@ -258,6 +294,12 @@ describe('workflow run registry', () => {
 		});
 		await registry.recordRunEnd({
 			runId: 'workflow:daily-report:01',
+			owner: {
+				kind: 'workflow',
+				workflowName: 'daily-report',
+				instanceId: 'workflow:daily-report:01',
+			},
+			startedAt: '2026-06-01T10:00:00.000Z',
 			endedAt: '2026-06-01T10:05:00.000Z',
 			durationMs: 300_000,
 			isError: false,
@@ -273,6 +315,12 @@ describe('workflow run registry', () => {
 		});
 		await registry.recordRunEnd({
 			runId: 'workflow:daily-report:02',
+			owner: {
+				kind: 'workflow',
+				workflowName: 'daily-report',
+				instanceId: 'workflow:daily-report:02',
+			},
+			startedAt: '2026-06-01T10:01:00.000Z',
 			endedAt: '2026-06-01T10:06:00.000Z',
 			durationMs: 300_000,
 			isError: true,

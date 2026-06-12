@@ -131,6 +131,12 @@ describe('admin()', () => {
 		});
 		await runRegistry.recordRunEnd({
 			runId: 'workflow:daily-report:01',
+			owner: {
+				kind: 'workflow',
+				workflowName: 'daily-report',
+				instanceId: 'workflow:daily-report:01',
+			},
+			startedAt: '2026-06-01T10:00:00.000Z',
 			endedAt: '2026-06-01T10:05:00.000Z',
 			durationMs: 300_000,
 			isError: false,
@@ -198,6 +204,12 @@ describe('admin()', () => {
 		});
 		await runRegistry.recordRunEnd({
 			runId: 'workflow:daily-report:01',
+			owner: {
+				kind: 'workflow',
+				workflowName: 'daily-report',
+				instanceId: 'workflow:daily-report:01',
+			},
+			startedAt: '2026-06-01T10:00:00.000Z',
 			endedAt: '2026-06-01T10:05:00.000Z',
 			durationMs: 300_000,
 			isError: false,

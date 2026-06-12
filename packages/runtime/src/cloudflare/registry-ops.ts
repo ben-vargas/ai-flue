@@ -98,15 +98,30 @@ class SqlRegistryOps implements RegistryOps {
 	}
 
 	recordRunEnd(input: RecordRunEndInput): void {
+		if (input.owner.instanceId !== input.runId) {
+			throw new Error(
+				'[flue] Workflow run owners must use the same instanceId as the pointer runId.',
+			);
+		}
+		// Upsert so a terminal write heals a start pointer lost to a transient
+		// fault; on conflict the original started_at is preserved.
 		this.sql.exec(
-			`UPDATE flue_registry_runs
-			 SET status = ?, ended_at = ?, duration_ms = ?, is_error = ?
-			 WHERE run_id = ? AND owner_kind = 'workflow'`,
+			`INSERT INTO flue_registry_runs
+			 (run_id, owner_kind, instance_id, workflow_name, status, started_at, ended_at, duration_ms, is_error)
+			 VALUES (?, 'workflow', ?, ?, ?, ?, ?, ?, ?)
+			 ON CONFLICT(run_id) DO UPDATE SET
+			   status = excluded.status,
+			   ended_at = excluded.ended_at,
+			   duration_ms = excluded.duration_ms,
+			   is_error = excluded.is_error`,
+			input.runId,
+			input.owner.instanceId,
+			input.owner.workflowName,
 			input.isError ? 'errored' : 'completed',
+			input.startedAt,
 			input.endedAt,
 			input.durationMs,
 			input.isError ? 1 : 0,
-			input.runId,
 		);
 	}
 

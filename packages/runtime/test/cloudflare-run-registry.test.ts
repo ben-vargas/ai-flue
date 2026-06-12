@@ -74,6 +74,12 @@ describe('createCloudflareRunRegistry()', () => {
 
 		await registry?.recordRunEnd({
 			runId: 'workflow:daily-report:01',
+			owner: {
+				kind: 'workflow',
+				workflowName: 'daily-report',
+				instanceId: 'workflow:daily-report:01',
+			},
+			startedAt: '2026-06-01T10:00:00.000Z',
 			endedAt: '2026-06-01T10:05:00.000Z',
 			durationMs: 300_000,
 			isError: true,
@@ -88,6 +94,12 @@ describe('createCloudflareRunRegistry()', () => {
 		expect(fake.requests[0]?.method).toBe('POST');
 		expect(fake.requests[0]?.headers.get('content-type')).toBe('application/json');
 		expect(await fake.requests[0]?.json()).toEqual({
+			owner: {
+				kind: 'workflow',
+				workflowName: 'daily-report',
+				instanceId: 'workflow:daily-report:01',
+			},
+			startedAt: '2026-06-01T10:00:00.000Z',
 			endedAt: '2026-06-01T10:05:00.000Z',
 			durationMs: 300_000,
 			isError: true,
@@ -231,6 +243,12 @@ describe('createCloudflareRunRegistry()', () => {
 		});
 		await registry?.recordRunEnd({
 			runId: 'workflow:daily report/id?#fragment',
+			owner: {
+				kind: 'workflow',
+				workflowName: 'daily report',
+				instanceId: 'workflow:daily report/id?#fragment',
+			},
+			startedAt: '2026-06-01T10:00:00.000Z',
 			endedAt: '2026-06-01T10:05:00.000Z',
 			durationMs: 300_000,
 			isError: false,

@@ -463,6 +463,8 @@ async function reconcileTerminalRun(
 	await safeRegistry('recordRunEnd(recovery)', () =>
 		opts.runRegistry?.recordRunEnd({
 			runId: opts.runId,
+			owner: run?.owner ?? opts.owner,
+			startedAt: run?.startedAt ?? endedAt,
 			endedAt,
 			durationMs,
 			isError,
@@ -735,6 +737,8 @@ async function emitRunEnd(
 		await safeRegistry('recordRunEnd', () =>
 			runRegistry?.recordRunEnd({
 				runId,
+				owner: lifecycle.owner,
+				startedAt: lifecycle.startedAt,
 				endedAt,
 				durationMs,
 				isError: input.isError,

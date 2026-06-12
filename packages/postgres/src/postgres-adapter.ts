@@ -1161,16 +1161,27 @@ class PgRunRegistry implements RunRegistry {
 	}
 
 	async recordRunEnd(input: RecordRunEndInput): Promise<void> {
+		// Upsert so a terminal write heals a start pointer lost to a transient
+		// fault; on conflict the original started_at is preserved.
 		await this.runner.query(
-			`UPDATE flue_run_registry
-			 SET status = $1, ended_at = $2, duration_ms = $3, is_error = $4
-			 WHERE run_id = $5`,
+			`INSERT INTO flue_run_registry
+			 (run_id, owner_kind, workflow_name, instance_id, status, started_at, ended_at, duration_ms, is_error)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			 ON CONFLICT (run_id) DO UPDATE SET
+			   status = EXCLUDED.status,
+			   ended_at = EXCLUDED.ended_at,
+			   duration_ms = EXCLUDED.duration_ms,
+			   is_error = EXCLUDED.is_error`,
 			[
+				input.runId,
+				input.owner.kind,
+				input.owner.workflowName,
+				input.owner.instanceId,
 				input.isError ? 'errored' : 'completed',
+				input.startedAt,
 				input.endedAt,
 				input.durationMs,
 				input.isError,
-				input.runId,
 			],
 		);
 	}

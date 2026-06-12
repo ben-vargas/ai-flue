@@ -32,10 +32,18 @@ export class InMemoryRunRegistry implements RunRegistry {
 	}
 
 	async recordRunEnd(input: RecordRunEndInput): Promise<void> {
+		if (input.owner.instanceId !== input.runId) {
+			throw new Error(
+				'[flue] Workflow run owners must use the same instanceId as the pointer runId.',
+			);
+		}
+		// Upsert so a terminal write heals a start pointer lost to a transient
+		// fault; an existing pointer keeps its original owner and startedAt.
 		const pointer = this.pointers.get(input.runId);
-		if (!pointer) return;
 		this.pointers.set(input.runId, {
-			...pointer,
+			runId: input.runId,
+			owner: pointer?.owner ?? input.owner,
+			startedAt: pointer?.startedAt ?? input.startedAt,
 			status: input.isError ? 'errored' : 'completed',
 			endedAt: input.endedAt,
 			durationMs: input.durationMs,
