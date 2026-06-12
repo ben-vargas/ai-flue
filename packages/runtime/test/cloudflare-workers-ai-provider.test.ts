@@ -215,6 +215,34 @@ describe('Cloudflare AI binding provider', () => {
 		});
 	});
 
+	it('joins multi-line data payloads when an SSE event spans multiple data lines', async () => {
+		const run = vi.fn(async () =>
+			createSseResponse(
+				'data: {"choices":[{"delta":\ndata: {"content":"hello"}}]}\n\n',
+				'data: {"choices":[{"finish_reason":"stop"}]}\n\n',
+				'data: [DONE]\n\n',
+			),
+		);
+		registerProvider('cloudflare-multiline-data', {
+			api: 'cloudflare-ai-binding',
+			binding: { run },
+		});
+		const model = resolveModel('cloudflare-multiline-data/@cf/meta/llama-3.1-8b-instruct');
+		expect(model).toBeDefined();
+		if (!model) throw new Error('Expected a resolved Workers AI model.');
+
+		const events = await collectEvents(
+			getCloudflareAIBindingApiProvider().streamSimple(model as Model<'cloudflare-ai-binding'>, {
+				messages: [],
+			}),
+		);
+
+		expect(events).toContainEqual(
+			expect.objectContaining({ type: 'text_delta', contentIndex: 0, delta: 'hello' }),
+		);
+		expect(events.at(-1)).toMatchObject({ type: 'done', reason: 'stop' });
+	});
+
 	it('translates streamed reasoning deltas when the binding returns reasoning SSE events', async () => {
 		const run = vi.fn(async () =>
 			createSseResponse(

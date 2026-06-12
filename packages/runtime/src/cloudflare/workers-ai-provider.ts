@@ -229,6 +229,9 @@ function findSseBoundary(buffer: string): { index: number; width: number } | nul
 }
 
 function* parseSseEvents(block: string): IterableIterator<unknown> {
+	// Per the SSE spec, an event's data may span multiple `data:` lines that
+	// must be joined with '\n' before dispatch.
+	const dataLines: string[] = [];
 	let start = 0;
 	while (start <= block.length) {
 		const newline = block.indexOf('\n', start);
@@ -236,15 +239,18 @@ function* parseSseEvents(block: string): IterableIterator<unknown> {
 		const lineEnd = end > start && block.charCodeAt(end - 1) === 13 ? end - 1 : end;
 		const line = block.slice(start, lineEnd);
 		if (line.startsWith('data:')) {
-			const data = line.slice(5).trimStart();
-			if (data !== '' && data !== '[DONE]') {
-				try {
-					yield JSON.parse(data);
-				} catch {}
-			}
+			dataLines.push(line.slice(5).trimStart());
 		}
-		if (newline === -1) return;
+		if (newline === -1) break;
 		start = newline + 1;
+	}
+	if (dataLines.length === 0) return;
+	const data = dataLines.join('\n');
+	if (data === '' || data === '[DONE]') return;
+	try {
+		yield JSON.parse(data);
+	} catch {
+		console.error(`Workers AI: dropping unparseable SSE data payload: ${data.slice(0, 200)}`);
 	}
 }
 
