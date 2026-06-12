@@ -527,7 +527,7 @@ Reads and writes files in the session sandbox without recording them in the conv
 compact(): Promise<void>;
 ```
 
-Triggers conversation compaction immediately. Resolves without work when there is nothing to compact. Throws if another operation is active on the session.
+Triggers conversation compaction immediately. Resolves without work when there is nothing to compact. Rejects when summarization fails or is aborted. Throws if another operation is active on the session.
 
 ### `session.delete()`
 

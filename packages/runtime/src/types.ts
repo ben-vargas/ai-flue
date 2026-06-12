@@ -599,9 +599,9 @@ export interface FlueSession {
 	 * UIs without waiting for the window to fill.
 	 *
 	 * Resolves successfully (no-op) when there is nothing to compact.
-	 * Throws if another operation (`prompt` / `skill` / `task` / `shell`)
-	 * is in flight on this session — start a separate session for parallel
-	 * branches.
+	 * Rejects when summarization fails or is aborted. Throws if another
+	 * operation (`prompt` / `skill` / `task` / `shell`) is in flight on
+	 * this session — start a separate session for parallel branches.
 	 *
 	 * Emits a {@link FlueEvent} `compaction_start` (with `reason: "manual"`)
 	 * followed by `compaction`. The summarization LLM cost is recorded the

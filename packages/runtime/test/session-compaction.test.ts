@@ -99,6 +99,56 @@ describe('session.compact()', () => {
 		).toBe(true);
 	});
 
+	it('rejects when summarization fails during explicit compaction', async () => {
+		const provider = registerFauxProvider({
+			provider: `session-compaction-${crypto.randomUUID()}`,
+		});
+		providers.push(provider);
+		provider.setResponses([
+			fauxAssistantMessage('old response'),
+			fauxAssistantMessage('ok'),
+			fauxAssistantMessage('', {
+				stopReason: 'error',
+				errorMessage: 'summarization provider unavailable',
+			}),
+		]);
+		const events: FlueEvent[] = [];
+		const model = provider.getModel();
+		const modelSpecifier = `${model.provider}/${model.id}`;
+		const ctx = createFlueContext({
+			id: 'manual-failed-compaction',
+			payload: {},
+			env: {},
+			agentConfig: {
+				systemPrompt: '',
+				skills: {},
+				model: undefined,
+				resolveModel: (requested) => (requested === modelSpecifier ? model : undefined),
+			},
+			createDefaultEnv: async () => createNoopSessionEnv(),
+			defaultStore: new InMemorySessionStore(),
+		});
+		ctx.subscribeEvent((event) => {
+			events.push(event);
+		});
+		const harness = await ctx.init(
+			createAgent(() => ({ model: modelSpecifier, compaction: { keepRecentTokens: 3 } })),
+		);
+		const session = await harness.session();
+		await session.prompt('old marker');
+		await session.prompt('recent marker');
+
+		await expect(session.compact()).rejects.toThrow();
+
+		expect(events.some((event) => event.type === 'compaction')).toBe(false);
+		expect(
+			events.some(
+				(event) =>
+					event.type === 'operation' && event.operationKind === 'compact' && event.isError,
+			),
+		).toBe(true);
+	});
+
 	it('rejects explicit compaction when another session operation is active', async () => {
 		const provider = registerFauxProvider({
 			provider: `session-compaction-${crypto.randomUUID()}`,

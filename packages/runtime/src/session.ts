@@ -1917,7 +1917,10 @@ export class Session implements FlueSession {
 				},
 			);
 
-			if (this.compactionAbortController.signal.aborted) return false;
+			if (this.compactionAbortController.signal.aborted) {
+				if (reason === 'manual') throw abortErrorFor(this.compactionAbortController.signal);
+				return false;
+			}
 
 			this.history.appendCompaction({
 				summary: result.summary,
@@ -1948,6 +1951,9 @@ export class Session implements FlueSession {
 		} catch (error) {
 			const errorMessage = error instanceof Error ? error.message : String(error);
 			this.internalLog('error', `[flue:compaction] Failed: ${errorMessage}`, { error });
+			// Explicit `session.compact()` calls must surface their own failure;
+			// automatic threshold/overflow compaction stays best-effort.
+			if (reason === 'manual') throw error;
 			return false;
 		} finally {
 			this.compactionAbortController = undefined;
