@@ -216,6 +216,14 @@ describe('defineAgentProfile()', () => {
 		expect(() => defineAgentProfile({ durability: { timeoutMs: -1 } })).toThrow('positive integer');
 	});
 
+	it('rejects durability config when declared on a subagent profile', () => {
+		expect(() =>
+			defineAgentProfile({
+				subagents: [{ name: 'helper', model: false, durability: { maxAttempts: 3 } }],
+			}),
+		).toThrow('must not declare durability');
+	});
+
 	it('accepts durability config when a created agent supplies it', async () => {
 		const harness = await createContext().init(
 			createAgent(() => ({ model: false, durability: { maxAttempts: 3, timeoutMs: 7_200_000 } })),

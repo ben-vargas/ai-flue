@@ -276,6 +276,12 @@ function assertSubagents(
 		}
 		const subagent = value as Partial<AgentProfile>;
 		assertAgentName(subagent.name, `${label} subagents[${index}].name`);
+		if (subagent.durability !== undefined) {
+			throw new Error(
+				`[flue] ${label} subagents[${index}] must not declare durability. ` +
+					'Delegated task sessions run inside the parent operation; configure durability on the created agent instead.',
+			);
+		}
 		assertAgentProfile(value, `${label} subagents[${index}]`, activeDefinitions);
 	}
 }

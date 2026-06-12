@@ -385,7 +385,8 @@ export interface AgentProfile {
 	compaction?: false | CompactionConfig;
 	/**
 	 * Durability configuration for durable agent submissions. Controls
-	 * recovery attempt limits and submission timeouts.
+	 * recovery attempt limits and submission timeouts. Rejected on subagent
+	 * profiles — delegated task sessions run inside the parent operation.
 	 */
 	durability?: DurabilityConfig;
 }
