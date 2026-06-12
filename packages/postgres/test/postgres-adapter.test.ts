@@ -48,35 +48,53 @@ function createPgliteRunner(): PgRunner {
 
 // ─── Contract tests (shared) ────────────────────────────────────────────────
 
-defineStoreContractTests('Postgres AgentExecutionStore', {
-	async create() {
-		const runner = createPgliteRunner();
-		const adapter = postgresFromRunner(runner);
-		await adapter.migrate?.();
-		const { executionStore } = await adapter.connect();
-		return executionStore;
-	},
-});
+{
+	let adapter: ReturnType<typeof postgresFromRunner> | undefined;
+	defineStoreContractTests('Postgres AgentExecutionStore', {
+		async create() {
+			adapter = postgresFromRunner(createPgliteRunner());
+			await adapter.migrate?.();
+			const { executionStore } = await adapter.connect();
+			return executionStore;
+		},
+		async cleanup() {
+			await adapter?.close?.();
+			adapter = undefined;
+		},
+	});
+}
 
-defineEventStreamStoreContractTests('Postgres EventStreamStore', {
-	async create() {
-		const runner = createPgliteRunner();
-		const adapter = postgresFromRunner(runner);
-		await adapter.migrate?.();
-		const { eventStreamStore } = await adapter.connect();
-		return eventStreamStore;
-	},
-});
+{
+	let adapter: ReturnType<typeof postgresFromRunner> | undefined;
+	defineEventStreamStoreContractTests('Postgres EventStreamStore', {
+		async create() {
+			adapter = postgresFromRunner(createPgliteRunner());
+			await adapter.migrate?.();
+			const { eventStreamStore } = await adapter.connect();
+			return eventStreamStore;
+		},
+		async cleanup() {
+			await adapter?.close?.();
+			adapter = undefined;
+		},
+	});
+}
 
-defineRunStoreContractTests('Postgres RunStore', {
-	async create() {
-		const runner = createPgliteRunner();
-		const adapter = postgresFromRunner(runner);
-		await adapter.migrate?.();
-		const { runStore } = await adapter.connect();
-		return runStore;
-	},
-});
+{
+	let adapter: ReturnType<typeof postgresFromRunner> | undefined;
+	defineRunStoreContractTests('Postgres RunStore', {
+		async create() {
+			adapter = postgresFromRunner(createPgliteRunner());
+			await adapter.migrate?.();
+			const { runStore } = await adapter.connect();
+			return runStore;
+		},
+		async cleanup() {
+			await adapter?.close?.();
+			adapter = undefined;
+		},
+	});
+}
 
 // ─── Adapter factory tests ──────────────────────────────────────────────────
 
