@@ -320,9 +320,10 @@ export class RouteNotFoundError extends FlueHttpError {
 		super({
 			type: 'route_not_found',
 			message: `No route matches ${method} ${path}.`,
-			// The agent URL shape is part of the public contract, so it's
-			// safe to mention. We do NOT enumerate other registered routes.
-			details: `Agents are served at POST /agents/<name>/<id>.`,
+			// Thrown for any unmatched path (agent, workflow, run, or
+			// otherwise), so the guidance stays generic and we do NOT
+			// enumerate registered routes.
+			details: `Verify the request method and path are correct.`,
 			dev: '',
 			status: 404,
 		});

@@ -949,7 +949,7 @@ describe('createDefaultFlueApp()', () => {
 			error: {
 				type: 'route_not_found',
 				message: 'No route matches GET /not-a-route.',
-				details: 'Agents are served at POST /agents/<name>/<id>.',
+				details: 'Verify the request method and path are correct.',
 			},
 		});
 	});
