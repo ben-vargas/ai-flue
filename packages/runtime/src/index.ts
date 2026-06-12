@@ -2,7 +2,6 @@
 /// <reference path="../types/markdown-md.d.ts" />
 
 export { createAgent, defineAgentProfile } from './agent-definition.ts';
-export type { PersistenceAdapter } from './agent-execution-store.ts';
 export {
 	FlueError,
 	ModelNotConfiguredError,
@@ -89,10 +88,8 @@ export type {
 	PromptResultResponse,
 	PromptUsage,
 	SandboxFactory,
-	SessionData,
 	SessionEntry,
 	SessionEnv,
-	SessionStore,
 	SessionToolFactory,
 	SessionToolFactoryOptions,
 	ShellOptions,
@@ -109,6 +106,10 @@ export type {
 	WorkflowRouteHandler,
 } from './types.ts';
 
+// Note: the persistence storage contract (`PersistenceAdapter`, `SessionStore`,
+// `SessionData`, and friends) lives at `@flue/runtime/adapter`, the canonical
+// surface for persistence adapter authors — not on the root barrel.
+//
 // Note: the public Hono sub-app `flue()` and the `Fetchable` interface
 // for user-authored `app.ts` entries live at `@flue/runtime/routing`, not on
 // the root barrel.

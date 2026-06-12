@@ -43,7 +43,6 @@ import {
   type PromptResultResponse,
   type PromptUsage,
   type SandboxFactory,
-  type SessionStore,
   type ShellOptions,
   type ShellResult,
   type Skill,
