@@ -87,6 +87,20 @@ describe('local()', () => {
 		await rm(directory, { recursive: true, force: true });
 	});
 
+	it('executes shell commands with bash when bash is available on the host', async () => {
+		const harness = await createContext().init(
+			createAgent(() => ({ model: false, sandbox: local() })),
+		);
+
+		// `$0` is the shell's own argv[0]: an absolute bash path under the
+		// fix, but '/bin/sh' under Node's default — even on hosts where sh
+		// is bash in sh-mode, so this catches a regression that bashism
+		// probes would miss.
+		const result = await harness.shell('echo "$0"');
+		expect(result.exitCode).toBe(0);
+		expect(result.stdout.trim()).toMatch(/(^|\/)bash$/);
+	});
+
 	it('inherits shell-essential variables but omits non-allowlisted host secrets when local() receives no env overrides', async () => {
 		const previousPath = process.env.PATH;
 		const previousSecret = process.env.FLUE_LOCAL_TEST_SECRET;

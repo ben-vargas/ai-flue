@@ -6,7 +6,7 @@
  * this through `local(...)`. `exec` shells out via `child_process.spawn`;
  * file methods call `node:fs/promises` directly.
  */
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
@@ -20,7 +20,35 @@ const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
 const KILL_GRACE_MS = 2000;
 
 /**
- * Run `command` through the system shell in its own process group and
+ * Shell used for `exec()`. The model-facing tool is named `bash` and the
+ * default virtual sandbox emulates bash, so prefer real bash over Node's
+ * default `/bin/sh` — on hosts where sh is dash (Debian/Ubuntu CI images)
+ * bashisms like `[[ ]]` and `set -o pipefail` would otherwise fail with
+ * syntax errors the model can't explain. Falls back to the platform default
+ * shell when bash is absent (minimal images, Windows). Probed once per
+ * process, lazily on first exec.
+ *
+ * The probe resolves an absolute path (using the host `process.env` PATH)
+ * so exec() never depends on the sandbox env's PATH to find its own shell —
+ * `/bin/sh` was absolute, and a sandbox with an overridden PATH must still
+ * be able to run commands.
+ */
+let resolvedShell: string | true | undefined;
+function resolveShell(): string | true {
+	if (resolvedShell === undefined) {
+		if (process.platform === 'win32') {
+			resolvedShell = true;
+		} else {
+			const probe = spawnSync('bash', ['-c', 'command -v bash'], { encoding: 'utf8' });
+			const found = probe.status === 0 ? probe.stdout.trim() : '';
+			resolvedShell = found.startsWith('/') ? found : true;
+		}
+	}
+	return resolvedShell;
+}
+
+/**
+ * Run `command` through the shell from `resolveShell()` in its own process group and
  * collect output. On abort (caller signal or timeout) the entire group is
  * signalled (SIGTERM, escalating to SIGKILL) so compound commands can't
  * orphan grandchildren on the host — `child_process.exec`'s `signal` option
@@ -38,7 +66,7 @@ function execShell(
 		const child = spawn(command, {
 			cwd: opts.cwd,
 			env: opts.env,
-			shell: true,
+			shell: resolveShell(),
 			// POSIX: lead a new process group so abort can signal the whole
 			// tree via `process.kill(-pid)`. No-op grouping on Windows.
 			detached: process.platform !== 'win32',
