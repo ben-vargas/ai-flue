@@ -1,22 +1,21 @@
 ---
 title: Superserve
-description: Track the Superserve sandbox connector recipe and its current compatibility status.
-lastReviewedAt: 2026-05-30
+description: Track the Superserve sandbox connector recipe and its current availability status.
+lastReviewedAt: 2026-06-12
 ---
 
-Superserve has a sandbox connector entry in the Flue connector catalog, intended to adapt an initialized Superserve sandbox into Flue's sandbox interface.
+Superserve previously had a sandbox connector entry in the Flue connector catalog, intended to adapt an initialized Superserve sandbox into Flue's sandbox interface.
 
-## Current compatibility status
+## Current availability
 
-Do not use the generated Superserve recipe with the current runtime without reviewing and updating it first. The catalog recipe currently imports an older `@flue/sdk/sandbox` surface and assumes a cleanup callback accepted by `createSandboxSessionEnv(...)`; the current public connector API is exported from `@flue/runtime` and leaves provider resource cleanup to application code.
+The Superserve recipe has been temporarily removed from the `flue add` catalog: it targeted an older connector surface (a removed `@flue/sdk/sandbox` import and a cleanup callback that `createSandboxSessionEnv(...)` no longer accepts) and would not type-check against the current runtime. Restoration is tracked in the Flue repository's issue tracker.
 
-| Intended requirement | Value                                                                                  |
-| -------------------- | -------------------------------------------------------------------------------------- |
-| Provider package     | `@superserve/sdk`                                                                      |
-| Credential           | `SUPERSERVE_API_KEY`                                                                   |
-| Intended environment | Provider-managed sandbox                                                               |
-| Required before use  | Reconcile the generated connector with [Sandbox Connector API](/docs/api/sandbox-api/) |
+| Intended requirement | Value                    |
+| -------------------- | ------------------------ |
+| Provider package     | `@superserve/sdk`        |
+| Credential           | `SUPERSERVE_API_KEY`     |
+| Intended environment | Provider-managed sandbox |
 
-Until that recipe is updated and type-checked against the current runtime, choose another available sandbox connector or implement a project-owned adapter against the public `SandboxApi` contract.
+In the meantime, choose another available sandbox connector or implement a project-owned adapter against the public [Sandbox Connector API](/docs/api/sandbox-api/).
 
 See [Sandboxes](/docs/guide/sandboxes/) and [Sandbox Connector API](/docs/api/sandbox-api/).
