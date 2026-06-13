@@ -27,6 +27,7 @@
 	"peerDependencies": { "@flue/runtime": "workspace:^" },
 	"devDependencies": {
 		"@flue/runtime": "workspace:*",
+		"hono": "4.12.22",
 		"tsdown": "^0.22.0",
 		"typescript": "^6.0.3",
 		"vitest": "^4.1.6"

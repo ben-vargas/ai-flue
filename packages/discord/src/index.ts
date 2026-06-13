@@ -1,9 +1,27 @@
 import { defineTool, type ToolDefinition } from '@flue/runtime';
+import { createDiscordClient } from './client.ts';
+import {
+	DuplicateDiscordHandlerError,
+	InvalidDiscordConversationKeyError,
+	InvalidDiscordInputError,
+} from './errors.ts';
+import { createDiscordInteractionsHandler } from './routes.ts';
+
+export {
+	DiscordApiError,
+	DiscordRateLimitError,
+	DiscordTimeoutError,
+	DuplicateDiscordHandlerError,
+	InvalidDiscordConversationKeyError,
+	InvalidDiscordInputError,
+} from './errors.ts';
 
 export interface DiscordChannelOptions {
 	publicKey: string;
 	applicationId: string;
 	botToken: string;
+	fetch?: typeof globalThis.fetch;
+	requestTimeoutMs?: number;
 }
 
 export type DiscordDestinationRef =
@@ -24,6 +42,13 @@ export interface DiscordComponentData {
 export interface DiscordModalData {
 	customId: string;
 	components: readonly unknown[];
+	fields: readonly DiscordModalField[];
+}
+
+export interface DiscordModalField {
+	customId: string;
+	type: number;
+	value?: string;
 }
 
 export interface DiscordInteractionEnvelope<TData> {
@@ -39,9 +64,15 @@ export interface DiscordComponent {
 	type: number;
 	customId?: string;
 	label?: string;
+	description?: string;
 	style?: number;
 	value?: string;
+	placeholder?: string;
+	required?: boolean;
+	minLength?: number;
+	maxLength?: number;
 	components?: readonly DiscordComponent[];
+	component?: DiscordComponent;
 }
 
 export interface DiscordMessage {
@@ -72,6 +103,7 @@ export type DiscordRouteHandler = (request: Request) => Promise<Response>;
 
 export interface DiscordInteractionRouteOptions {
 	bodyLimit?: number;
+	handlerTimeoutMs?: number;
 }
 
 export interface DiscordClient {
@@ -80,13 +112,6 @@ export interface DiscordClient {
 
 export interface DiscordMessageToolOptions {
 	allowMentions?: Array<'users' | 'roles' | 'everyone'>;
-}
-
-export class InvalidDiscordConversationKeyError extends Error {
-	constructor() {
-		super('Invalid Discord conversation key.');
-		this.name = 'InvalidDiscordConversationKeyError';
-	}
 }
 
 export interface DiscordChannel {
@@ -114,56 +139,73 @@ export interface DiscordChannel {
 }
 
 export function createDiscordChannel(options: DiscordChannelOptions): DiscordChannel {
-	validateOptions(options);
-	const handlers = new Map<string, unknown>();
-	const client: DiscordClient = {
-		async postMessage() {
-			throw new Error('@flue/discord client is not implemented yet.');
-		},
-	};
-	const register = <THandler>(kind: string, key: string, handler: THandler) => {
-		const routeKey = `${kind}:${key}`;
-		if (!key || handlers.has(routeKey)) throw new Error(`Discord interaction handler already registered: ${routeKey}`);
-		handlers.set(routeKey, handler);
-		let active = true;
-		return () => {
-			if (!active) return false;
-			active = false;
-			if (handlers.get(routeKey) !== handler) return false;
-			return handlers.delete(routeKey);
-		};
-	};
+	const publicKey = validateOptions(options);
+	const applicationId = options.applicationId;
+	const client = createDiscordClient(options);
+	const commandHandlers = new Map<
+		string,
+		DiscordInteractionHandler<DiscordInteractionEnvelope<DiscordCommandData>, DiscordCommandResponse>
+	>();
+	const componentHandlers = new Map<
+		string,
+		DiscordInteractionHandler<
+			DiscordInteractionEnvelope<DiscordComponentData>,
+			DiscordComponentResponse
+		>
+	>();
+	const modalHandlers = new Map<
+		string,
+		DiscordInteractionHandler<DiscordInteractionEnvelope<DiscordModalData>, DiscordModalResponse>
+	>();
 
-	return {
+	const channel: DiscordChannel = {
 		routes: {
-			interactions: (_routeOptions) => async () =>
-				new Response('@flue/discord interactions route is not implemented yet.', { status: 501 }),
+			interactions: (routeOptions) =>
+				createDiscordInteractionsHandler({
+					publicKey,
+					applicationId,
+					bodyLimit: routeOptions?.bodyLimit,
+					handlerTimeoutMs: routeOptions?.handlerTimeoutMs,
+					getCommandHandler: (name) => commandHandlers.get(name),
+					getComponentHandler: (customId) => componentHandlers.get(customId),
+					getModalHandler: (customId) => modalHandlers.get(customId),
+				}),
 		},
 		client,
 		tools: {
-			postMessage: (ref, toolOptions = {}) =>
-				defineTool({
+			postMessage: (ref, toolOptions = {}) => {
+				assertDestinationRef(ref);
+				const allowMentions = validateMentionClasses(toolOptions.allowMentions);
+				const boundRef = snapshotDestinationRef(ref);
+				return defineTool({
 					name: 'discord_post_message',
 					description: 'Post a message to the bound Discord destination.',
 					parameters: {
 						type: 'object',
-						properties: { text: { type: 'string' } },
+						properties: { text: { type: 'string', minLength: 1 } },
 						required: ['text'],
 						additionalProperties: false,
 					},
 					execute: async ({ text }, signal) => {
 						await client.postMessage(
-							ref,
-							{ content: String(text), allowedMentions: { parse: toolOptions.allowMentions ?? [] } },
+							boundRef,
+							{ content: text, allowedMentions: { parse: allowMentions } },
 							signal,
 						);
 						return 'Message posted.';
 					},
-				}),
+				});
+			},
 		},
-		onCommand: (name, handler) => register('command', name, handler),
-		onComponent: (customId, handler) => register('component', customId, handler),
-		onModal: (customId, handler) => register('modal', customId, handler),
+		onCommand(name, handler) {
+			return registerOne(commandHandlers, name, handler, 'command');
+		},
+		onComponent(customId, handler) {
+			return registerOne(componentHandlers, customId, handler, 'component');
+		},
+		onModal(customId, handler) {
+			return registerOne(modalHandlers, customId, handler, 'modal');
+		},
 		conversationKey(ref) {
 			assertDestinationRef(ref);
 			if (ref.type === 'guild') {
@@ -185,14 +227,14 @@ export function createDiscordChannel(options: DiscordChannelOptions): DiscordCha
 						channelKind,
 					};
 					assertDestinationRef(ref);
-					if (this.conversationKey(ref) !== id) throw new InvalidDiscordConversationKeyError();
+					if (channel.conversationKey(ref) !== id) throw new InvalidDiscordConversationKeyError();
 					return ref;
 				}
 				const dmChannelId = /^discord:v1:dm:([^:]+)$/.exec(id)?.[1];
 				if (!dmChannelId) throw new InvalidDiscordConversationKeyError();
 				const ref: DiscordDestinationRef = { type: 'dm', channelId: decodeURIComponent(dmChannelId) };
 				assertDestinationRef(ref);
-				if (this.conversationKey(ref) !== id) throw new InvalidDiscordConversationKeyError();
+				if (channel.conversationKey(ref) !== id) throw new InvalidDiscordConversationKeyError();
 				return ref;
 			} catch (error) {
 				if (error instanceof InvalidDiscordConversationKeyError) throw error;
@@ -200,14 +242,96 @@ export function createDiscordChannel(options: DiscordChannelOptions): DiscordCha
 			}
 		},
 	};
+
+	return channel;
 }
 
-function validateOptions(options: DiscordChannelOptions): void {
-	if (!options.publicKey || !options.applicationId || !options.botToken) {
-		throw new Error('@flue/discord requires publicKey, applicationId, and botToken.');
+function registerOne<TKey, THandler>(
+	handlers: Map<TKey, THandler>,
+	key: TKey,
+	handler: THandler,
+	kind: 'command' | 'component' | 'modal',
+): () => void {
+	if (typeof key !== 'string' || key.length === 0 || key.trim() !== key) {
+		throw new InvalidDiscordInputError(`${kind} key`);
 	}
+	if (typeof handler !== 'function') {
+		throw new TypeError(`Discord ${kind} handler must be a function.`);
+	}
+	if (handlers.has(key)) throw new DuplicateDiscordHandlerError(kind, key);
+	handlers.set(key, handler);
+	let active = true;
+	return () => {
+		if (!active) return false;
+		active = false;
+		if (handlers.get(key) !== handler) return false;
+		return handlers.delete(key);
+	};
+}
+
+function validateOptions(options: DiscordChannelOptions): Uint8Array {
+	if (!options || typeof options !== 'object') throw new InvalidDiscordInputError('options');
+	if (!/^[0-9a-fA-F]{64}$/.test(options.publicKey)) {
+		throw new InvalidDiscordInputError('publicKey');
+	}
+	assertIdentifier(options.applicationId, 'applicationId');
+	assertIdentifier(options.botToken, 'botToken');
+	if (
+		options.requestTimeoutMs !== undefined &&
+		(!Number.isSafeInteger(options.requestTimeoutMs) || options.requestTimeoutMs <= 0)
+	) {
+		throw new InvalidDiscordInputError('requestTimeoutMs');
+	}
+	return decodeHex(options.publicKey);
+}
+
+function validateMentionClasses(
+	value: Array<'users' | 'roles' | 'everyone'> | undefined,
+): Array<'users' | 'roles' | 'everyone'> {
+	if (
+		value !== undefined &&
+		(!Array.isArray(value) ||
+			value.some((item) => item !== 'users' && item !== 'roles' && item !== 'everyone'))
+	) {
+		throw new InvalidDiscordInputError('allowMentions');
+	}
+	return [...(value ?? [])];
+}
+
+function snapshotDestinationRef(ref: DiscordDestinationRef): DiscordDestinationRef {
+	return ref.type === 'guild'
+		? {
+				type: 'guild',
+				guildId: ref.guildId,
+				channelId: ref.channelId,
+				channelKind: ref.channelKind,
+			}
+		: { type: 'dm', channelId: ref.channelId };
 }
 
 function assertDestinationRef(ref: DiscordDestinationRef): void {
-	if (!ref.channelId || (ref.type === 'guild' && !ref.guildId)) throw new InvalidDiscordConversationKeyError();
+	if (!ref || typeof ref !== 'object') throw new InvalidDiscordInputError('ref');
+	assertIdentifier(ref.channelId, 'channelId');
+	if (ref.type === 'guild') {
+		assertIdentifier(ref.guildId, 'guildId');
+		if (ref.channelKind !== 'channel' && ref.channelKind !== 'thread') {
+			throw new InvalidDiscordInputError('channelKind');
+		}
+		return;
+	}
+	if (ref.type !== 'dm') throw new InvalidDiscordInputError('destination type');
+}
+
+function assertIdentifier(value: unknown, field: string): asserts value is string {
+	if (typeof value !== 'string' || value.length === 0 || value.trim() !== value) {
+		throw new InvalidDiscordInputError(field);
+	}
+}
+
+function decodeHex(value: string): Uint8Array {
+	const bytes = new Uint8Array(value.length / 2);
+	for (let index = 0; index < bytes.length; index += 1) {
+		bytes[index] = Number.parseInt(value.slice(index * 2, index * 2 + 2), 16);
+	}
+	return bytes;
 }
