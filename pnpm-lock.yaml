@@ -216,9 +216,6 @@ importers:
       '@flue/runtime':
         specifier: workspace:*
         version: link:../../packages/runtime
-      discord-api-types:
-        specifier: ^0.38.48
-        version: 0.38.48
     devDependencies:
       '@cloudflare/vitest-pool-workers':
         specifier: 0.16.15
@@ -844,6 +841,9 @@ importers:
 
   packages/discord:
     dependencies:
+      discord-api-types:
+        specifier: 0.38.48
+        version: 0.38.48
       hono:
         specifier: 4.12.22
         version: 4.12.22

@@ -1,53 +1,90 @@
 ---
 title: Discord
 description: Receive verified Discord interactions and use a project-owned REST client.
+subtitle: Receive commands, components, autocomplete requests, and modal submissions over verified HTTP, then respond or call Discord's REST API from application code.
+package:
+  name: '@flue/discord'
+  href: https://www.npmjs.com/package/@flue/discord
+lastReviewedAt: 2026-06-13
 ---
 
 ## Add Discord
 
-Run the Discord recipe through your coding agent:
+Add Discord as an inbound channel to any existing Flue project by running the
+following command in your terminal, or your coding agent of choice.
 
 ```sh
-flue add discord --print | codex
+flue add discord
 ```
 
-It installs `@flue/discord`, `@discordjs/rest`, and `discord-api-types`.
-Discord does not publish an official JavaScript REST SDK;
-`@discordjs/rest` is the dominant community-maintained client.
+The recipe installs and configures `@flue/discord` for inbound HTTP
+interactions, along with the project-owned `@discordjs/rest` client for outbound API calls. After running the command, you will have a new
+`src/channels/discord.ts` module exporting `channel` and `client`.
 
-Set the application's interactions endpoint to:
+Discord does not publish an official JavaScript REST SDK. `@discordjs/rest` is
+a community-maintained client; its capabilities are application code rather
+than features implemented by `@flue/discord`.
+
+## Configure Discord
+
+Set these application secrets:
+
+| Variable             | Purpose                                     |
+| -------------------- | ------------------------------------------- |
+| `DISCORD_PUBLIC_KEY` | Verifies inbound interaction request bytes. |
+| `DISCORD_BOT_TOKEN`  | Authenticates outbound Discord REST calls.  |
+
+In the Discord Developer Portal, set the application's Interactions Endpoint
+URL to the full public HTTPS route:
 
 ```txt
 https://example.com/channels/discord/interactions
 ```
 
-`DISCORD_PUBLIC_KEY` verifies inbound Ed25519 signatures.
-`DISCORD_APPLICATION_ID` constrains signed provider identity.
-`DISCORD_BOT_TOKEN` authenticates outbound REST calls.
+Register only the application commands your project handles. Endpoint and
+command registration are provider setup owned by the application, not by the
+channel package.
 
-## Channel module
+## Supported HTTP interaction
+
+| Discord surface                                                                                | Webhook path                     |
+| ---------------------------------------------------------------------------------------------- | -------------------------------- |
+| [HTTP interactions](https://docs.discord.com/developers/interactions/receiving-and-responding) | `/channels/discord/interactions` |
+
+Discord can deliver interactions through the Gateway or an outgoing webhook,
+but not both for the same application. `@flue/discord` implements the verified
+HTTP path. Discord Gateway is a persistent WebSocket transport and remains
+outside the channel model.
+
+Signed PING requests are answered with PONG internally before application code
+runs.
+
+### Handle interactions
 
 ```ts title="src/channels/discord.ts"
-import { REST } from '@discordjs/rest';
-import { createDiscordChannel } from '@flue/discord';
-import { defineTool, dispatch } from '@flue/runtime';
-import type { APIInteractionResponse } from 'discord-api-types/v10';
+import {
+  type APIInteraction,
+  type APIInteractionResponse,
+  createDiscordChannel,
+  type DiscordDestinationRef,
+} from '@flue/discord';
+import { dispatch } from '@flue/runtime';
 import assistant from '../agents/assistant.ts';
-
-export const client = new REST({ version: '10' }).setToken(process.env.DISCORD_BOT_TOKEN!);
 
 export const channel = createDiscordChannel({
   publicKey: process.env.DISCORD_PUBLIC_KEY!,
-  applicationId: process.env.DISCORD_APPLICATION_ID!,
 
   // Path: /channels/discord/interactions
   async interactions({ interaction }) {
-    if (
-      interaction.type !== 'command' ||
-      interaction.data.name !== 'ask' ||
-      !interaction.destination ||
-      interaction.destination.type === 'private'
-    ) {
+    if (interaction.type !== 2 || interaction.data.name !== 'ask') {
+      return {
+        type: 4,
+        data: { content: 'Unsupported interaction.', flags: 64 },
+      } satisfies APIInteractionResponse;
+    }
+
+    const destination = destinationFromInteraction(interaction);
+    if (!destination || destination.type === 'private') {
       return {
         type: 4,
         data: { content: 'Unsupported interaction.', flags: 64 },
@@ -55,13 +92,14 @@ export const channel = createDiscordChannel({
     }
 
     await dispatch(assistant, {
-      id: channel.conversationKey(interaction.destination),
+      id: channel.conversationKey(destination),
       input: {
         type: 'discord.command.ask',
         interactionId: interaction.id,
         data: interaction.data,
       },
     });
+
     return {
       type: 4,
       data: { content: 'Your request was accepted.', flags: 64 },
@@ -69,7 +107,94 @@ export const channel = createDiscordChannel({
   },
 });
 
-export function postMessage(ref: { channelId: string }) {
+function destinationFromInteraction(
+  interaction: APIInteraction,
+): DiscordDestinationRef | undefined {
+  const channelId = interaction.channel?.id ?? interaction.channel_id;
+  if (!channelId) return;
+  if (interaction.guild_id) {
+    return { type: 'guild', guildId: interaction.guild_id, channelId };
+  }
+  if (interaction.context === 2 || interaction.channel?.type === 3) {
+    return { type: 'private', channelId };
+  }
+  if (interaction.context === 1 || interaction.channel?.type === 1) {
+    return { type: 'dm', channelId };
+  }
+}
+```
+
+`interaction` is Discord's provider-native API v10 object. Its numeric `type`
+discriminant narrows commands, autocomplete requests, message components, and
+modal submissions while preserving Discord's snake_case fields and nesting.
+The package does not filter authenticated interaction families; the handler
+decides which ones affect the application.
+
+The callback uses the current `APIInteraction` union for strong narrowing.
+Authenticated future numeric types are still forwarded at runtime, so an
+exhaustive branch should tolerate an unfamiliar numeric value after a Discord
+API change.
+
+### Respond within Discord's deadline
+
+Every non-PING HTTP interaction requires a valid Discord interaction response.
+Discord invalidates the interaction token if the initial response is not sent
+within three seconds. The package awaits the application handler and does not
+impose a separate timeout, so admit durable work promptly and return within that
+provider deadline.
+
+An immediate message response uses callback type `4`. A deferred response uses
+type `5` when the application will complete the interaction through Discord's
+webhook API. Interaction tokens remain valid for follow-up operations for up to
+15 minutes.
+
+`interaction.token` is a short-lived response capability. Use it only in
+immediate trusted application code. Keep it out of dispatched input, model
+context, logs, and durable session history.
+
+See Discord's [interaction callback documentation](https://docs.discord.com/developers/interactions/receiving-and-responding#interaction-callback)
+for the response types allowed by each interaction family.
+
+### Choose a conversation destination
+
+Not every interaction represents a durable Discord channel conversation. The
+callback above derives a destination from native `guild_id`, `channel.id`,
+`channel.type`, and `context` fields when those fields are present.
+
+Some valid interactions, including modal submissions, may omit a channel.
+Private-channel interactions can be acknowledged through their interaction
+token, but that capability does not grant the bot arbitrary channel-message
+access.
+
+Use `channel.conversationKey(ref)` when a Discord destination should continue
+the same agent instance. Conversation keys are identifiers, not authorization
+capabilities. See the shared [Channels guide](/docs/guide/channels/) for dispatch,
+authorization, and deduplication guidance.
+
+## Outbound REST
+
+Outbound Discord behavior belongs to the exported project-owned client:
+
+```ts title="src/channels/discord.ts"
+import { REST } from '@discordjs/rest';
+
+export const client = new REST({ version: '10' }).setToken(process.env.DISCORD_BOT_TOKEN!);
+```
+
+Bot-token messages, application-command registration, and interaction-token
+follow-ups or edits are Discord REST operations. They are not implemented by
+`@flue/discord`.
+
+## Discord Tools
+
+Use the client to define an application-owned tool with its destination bound in
+trusted code:
+
+```ts title="src/channels/discord.ts"
+import { defineTool } from '@flue/runtime';
+import type { DiscordDestinationRef } from '@flue/discord';
+
+export function postMessage(ref: DiscordDestinationRef) {
   return defineTool({
     name: 'post_discord_message',
     description: 'Post to the Discord destination bound to this agent.',
@@ -89,26 +214,7 @@ export function postMessage(ref: { channelId: string }) {
 }
 ```
 
-PING/PONG is handled internally. Verified commands, autocomplete, components,
-and modals use discriminated variants; unsupported verified interaction types
-arrive as `type: 'unknown'`. Every application callback must return a Discord
-interaction response or an ordinary Hono `Response`.
-
-Some valid interactions, including modal submissions, may omit a durable
-destination. Private-channel interactions can be acknowledged with their
-short-lived interaction capability, but the bot client cannot post arbitrary
-messages into those channels.
-
-Keep `interaction.capabilities` and `interaction.raw` out of dispatched input,
-model context, logs, and durable history. Bot-token posts are ordinary new
-messages, not interaction follow-ups or guaranteed ephemeral responses.
-
-The package-root `@discordjs/rest` import selects its Fetch-based web export in
-Cloudflare Workers. This example keeps `discord-api-types` imports type-only so
-the Worker bundle does not depend on its runtime route helpers. Use the
-project's Worker secret bindings and verify the Worker build.
-
-## Bind the tool
+Bind the destination when creating the agent:
 
 ```ts title="src/agents/assistant.ts"
 import { createAgent } from '@flue/runtime';
@@ -120,8 +226,18 @@ export default createAgent(({ id }) => ({
 }));
 ```
 
-Discord interactions do not provide dependable redelivery after failures.
-Claim interaction ids in application-owned storage when unique admission is
-required.
+The model selects message content. It does not select arbitrary Discord
+channels, credentials, or REST methods. This tool creates an ordinary bot-token
+channel message, not an interaction follow-up or guaranteed ephemeral response.
 
-See the [`@flue/discord` API reference](/docs/api/discord-channel/).
+## Delivery and runtime behavior
+
+Discord does not document dependable interaction redelivery behavior. Preserve
+`interaction.id` for tracing, and claim it in application-owned durable storage
+before dispatch when duplicate admission is unacceptable. The channel itself is
+stateless and does not deduplicate interaction ids.
+
+`@flue/discord` runs in Node and Cloudflare Workers with Flue's required
+`nodejs_compat` setting. The example executes `@discordjs/rest` channel-message
+request construction against a fail-closed fake Fetch transport in both
+runtimes. Validate any additional REST operations your application depends on.

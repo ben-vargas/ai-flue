@@ -31,6 +31,7 @@
 		"test:workerd": "vitest run --config vitest.workerd.config.ts"
 	},
 	"dependencies": {
+		"discord-api-types": "0.38.48",
 		"hono": "4.12.22"
 	},
 	"devDependencies": {

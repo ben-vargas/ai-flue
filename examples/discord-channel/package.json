@@ -5,13 +5,14 @@
 	"scripts": {
 		"build": "flue build --target node",
 		"check:types": "tsc --noEmit",
-		"test": "vitest run --config vitest.workerd.config.ts"
+		"test": "pnpm run test:node && pnpm run test:workerd",
+		"test:node": "vitest run test/client.test.ts",
+		"test:workerd": "vitest run --config vitest.workerd.config.ts"
 	},
 	"dependencies": {
 		"@discordjs/rest": "^2.6.1",
 		"@flue/discord": "workspace:*",
-		"@flue/runtime": "workspace:*",
-		"discord-api-types": "^0.38.48"
+		"@flue/runtime": "workspace:*"
 	},
 	"devDependencies": {
 		"@cloudflare/vitest-pool-workers": "0.16.15",

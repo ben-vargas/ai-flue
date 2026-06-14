@@ -1,16 +1,10 @@
+import type { APIInteraction, APIInteractionResponse } from 'discord-api-types/v10';
 import type { Context, Env, Handler } from 'hono';
 import { InvalidDiscordConversationKeyError, InvalidDiscordInputError } from './errors.ts';
 import { createDiscordInteractionsHandler } from './routes.ts';
 
 export { InvalidDiscordConversationKeyError, InvalidDiscordInputError } from './errors.ts';
-
-export type JsonValue =
-	| null
-	| boolean
-	| number
-	| string
-	| JsonValue[]
-	| { [key: string]: JsonValue };
+export type { APIInteraction, APIInteractionResponse };
 
 export interface ChannelRoute<E extends Env = Env> {
 	readonly method: string;
@@ -18,181 +12,52 @@ export interface ChannelRoute<E extends Env = Env> {
 	readonly handler: Handler<E>;
 }
 
-/** Ingress configuration for one fixed Discord application. */
 export interface DiscordChannelOptions<E extends Env = Env> {
-	/** 32-byte Discord application public key encoded as 64 hexadecimal characters. */
+	/** Public key used to verify exact Discord request bytes. */
 	publicKey: string;
-	/** Expected signed Discord application id. */
-	applicationId: string;
 	/** Maximum request-body size in bytes. Defaults to 1 MiB. */
 	bodyLimit?: number;
-	/** Handler deadline in milliseconds. Defaults to and may not exceed 2500. */
-	handlerTimeoutMs?: number;
+	/** Receives authenticated provider-native interactions other than PING. */
 	interactions(input: DiscordInteractionsHandlerInput<E>): DiscordHandlerResult;
 }
 
-/** Stable Discord destination when an interaction supplies channel identity. */
 export type DiscordDestinationRef =
-	| { type: 'guild'; guildId: string; channelId: string; channelKind: 'channel' | 'thread' }
+	| { type: 'guild'; guildId: string; channelId: string }
 	| { type: 'dm'; channelId: string }
 	| { type: 'private'; channelId: string };
 
-/** User who invoked a verified interaction. */
-export interface DiscordUserRef {
-	id: string;
-}
-
-/** Installation identities that authorized an interaction. */
-export interface DiscordAuthorizingIntegrationOwners {
-	guildId?: string;
-	userId?: string;
-}
-
-/**
- * Short-lived capability for interaction callbacks and follow-up messages.
- *
- * Never place this value in model context, dispatch input, logs, or durable
- * session data.
- */
-export interface DiscordInteractionCapabilities {
-	token: string;
-}
-
-export interface DiscordCommandData {
-	/** Discord application-command type. */
-	commandType: number;
-	name: string;
-	options: readonly unknown[];
-	targetId?: string;
-	resolved?: unknown;
-}
-
-export interface DiscordAutocompleteData {
-	name: string;
-	options: readonly unknown[];
-	resolved?: unknown;
-}
-
-export interface DiscordComponentData {
-	customId: string;
-	componentType: number;
-	values?: readonly string[];
-	resolved?: unknown;
-	message: unknown;
-}
-
-export interface DiscordModalData {
-	customId: string;
-	components: readonly unknown[];
-	fields: readonly DiscordModalField[];
-	resolved?: unknown;
-}
-
-export interface DiscordModalField {
-	customId: string;
-	type: number;
-	value?: string | boolean | null;
-	values?: readonly string[];
-}
-
-export interface DiscordInteractionEnvelope<TType extends string, TData> {
-	type: TType;
-	id: string;
-	applicationId: string;
-	user: DiscordUserRef;
-	/** Discord interaction-context type when supplied by the provider. */
-	context?: number;
-	destination?: DiscordDestinationRef;
-	locale?: string;
-	guildLocale?: string;
-	authorizingIntegrationOwners?: DiscordAuthorizingIntegrationOwners;
-	capabilities: DiscordInteractionCapabilities;
-	data: TData;
-	/** Complete parsed payload. It may contain sensitive provider capabilities. */
-	raw: unknown;
-}
-
-export type DiscordCommandInteraction = DiscordInteractionEnvelope<'command', DiscordCommandData>;
-export type DiscordAutocompleteInteraction = DiscordInteractionEnvelope<
-	'autocomplete',
-	DiscordAutocompleteData
->;
-export type DiscordComponentInteraction = DiscordInteractionEnvelope<
-	'component',
-	DiscordComponentData
->;
-export type DiscordModalInteraction = DiscordInteractionEnvelope<'modal', DiscordModalData>;
-
-export interface DiscordUnknownInteraction {
-	type: 'unknown';
-	interactionType: number;
-	id: string;
-	applicationId: string;
-	user: DiscordUserRef;
-	context?: number;
-	destination?: DiscordDestinationRef;
-	locale?: string;
-	guildLocale?: string;
-	authorizingIntegrationOwners?: DiscordAuthorizingIntegrationOwners;
-	capabilities: DiscordInteractionCapabilities;
-	raw: unknown;
-}
-
-export type DiscordInteraction =
-	| DiscordCommandInteraction
-	| DiscordAutocompleteInteraction
-	| DiscordComponentInteraction
-	| DiscordModalInteraction
-	| DiscordUnknownInteraction;
-
-/**
- * Discord interaction callback response in provider wire format.
- *
- * The package checks JSON compatibility at runtime but does not duplicate
- * Discord's full response schema.
- */
-export interface DiscordInteractionResponse {
-	type: number;
-	data?: JsonValue;
-}
-
+/** Discord wire response or an explicit Hono/Fetch response. */
 export type DiscordHandlerResult =
-	| DiscordInteractionResponse
+	| APIInteractionResponse
 	| Response
-	| Promise<DiscordInteractionResponse | Response>;
+	| Promise<APIInteractionResponse | Response>;
 
 export interface DiscordInteractionsHandlerInput<E extends Env = Env> {
 	c: Context<E>;
-	interaction: DiscordInteraction;
+	interaction: APIInteraction;
 }
 
-/** Verified interactions and canonical identity helpers. */
 export interface DiscordChannel<E extends Env = Env> {
 	readonly routes: readonly ChannelRoute<E>[];
-	/** Serializes a canonical namespaced identifier. It is not an authorization capability. */
 	conversationKey(ref: DiscordDestinationRef): string;
-	/** Parses only canonical keys produced by `conversationKey()`. */
 	parseConversationKey(id: string): DiscordDestinationRef;
 }
 
 /**
- * Creates a fixed-application Discord HTTP interactions channel.
+ * Creates a Discord HTTP interactions channel.
  *
- * PING is handled internally. Successful interactions wait for the configured
- * handler, and the channel does not deduplicate interaction ids.
+ * Signed PING requests are handled internally. Other authenticated payloads
+ * preserve Discord's field names, nesting, and numeric discriminants. The
+ * channel does not deduplicate interaction ids or impose a handler timeout.
  */
 export function createDiscordChannel<E extends Env = Env>(
 	options: DiscordChannelOptions<E>,
 ): DiscordChannel<E> {
 	const publicKey = validateOptions(options);
-	const applicationId = options.applicationId;
-	const interactions = options.interactions;
 	const handler = createDiscordInteractionsHandler({
 		publicKey,
-		applicationId,
 		bodyLimit: options.bodyLimit,
-		handlerTimeoutMs: options.handlerTimeoutMs,
-		interactions,
+		interactions: options.interactions,
 	});
 
 	const channel: DiscordChannel<E> = {
@@ -200,22 +65,20 @@ export function createDiscordChannel<E extends Env = Env>(
 		conversationKey(ref) {
 			assertDestinationRef(ref);
 			if (ref.type === 'guild') {
-				return `discord:v1:guild:${encodeURIComponent(ref.guildId)}:${ref.channelKind}:${encodeURIComponent(ref.channelId)}`;
+				return `discord:v1:guild:${encodeURIComponent(ref.guildId)}:${encodeURIComponent(ref.channelId)}`;
 			}
 			return `discord:v1:${ref.type}:${encodeURIComponent(ref.channelId)}`;
 		},
 		parseConversationKey(id) {
 			try {
-				const guild = /^discord:v1:guild:([^:]+):(channel|thread):([^:]+)$/.exec(id);
+				const guild = /^discord:v1:guild:([^:]+):([^:]+)$/.exec(id);
 				const guildId = guild?.[1];
-				const channelKind = guild?.[2];
-				const channelId = guild?.[3];
-				if (guildId && (channelKind === 'channel' || channelKind === 'thread') && channelId) {
+				const channelId = guild?.[2];
+				if (guildId && channelId) {
 					const ref: DiscordDestinationRef = {
 						type: 'guild',
 						guildId: decodeURIComponent(guildId),
 						channelId: decodeURIComponent(channelId),
-						channelKind,
 					};
 					assertDestinationRef(ref);
 					if (channel.conversationKey(ref) !== id) throw new InvalidDiscordConversationKeyError();
@@ -249,7 +112,6 @@ function validateOptions<E extends Env>(options: DiscordChannelOptions<E>): Uint
 	if (!/^[0-9a-fA-F]{64}$/.test(options.publicKey)) {
 		throw new InvalidDiscordInputError('publicKey');
 	}
-	assertIdentifier(options.applicationId, 'applicationId');
 	if (typeof options.interactions !== 'function') {
 		throw new InvalidDiscordInputError('interactions');
 	}
@@ -261,9 +123,6 @@ function assertDestinationRef(ref: DiscordDestinationRef): void {
 	assertIdentifier(ref.channelId, 'channelId');
 	if (ref.type === 'guild') {
 		assertIdentifier(ref.guildId, 'guildId');
-		if (ref.channelKind !== 'channel' && ref.channelKind !== 'thread') {
-			throw new InvalidDiscordInputError('channelKind');
-		}
 		return;
 	}
 	if (ref.type !== 'dm' && ref.type !== 'private') {

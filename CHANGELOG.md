@@ -11,6 +11,8 @@
 - **Session and event contracts are tightened.** Public session operations expose `FlueSession`, subagent profiles are self-contained, session errors are typed, and durable events now carry `v: 1` without persisting `turn_request` or raw `assistantMessageEvent` payloads.
 - **Cloudflare extension imports moved.** Generated-entry plumbing now lives under `@flue/runtime/cloudflare/internal`; user-facing Cloudflare imports remain authoring-only.
 - **Slack handlers now receive provider-native payloads.** `events`, `interactions`, and `commands` use `{ c, payload }`; Events API callbacks expose the official `SlackEvent` union, and normalized wrappers, fixed-workspace filtering, package timeouts, and legacy interaction types are removed.
+- **Discord handlers now receive provider-native interactions.** Callbacks preserve Discord API v10 fields and numeric discriminants; normalized wrappers, redundant application-id filtering, the non-cancelling package timeout, and redundant guild channel/thread identity are removed.
+- **Google Chat handlers now receive provider-native deliveries.** Direct interactions use `{ c, payload }`, wrapped Workspace Events use `{ c, delivery }`, and normalized event wrappers and the non-cancelling package timeout are removed.
 
 ### New Features
 

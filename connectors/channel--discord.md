@@ -17,37 +17,44 @@ first existing source root: `<root>/.flue/`, then `<root>/src/`, then
 `<root>/`. Inspect existing agents, environment types, secret conventions, and
 the interaction commands the application supports.
 
-Install `@flue/discord`, `@discordjs/rest`, and `discord-api-types`. Discord
-does not publish an official JavaScript REST SDK; `@discordjs/rest` is the
+Install `@flue/discord` and `@discordjs/rest`. Discord does not publish an
+official JavaScript REST SDK; `@discordjs/rest` is the
 dominant community-maintained REST client. Do not add Discord Gateway or a
 long-lived bot connection for outbound REST calls.
 
 ## Create the channel
 
 Create `<source-dir>/channels/discord.ts`. Adapt the imported agent, command
-name, dispatched input, and immediate response:
+name, dispatched input, immediate response, and application-owned destination
+derivation:
 
 ```ts
 import { REST } from '@discordjs/rest';
-import { createDiscordChannel } from '@flue/discord';
+import {
+  createDiscordChannel,
+  type APIInteraction,
+  type APIInteractionResponse,
+  type DiscordDestinationRef,
+} from '@flue/discord';
 import { defineTool, dispatch } from '@flue/runtime';
-import type { APIInteractionResponse } from 'discord-api-types/v10';
 import assistant from '../agents/assistant.ts';
 
 export const client = new REST({ version: '10' }).setToken(process.env.DISCORD_BOT_TOKEN!);
 
 export const channel = createDiscordChannel({
   publicKey: process.env.DISCORD_PUBLIC_KEY!,
-  applicationId: process.env.DISCORD_APPLICATION_ID!,
 
   // Path: /channels/discord/interactions
   async interactions({ interaction }) {
-    if (
-      interaction.type !== 'command' ||
-      interaction.data.name !== 'ask' ||
-      !interaction.destination ||
-      interaction.destination.type === 'private'
-    ) {
+    if (interaction.type !== 2 || interaction.data.name !== 'ask') {
+      return {
+        type: 4,
+        data: { content: 'Unsupported interaction.', flags: 64 },
+      } satisfies APIInteractionResponse;
+    }
+
+    const destination = destinationFromInteraction(interaction);
+    if (!destination || destination.type === 'private') {
       return {
         type: 4,
         data: { content: 'Unsupported interaction.', flags: 64 },
@@ -55,7 +62,7 @@ export const channel = createDiscordChannel({
     }
 
     await dispatch(assistant, {
-      id: channel.conversationKey(interaction.destination),
+      id: channel.conversationKey(destination),
       input: {
         type: 'discord.command.ask',
         interactionId: interaction.id,
@@ -69,7 +76,7 @@ export const channel = createDiscordChannel({
   },
 });
 
-export function postMessage(ref: { channelId: string }) {
+export function postMessage(ref: DiscordDestinationRef) {
   return defineTool({
     name: 'post_discord_message',
     description: 'Post a message to the Discord destination bound to this agent.',
@@ -87,19 +94,36 @@ export function postMessage(ref: { channelId: string }) {
     },
   });
 }
+
+function destinationFromInteraction(interaction: APIInteraction): DiscordDestinationRef | undefined {
+  const channelId = interaction.channel?.id ?? interaction.channel_id;
+  if (!channelId) return undefined;
+  if (interaction.guild_id) {
+    return { type: 'guild', guildId: interaction.guild_id, channelId };
+  }
+  if (interaction.context === 2 || interaction.channel?.type === 3) {
+    return { type: 'private', channelId };
+  }
+  if (interaction.context === 1 || interaction.channel?.type === 1) {
+    return { type: 'dm', channelId };
+  }
+  return undefined;
+}
 ```
 
-Discord interactions require a provider response; do not rely on an empty
-acknowledgement. PING/PONG is handled by `@flue/discord`. Keep interaction
-capabilities and raw payloads out of dispatched input and tools. Some valid
-interactions have no durable destination, and private-channel interactions
-cannot be used as arbitrary bot-token message destinations.
+This application-owned helper derives `DiscordDestinationRef` from native
+`guild_id`, `channel.id`, deprecated `channel_id`, `channel.type`, and `context`
+fields. Discord interactions require a provider
+response; do not rely on an empty acknowledgement. PING/PONG is handled by
+`@flue/discord`. Keep the native `interaction.token` out of dispatched input,
+tools, model context, logs, and durable history. Some valid interactions have no
+durable destination, and private-channel interactions cannot be used as
+arbitrary bot-token message destinations.
 
 The package-root `@discordjs/rest` import selects its Fetch-based web export in
-Cloudflare Workers. Keep `discord-api-types` imports type-only so the Worker
-bundle does not depend on its runtime route helpers. Follow the project's
-Worker secret binding convention and verify the actual Worker build. Do not
-expose arbitrary channel ids, routes, or bot tokens to the model.
+Cloudflare Workers. Follow the project's Worker secret binding convention and
+verify the actual Worker build. Do not expose arbitrary channel ids, routes, or
+bot tokens to the model.
 
 ## Wire the agent
 
@@ -119,12 +143,17 @@ read inside deferred callbacks and initializers.
 ## Credentials and verification
 
 `DISCORD_PUBLIC_KEY` verifies inbound Ed25519 signatures.
-`DISCORD_APPLICATION_ID` constrains inbound identity.
 `DISCORD_BOT_TOKEN` authenticates outbound REST calls. Follow project secret
 conventions and never invent values.
 
-Run the project's typecheck and configured Flue build. Generate a local Ed25519
-key pair and signed PING and command payloads. Test invalid signatures,
-application-id mismatch, PING/PONG, `/channels/discord/interactions`, the typed
-command response, and the deferred channel-agent import cycle. Do not contact
-Discord.
+After deployment, configure the Discord application's Interactions Endpoint URL
+to the full public HTTPS `/channels/discord/interactions` route. Registering
+application commands is also application-owned; add only the commands this
+project handles.
+
+Run the project's typecheck and configured Flue builds. Generate a local Ed25519
+key pair and signed PING and command payloads. Test changed bytes, malformed
+authentication, PING/PONG, `/channels/discord/interactions`, provider-native
+payload pass-through, and the deferred channel-agent import cycle. Exercise the
+real `@discordjs/rest` client against a fail-closed fake Fetch transport in Node
+and workerd. Do not contact Discord.

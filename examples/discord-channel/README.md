@@ -5,7 +5,7 @@ Example of verified Discord HTTP interactions at
 routing, destination identity, and one application-owned REST tool bound to the
 agent's destination.
 
-`DISCORD_PUBLIC_KEY`, `DISCORD_APPLICATION_ID`, and `DISCORD_BOT_TOKEN` are required when the built application starts. Builds and type checks do not require live credentials.
+`DISCORD_PUBLIC_KEY` and `DISCORD_BOT_TOKEN` are required when the built application starts. Builds and type checks do not require live credentials.
 
 The channel module exports both the ingress `channel` and the project-owned
 `@discordjs/rest` client. Discord does not publish an official JavaScript REST
@@ -26,8 +26,6 @@ bot-token post is a new ordinary message, not an interaction follow-up or an
 ephemeral response.
 
 The package-root `@discordjs/rest` import selects its Fetch-based web build in
-Cloudflare Workers. `discord-api-types` remains type-only in the Worker-facing
-module so the Worker bundle does not depend on its runtime route helpers.
-Discord Gateway events and deferred interaction-token replies remain
-application concerns. A public HTTPS tunnel is required for local webhook
+Cloudflare Workers. Discord Gateway events and deferred interaction-token
+replies remain application concerns. A public HTTPS tunnel is required for local webhook
 development.

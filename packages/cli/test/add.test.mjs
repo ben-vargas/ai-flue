@@ -323,6 +323,21 @@ describe('flue add', () => {
 		assert.ok(!result.stdout.startsWith('---'));
 	});
 
+	it('prints provider-native payload guidance when the Discord recipe is requested', async () => {
+		const result = await runCli(['add', 'discord', '--print']);
+		assert.equal(result.code, 0);
+		assert.ok(result.stdout.startsWith('# Add a Discord Channel to Flue'));
+		assert.ok(result.stdout.includes('export const channel'));
+		assert.ok(result.stdout.includes('export const client'));
+		assert.ok(result.stdout.includes('/channels/discord/interactions'));
+		assert.ok(result.stdout.includes('async interactions({ interaction })'));
+		assert.ok(result.stdout.includes('interaction.type !== 2'));
+		assert.ok(!result.stdout.includes('DISCORD_APPLICATION_ID'));
+		assert.ok(!result.stdout.includes("interaction.type !== 'command'"));
+		assert.ok(result.stdout.includes('Do not add Discord Gateway'));
+		assert.ok(!result.stdout.startsWith('---'));
+	});
+
 	it('substitutes the provider research URL into the generic channel recipe', async () => {
 		const url = 'https://docs.example.test/webhooks';
 		const result = await runCli(['add', url, '--category', 'channel', '--print']);
