@@ -10,7 +10,7 @@ import {
 const encoder = new TextEncoder();
 
 describe('createLinearChannel()', () => {
-	it('normalizes a signed top-level comment as an issue conversation', async () => {
+	it('forwards a signed comment delivery as its provider-native payload', async () => {
 		const webhook = vi.fn();
 		const linear = createLinearChannel({
 			webhookSecret: 'linear-secret',
@@ -53,78 +53,19 @@ describe('createLinearChannel()', () => {
 
 		expect(response.status).toBe(200);
 		expect(webhook).toHaveBeenCalledOnce();
-		expect(webhook.mock.calls[0]?.[0]).toMatchObject({
-			c: expect.any(Object),
-			event: {
-				type: 'comment',
-				action: 'create',
-				resourceType: 'Comment',
-				organizationId: 'org-sunrise',
-				webhookId: 'hook-copper',
-				deliveryId: 'delivery-moss',
-				actor: {
-					id: 'user-fern',
-					type: 'user',
-					name: 'Mira Chen',
-					email: 'mira@example.test',
-				},
-				conversation: {
-					type: 'issue',
-					organizationId: 'org-sunrise',
-					issueId: 'issue-amber',
-				},
-				payload: {
-					id: 'comment-violet',
-					body: '@flue-agent investigate the worker timeout',
-					issueId: 'issue-amber',
-					userId: 'user-fern',
-				},
-				raw,
-			},
-		});
+		const input = webhook.mock.calls[0]?.[0];
+		expect(input.c).toBeTypeOf('object');
+		expect(input.deliveryId).toBe('delivery-moss');
+		expect(input.payload).toEqual(raw);
 	});
 
-	it('keeps replies in their root issue-comment thread', async () => {
-		const webhook = vi.fn();
-		const linear = createLinearChannel({ webhookSecret: 'secret', webhook });
-		const payload = entityPayload({
-			type: 'Comment',
-			action: 'create',
-			data: {
-				id: 'comment-reply-slate',
-				body: 'The trace points to token refresh.',
-				issueId: 'issue-amber',
-				parentId: 'comment-root-lime',
-			},
-		});
-
-		const response = await channelApp(linear).request(
-			await signedRequest('secret', JSON.stringify(payload)),
-		);
-
-		expect(response.status).toBe(200);
-		expect(webhook.mock.calls[0]?.[0].event).toMatchObject({
-			type: 'comment',
-			conversation: {
-				type: 'issue',
-				issueId: 'issue-amber',
-				threadCommentId: 'comment-root-lime',
-			},
-		});
-	});
-
-	it('normalizes issue and project events for grouped application handling', async () => {
+	it('forwards issue and project deliveries for grouped application handling', async () => {
 		const seen: string[] = [];
 		const linear = createLinearChannel({
 			webhookSecret: 'secret',
-			webhook({ event }) {
-				switch (event.type) {
-					case 'issue':
-					case 'project':
-						seen.push(`${event.type}.${event.action}`);
-						return;
-					default:
-						return;
+			webhook({ payload }) {
+				if (payload.type === 'Issue' || payload.type === 'Project') {
+					seen.push(`${payload.type}.${payload.action}`);
 				}
 			},
 		});
@@ -173,10 +114,10 @@ describe('createLinearChannel()', () => {
 
 		expect(issueResponse.status).toBe(200);
 		expect(projectResponse.status).toBe(200);
-		expect(seen).toEqual(['issue.update', 'project.create']);
+		expect(seen).toEqual(['Issue.update', 'Project.create']);
 	});
 
-	it('normalizes a created agent session with prompt context and issue identity', async () => {
+	it('forwards a created agent session with prompt context and nested issue identity', async () => {
 		const webhook = vi.fn();
 		const linear = createLinearChannel({ webhookSecret: 'secret', webhook });
 		const raw = agentSessionPayload({
@@ -198,40 +139,10 @@ describe('createLinearChannel()', () => {
 		);
 
 		expect(response.status).toBe(200);
-		expect(webhook.mock.calls[0]?.[0].event).toMatchObject({
-			type: 'agent_session',
-			action: 'created',
-			conversation: {
-				type: 'agent-session',
-				organizationId: 'org-glacier',
-				agentSessionId: 'session-cobalt',
-			},
-			payload: {
-				appUserId: 'app-user-river',
-				oauthClientId: 'oauth-client-birch',
-				promptContext: '<issue id="RUN-902">Investigate edge retries</issue>',
-				session: {
-					id: 'session-cobalt',
-					status: 'pending',
-					issueId: 'issue-orchid',
-					issue: {
-						id: 'issue-orchid',
-						identifier: 'RUN-902',
-						title: 'Reduce cold-start variance',
-					},
-				},
-				previousComments: [
-					{
-						id: 'comment-history-1',
-						body: 'The problem started after the deploy.',
-					},
-				],
-				guidance: [{ origin: 'team', body: 'Prefer reversible changes.' }],
-			},
-		});
+		expect(webhook.mock.calls[0]?.[0].payload).toEqual(raw);
 	});
 
-	it('normalizes a prompted agent session with the user activity', async () => {
+	it('forwards a prompted agent session with the user activity', async () => {
 		const webhook = vi.fn();
 		const linear = createLinearChannel({ webhookSecret: 'secret', webhook });
 		const raw = agentSessionPayload({
@@ -251,50 +162,18 @@ describe('createLinearChannel()', () => {
 		);
 
 		expect(response.status).toBe(200);
-		expect(webhook.mock.calls[0]?.[0].event).toMatchObject({
-			type: 'agent_session',
-			action: 'prompted',
-			payload: {
-				activity: {
-					id: 'activity-teal',
-					agentSessionId: 'session-cobalt',
-					userId: 'user-sage',
-					content: { type: 'prompt', body: 'Also check the cache headers.' },
-					signal: 'stop',
-					sourceCommentId: 'comment-root-lime',
-				},
-			},
-		});
-	});
-
-	it('rejects inconsistent nested agent-session identities', async () => {
-		const webhook = vi.fn();
-		const linear = createLinearChannel({ webhookSecret: 'secret', webhook });
-		const wrongOrganization = agentSessionPayload({ action: 'created' });
-		(wrongOrganization.agentSession as Record<string, unknown>).organizationId = 'org-other';
-		const wrongActivity = agentSessionPayload({
+		expect(webhook.mock.calls[0]?.[0].payload).toMatchObject({
+			type: 'AgentSessionEvent',
 			action: 'prompted',
 			agentActivity: {
-				id: 'activity-mismatch',
-				agentSessionId: 'session-other',
-				userId: 'user-sage',
-				content: { type: 'prompt', body: 'Continue.' },
+				id: 'activity-teal',
+				agentSessionId: 'session-cobalt',
+				content: { type: 'prompt', body: 'Also check the cache headers.' },
 			},
 		});
-
-		const organizationResponse = await channelApp(linear).request(
-			await signedRequest('secret', JSON.stringify(wrongOrganization)),
-		);
-		const activityResponse = await channelApp(linear).request(
-			await signedRequest('secret', JSON.stringify(wrongActivity)),
-		);
-
-		expect(organizationResponse.status).toBe(400);
-		expect(activityResponse.status).toBe(400);
-		expect(webhook).not.toHaveBeenCalled();
 	});
 
-	it('forwards unsupported signed resource types and actions as unknown events', async () => {
+	it('forwards unmodeled signed resource types and actions without reshaping', async () => {
 		const webhook = vi.fn();
 		const linear = createLinearChannel({ webhookSecret: 'secret', webhook });
 		const raw = entityPayload({
@@ -308,14 +187,7 @@ describe('createLinearChannel()', () => {
 		);
 
 		expect(response.status).toBe(200);
-		expect(webhook.mock.calls[0]?.[0].event).toMatchObject({
-			type: 'unknown',
-			resourceType: 'Document',
-			action: 'archive',
-			organizationId: 'org-glacier',
-			webhookId: 'hook-saffron',
-			raw,
-		});
+		expect(webhook.mock.calls[0]?.[0].payload).toEqual(raw);
 	});
 
 	it('rejects altered bytes and stale or future delivery timestamps', async () => {
@@ -429,7 +301,8 @@ describe('createLinearChannel()', () => {
 		expect(await honoResponse.json()).toEqual({ retry: true });
 	});
 
-	it('returns 500 when the handler throws, times out, or returns non-JSON data', async () => {
+	it('lets the Hono error handler handle callback failures', async () => {
+		const failure = new Error('failure');
 		const payload = entityPayload({
 			type: 'Issue',
 			action: 'create',
@@ -438,35 +311,43 @@ describe('createLinearChannel()', () => {
 		const throwing = createLinearChannel({
 			webhookSecret: 'secret',
 			webhook() {
-				throw new Error('failure');
+				throw failure;
 			},
 		});
-		const timedOut = createLinearChannel({
-			webhookSecret: 'secret',
-			handlerTimeoutMs: 5,
-			webhook: () => new Promise(() => undefined),
+		const app = channelApp(throwing);
+		let received: Error | undefined;
+		app.onError((error, c) => {
+			received = error;
+			return c.text('handled', 503);
+		});
+
+		const response = await app.request(await signedRequest('secret', JSON.stringify(payload)));
+
+		expect(response.status).toBe(503);
+		expect(await response.text()).toBe('handled');
+		expect(received).toBe(failure);
+	});
+
+	it('serializes a non-JSON-typed return through Response.json', async () => {
+		const payload = entityPayload({
+			type: 'Issue',
+			action: 'create',
+			data: { id: 'issue-invalid', identifier: 'API-10', title: 'Non-JSON result' },
 		});
 		const invalid = createLinearChannel({
 			webhookSecret: 'secret',
 			webhook: () => new Map() as never,
 		});
 
-		const throwingResponse = await channelApp(throwing).request(
-			await signedRequest('secret', JSON.stringify(payload)),
-		);
-		const timeoutResponse = await channelApp(timedOut).request(
-			await signedRequest('secret', JSON.stringify(payload)),
-		);
 		const invalidResponse = await channelApp(invalid).request(
 			await signedRequest('secret', JSON.stringify(payload)),
 		);
 
-		expect(throwingResponse.status).toBe(500);
-		expect(timeoutResponse.status).toBe(500);
-		expect(invalidResponse.status).toBe(500);
+		expect(invalidResponse.status).toBe(200);
+		expect(await invalidResponse.json()).toEqual({});
 	});
 
-	it('rejects unsupported media, oversized bodies, malformed signatures, and malformed payloads', async () => {
+	it('rejects unsupported media, oversized bodies, malformed signatures, and untimestamped payloads', async () => {
 		const webhook = vi.fn();
 		const linear = createLinearChannel({
 			webhookSecret: 'secret',
@@ -482,13 +363,13 @@ describe('createLinearChannel()', () => {
 				body: '{}',
 			}),
 		);
-		const oversizedBody = JSON.stringify({
-			...entityPayload({
+		const oversizedBody = JSON.stringify(
+			entityPayload({
 				type: 'Comment',
 				action: 'create',
 				data: { id: 'comment-large', body: 'x'.repeat(200) },
 			}),
-		});
+		);
 		const sizeResponse = await app.request(await signedRequest('secret', oversizedBody));
 		const signatureResponse = await app.request(
 			new Request('https://example.test/webhook', {
@@ -500,20 +381,16 @@ describe('createLinearChannel()', () => {
 				body: '{}',
 			}),
 		);
-		const malformed = entityPayload({
-			type: 'Issue',
-			action: 'create',
-			data: { id: 'issue-no-title', identifier: 'BAD-1' },
-		});
-		const schemaChannel = createLinearChannel({ webhookSecret: 'secret', webhook });
-		const malformedResponse = await channelApp(schemaChannel).request(
-			await signedRequest('secret', JSON.stringify(malformed)),
+		const untimestamped = { action: 'create', type: 'Comment', organizationId: 'org-glacier' };
+		const untimestampedChannel = createLinearChannel({ webhookSecret: 'secret', webhook });
+		const untimestampedResponse = await channelApp(untimestampedChannel).request(
+			await signedRequest('secret', JSON.stringify(untimestamped)),
 		);
 
 		expect(mediaResponse.status).toBe(415);
 		expect(sizeResponse.status).toBe(413);
 		expect(signatureResponse.status).toBe(401);
-		expect(malformedResponse.status).toBe(400);
+		expect(untimestampedResponse.status).toBe(400);
 		expect(webhook).not.toHaveBeenCalled();
 	});
 
@@ -559,7 +436,7 @@ describe('createLinearChannel()', () => {
 		).toThrow(InvalidLinearInputError);
 	});
 
-	it('validates constructor limits and publishes only the provider webhook route', () => {
+	it('validates constructor input and publishes only the provider webhook route', () => {
 		expect(() =>
 			createLinearChannel({
 				webhookSecret: '',
@@ -569,7 +446,7 @@ describe('createLinearChannel()', () => {
 		expect(() =>
 			createLinearChannel({
 				webhookSecret: 'secret',
-				handlerTimeoutMs: 4_501,
+				organizationId: '',
 				webhook: () => undefined,
 			}),
 		).toThrow(TypeError);

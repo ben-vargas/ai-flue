@@ -1,8 +1,23 @@
+import type { LinearWebhookPayload } from '@linear/sdk/webhooks';
 import type { Context, Env, Handler } from 'hono';
 import { InvalidLinearConversationKeyError, InvalidLinearInputError } from './errors.ts';
 import { createLinearWebhookHandler } from './webhook.ts';
 
 export { InvalidLinearConversationKeyError, InvalidLinearInputError } from './errors.ts';
+
+/**
+ * Provider-native Linear webhook payload union, re-exported from
+ * `@linear/sdk/webhooks`. Verified deliveries are forwarded with Linear's own
+ * field names, nesting, and `type`/`action` discriminants. The union is
+ * authoritative for Linear's documented webhook surfaces and still forwards
+ * unmodeled verified deliveries at runtime.
+ *
+ * `AgentSessionEventWebhookPayload` (the `AgentSessionEvent` member of the
+ * union) and the per-entity members (`EntityWebhookPayloadWith*Data`) are
+ * available directly from `@linear/sdk/webhooks` when an application narrows
+ * the payload.
+ */
+export type { LinearWebhookPayload } from '@linear/sdk/webhooks';
 
 export type JsonValue =
 	| null
@@ -28,21 +43,8 @@ export interface LinearChannelOptions<E extends Env = Env> {
 	webhookId?: string;
 	/** Maximum request-body size in bytes. Defaults to 1 MiB. */
 	bodyLimit?: number;
-	/**
-	 * Application handler deadline. Defaults to and may not exceed 4500ms,
-	 * leaving time before Linear's five-second delivery deadline.
-	 */
-	handlerTimeoutMs?: number;
-	/** Receives every verified Linear delivery. */
+	/** Receives every verified Linear delivery as its provider-native payload. */
 	webhook(input: LinearWebhookHandlerInput<E>): LinearHandlerResult;
-}
-
-export interface LinearActorRef {
-	id?: string;
-	type?: string;
-	name?: string;
-	email?: string;
-	url?: string;
 }
 
 /** Stable Linear destination suitable for a Flue agent-instance id. */
@@ -60,171 +62,25 @@ export type LinearConversationRef =
 			agentSessionId: string;
 	  };
 
-export type LinearIssueConversationRef = Extract<LinearConversationRef, { type: 'issue' }>;
-export type LinearAgentSessionConversationRef = Extract<
-	LinearConversationRef,
-	{ type: 'agent-session' }
->;
-
-export interface LinearCommentPayload {
-	id: string;
-	body: string;
-	issueId?: string;
-	parentId?: string;
-	userId?: string;
-	externalUserId?: string;
-	createdAt?: string;
-	updatedAt?: string;
-}
-
-export interface LinearCommentRef {
-	id: string;
-	body: string;
-	issueId?: string;
-	userId?: string;
-}
-
-export interface LinearIssuePayload {
-	id: string;
-	identifier: string;
-	title: string;
-	description?: string;
-	teamId?: string;
-	stateId?: string;
-	assigneeId?: string;
-	creatorId?: string;
-	delegateId?: string;
-	projectId?: string;
-	priority?: number;
-	url?: string;
-}
-
-export interface LinearProjectPayload {
-	id: string;
-	name: string;
-	description?: string;
-	statusId?: string;
-	leadId?: string;
-	teamIds: readonly string[];
-	url?: string;
-}
-
-export interface LinearAgentActivityRef {
-	id: string;
-	agentSessionId: string;
-	userId: string;
-	content: unknown;
-	signal?: string;
-	sourceCommentId?: string;
-}
-
-export interface LinearAgentSessionRef {
-	id: string;
-	appUserId: string;
-	organizationId: string;
-	status: string;
-	issueId?: string;
-	commentId?: string;
-	sourceCommentId?: string;
-	creatorId?: string;
-	url?: string;
-	issue?: {
-		id: string;
-		identifier?: string;
-		title?: string;
-		description?: string;
-	};
-	comment?: LinearCommentRef;
-}
-
-export interface LinearAgentSessionPayload {
-	appUserId: string;
-	oauthClientId: string;
-	session: LinearAgentSessionRef;
-	promptContext?: string;
-	activity?: LinearAgentActivityRef;
-	previousComments: readonly LinearCommentRef[];
-	/** Provider-native guidance rules in nearest-team precedence order. */
-	guidance: readonly unknown[];
-}
-
-export interface LinearEventEnvelope<TType extends string, TAction extends string, TPayload> {
-	type: TType;
-	action: TAction;
-	resourceType: string;
-	organizationId: string;
-	webhookId: string;
-	webhookTimestamp: number;
-	createdAt: string;
-	/**
-	 * Header-derived delivery id for application-owned deduplication.
-	 * Linear signs the body, not this transport header.
-	 */
-	deliveryId?: string;
-	url?: string;
-	actor?: LinearActorRef;
-	updatedFrom?: unknown;
-	payload: TPayload;
-	/** Complete parsed payload after signature and timestamp verification. */
-	raw: unknown;
-}
-
-export type LinearEntityAction = 'create' | 'update' | 'remove';
-
-export interface LinearCommentEvent
-	extends LinearEventEnvelope<'comment', LinearEntityAction, LinearCommentPayload> {
-	conversation?: LinearIssueConversationRef;
-}
-
-export interface LinearIssueEvent
-	extends LinearEventEnvelope<'issue', LinearEntityAction, LinearIssuePayload> {
-	conversation: LinearIssueConversationRef;
-}
-
-export type LinearProjectEvent = LinearEventEnvelope<
-	'project',
-	LinearEntityAction,
-	LinearProjectPayload
->;
-
-export interface LinearAgentSessionEvent
-	extends LinearEventEnvelope<
-		'agent_session',
-		'created' | 'prompted',
-		LinearAgentSessionPayload
-	> {
-	conversation: LinearAgentSessionConversationRef;
-}
-
-export interface LinearUnknownEvent {
-	type: 'unknown';
-	action: string;
-	resourceType: string;
-	organizationId: string;
-	webhookId: string;
-	webhookTimestamp: number;
-	createdAt: string;
-	deliveryId?: string;
-	url?: string;
-	actor?: LinearActorRef;
-	updatedFrom?: unknown;
-	raw: unknown;
-}
-
-export type LinearWebhookEvent =
-	| LinearCommentEvent
-	| LinearIssueEvent
-	| LinearProjectEvent
-	| LinearAgentSessionEvent
-	| LinearUnknownEvent;
-
 type LinearHandlerValue = undefined | JsonValue | Response;
 
+/**
+ * Returning nothing produces an empty `200`. JSON-compatible values become
+ * JSON responses, and Hono or Fetch responses pass through unchanged.
+ */
 export type LinearHandlerResult = LinearHandlerValue | Promise<LinearHandlerValue>;
 
+/** Input delivered to the webhook callback. */
 export interface LinearWebhookHandlerInput<E extends Env = Env> {
 	c: Context<E>;
-	event: LinearWebhookEvent;
+	/** Provider-native verified webhook payload. */
+	payload: LinearWebhookPayload;
+	/**
+	 * `Linear-Delivery` header value: a UUID uniquely identifying this delivery,
+	 * exposed for application-owned deduplication. Linear signs the body, not
+	 * this transport header, and the channel does not deduplicate.
+	 */
+	deliveryId?: string;
 }
 
 /** Verified Linear ingress and canonical identity helpers. */
@@ -239,7 +95,10 @@ export interface LinearChannel<E extends Env = Env> {
 /**
  * Creates one verified Linear webhook route.
  *
- * The channel is stateless and does not deduplicate Linear delivery ids.
+ * Linear signs the exact raw body with HMAC-SHA256 in `Linear-Signature` and
+ * includes a `webhookTimestamp` the channel requires within one minute of the
+ * server clock. The channel is stateless and does not deduplicate Linear
+ * delivery ids.
  */
 export function createLinearChannel<E extends Env = Env>(
 	options: LinearChannelOptions<E>,

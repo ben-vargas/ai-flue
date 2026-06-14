@@ -25,9 +25,17 @@ https://example.com/channels/linear/webhook
 ## Channel module
 
 ```ts title="src/channels/linear.ts"
-import { createLinearChannel, type LinearConversationRef } from '@flue/linear';
+import {
+  createLinearChannel,
+  type LinearConversationRef,
+  type LinearWebhookPayload,
+} from '@flue/linear';
 import { defineTool, dispatch } from '@flue/runtime';
 import { LinearClient } from '@linear/sdk';
+import type {
+  AgentSessionEventWebhookPayload,
+  EntityWebhookPayloadWithCommentData,
+} from '@linear/sdk/webhooks';
 import assistant from '../agents/assistant.ts';
 
 const organizationId = process.env.LINEAR_ORGANIZATION_ID;
@@ -41,37 +49,57 @@ export const channel = createLinearChannel({
   ...(organizationId ? { organizationId } : {}),
 
   // Path: /channels/linear/webhook
-  async webhook({ event }) {
-    switch (event.type) {
-      case 'comment': {
-        if (event.action !== 'create' || !event.conversation) return;
-        await dispatch(assistant, {
-          id: channel.conversationKey(event.conversation),
-          input: {
-            type: 'linear.comment.created',
-            deliveryId: event.deliveryId,
-            actor: event.actor,
-            comment: event.payload,
-          },
-        });
-        return;
-      }
-      case 'agent_session': {
-        await dispatch(assistant, {
-          id: channel.conversationKey(event.conversation),
-          input: {
-            type: `linear.agent_session.${event.action}`,
-            promptContext: event.payload.promptContext,
-            activity: event.payload.activity,
-          },
-        });
-        return;
-      }
-      default:
-        return;
+  async webhook({ payload, deliveryId }) {
+    if (isCommentEvent(payload)) {
+      const comment = payload.data;
+      if (payload.action !== 'create' || !comment.issueId) return;
+      await dispatch(assistant, {
+        id: channel.conversationKey({
+          type: 'issue',
+          organizationId: payload.organizationId,
+          issueId: comment.issueId,
+          ...(comment.parentId ? { threadCommentId: comment.parentId } : {}),
+        }),
+        input: {
+          type: 'linear.comment.created',
+          deliveryId,
+          actor: payload.actor,
+          comment,
+        },
+      });
+      return;
+    }
+
+    if (isAgentSessionEvent(payload)) {
+      await dispatch(assistant, {
+        id: channel.conversationKey({
+          type: 'agent-session',
+          organizationId: payload.organizationId,
+          agentSessionId: payload.agentSession.id,
+        }),
+        input: {
+          type: `linear.agent_session.${payload.action}`,
+          promptContext: payload.promptContext,
+          activity: payload.agentActivity,
+        },
+      });
     }
   },
 });
+
+// Linear's native union has a catch-all member that keeps `type` widened, so a
+// literal `type` check alone does not narrow. Combine it with a nested field.
+function isCommentEvent(
+  payload: LinearWebhookPayload,
+): payload is EntityWebhookPayloadWithCommentData {
+  return payload.type === 'Comment' && 'body' in payload.data;
+}
+
+function isAgentSessionEvent(
+  payload: LinearWebhookPayload,
+): payload is AgentSessionEventWebhookPayload {
+  return payload.type === 'AgentSessionEvent' && 'agentSession' in payload;
+}
 
 export function postMessage(ref: LinearConversationRef) {
   return defineTool({
@@ -129,10 +157,18 @@ typically Comments, Issues, and Projects. The package verifies the exact body
 against `Linear-Signature`, rejects signed timestamps outside one minute, and
 optionally checks configured organization and webhook ids.
 
-Known comment, issue, and project payloads receive typed normalized variants.
-Other verified deliveries use `type: 'unknown'`. Top-level comments and issue
-events expose the issue conversation. Comment replies include the root comment
-id for the nested thread.
+The handler receives the provider-native `payload`, typed by Linear's official
+`LinearWebhookPayload` union (re-exported from `@linear/sdk/webhooks`). Entity
+deliveries are discriminated on `type` (`'Comment'`, `'Issue'`, `'Project'`, …)
+and carry `action` and `data`; Flue forwards the body unmodified, including
+verified deliveries the union does not model. The union has a catch-all member
+that keeps `type` widened to `string`, so a literal `type` check alone does not
+narrow it — pair the literal with a discriminating nested field in a small
+application-side type guard (as in the channel module above).
+
+The application derives conversation keys from native fields. Top-level comments
+use the issue conversation; replies pass the root comment id as
+`threadCommentId` for the nested thread.
 
 ## Agent sessions
 
@@ -140,9 +176,10 @@ Enable Agent session events on a Linear OAuth application configured as an app
 actor. Install it with the scopes required by your operations and
 `app:mentionable` when users should mention the agent.
 
-`created` events carry the session and may include formatted prompt context,
-previous thread comments, and guidance. `prompted` events carry the new user
-activity. Both map to a stable agent-session conversation reference.
+`created` events carry the `agentSession` and may include Linear's formatted
+`promptContext`, `previousComments`, and `guidance`. `prompted` events carry the
+new `agentActivity`. The application builds a stable agent-session conversation
+key from `payload.agentSession.id`.
 
 Linear expects the webhook response within five seconds and a new session to
 receive an activity or external URL update within ten seconds. Keep the
@@ -154,6 +191,11 @@ project-owned SDK client to post progress and results.
 Returning nothing produces an empty `200`. Return JSON for a response body or
 use the Hono context for explicit status control. A failure or non-`200`
 response asks Linear to retry.
+
+Linear treats a delivery as failed if it does not return `200` within five
+seconds, then retries after one minute, one hour, and six hours. The channel
+does not enforce a timer; admit durable work quickly (dispatch, then return) and
+rely on idempotency rather than blocking on slow work before responding.
 
 The channel exposes `Linear-Delivery` for application-owned deduplication but
 does not persist delivery state. Conversation keys validate syntax, not

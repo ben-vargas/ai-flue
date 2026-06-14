@@ -5,7 +5,7 @@ import { createLinearChannel } from '../src/index.ts';
 const encoder = new TextEncoder();
 
 describe('@flue/linear workerd ingress', () => {
-	it('verifies exact webhook bytes and normalizes agent sessions in workerd', async () => {
+	it('verifies exact webhook bytes and forwards native agent-session payloads in workerd', async () => {
 		const webhook = vi.fn();
 		const linear = createLinearChannel({ webhookSecret: 'worker-secret', webhook });
 		const app = new Hono();
@@ -32,15 +32,14 @@ describe('@flue/linear workerd ingress', () => {
 		expect(response.status).toBe(200);
 		expect(changed.status).toBe(401);
 		expect(webhook).toHaveBeenCalledOnce();
-		expect(webhook.mock.calls[0]?.[0].event).toMatchObject({
-			type: 'agent_session',
+		const input = webhook.mock.calls[0]?.[0];
+		expect(input.deliveryId).toBe('delivery-worker');
+		expect(input.payload).toMatchObject({
+			type: 'AgentSessionEvent',
 			action: 'prompted',
-			deliveryId: 'delivery-worker',
-			conversation: {
-				type: 'agent-session',
-				organizationId: 'org-worker',
-				agentSessionId: 'session-worker',
-			},
+			organizationId: 'org-worker',
+			agentSession: { id: 'session-worker', organizationId: 'org-worker' },
+			agentActivity: { id: 'activity-worker', agentSessionId: 'session-worker' },
 		});
 	});
 });

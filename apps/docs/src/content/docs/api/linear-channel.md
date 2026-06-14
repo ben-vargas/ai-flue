@@ -24,19 +24,17 @@ interface LinearChannelOptions<E extends Env = Env> {
   organizationId?: string;
   webhookId?: string;
   bodyLimit?: number;
-  handlerTimeoutMs?: number;
   webhook(input: LinearWebhookHandlerInput<E>): LinearHandlerResult;
 }
 ```
 
-| Field              | Description                                                        |
-| ------------------ | ------------------------------------------------------------------ |
-| `webhookSecret`    | Secret used to verify exact request bytes with HMAC-SHA256.        |
-| `organizationId`   | Optional signed organization constraint. Mismatches receive `403`. |
-| `webhookId`        | Optional signed webhook constraint. Mismatches receive `403`.      |
-| `bodyLimit`        | Maximum request body. Default: 1 MiB.                              |
-| `handlerTimeoutMs` | Application deadline. Default and maximum: 4.5 seconds.            |
-| `webhook`          | Callback for every verified normalized delivery.                   |
+| Field            | Description                                                        |
+| ---------------- | ------------------------------------------------------------------ |
+| `webhookSecret`  | Secret used to verify exact request bytes with HMAC-SHA256.        |
+| `organizationId` | Optional signed organization constraint. Mismatches receive `403`. |
+| `webhookId`      | Optional signed webhook constraint. Mismatches receive `403`.      |
+| `bodyLimit`      | Maximum request body. Default: 1 MiB.                              |
+| `webhook`        | Callback for every verified delivery.                             |
 
 ```ts
 type LinearHandlerResult = void | JsonValue | Response | Promise<void | JsonValue | Response>;
@@ -60,64 +58,65 @@ A file named `channels/linear.ts` serves
 
 Conversation keys are canonical identifiers, not authorization capabilities.
 
-## Events
+## `LinearWebhookHandlerInput`
 
 ```ts
-type LinearWebhookEvent =
-  | LinearCommentEvent
-  | LinearIssueEvent
-  | LinearProjectEvent
-  | LinearAgentSessionEvent
-  | LinearUnknownEvent;
-```
-
-Known `type` values are `comment`, `issue`, `project`, and `agent_session`.
-Unsupported verified resource types or actions use `type: 'unknown'`.
-
-Known event envelopes expose:
-
-```ts
-interface LinearEventEnvelope<TType extends string, TAction extends string, TPayload> {
-  type: TType;
-  action: TAction;
-  resourceType: string;
-  organizationId: string;
-  webhookId: string;
-  webhookTimestamp: number;
-  createdAt: string;
+interface LinearWebhookHandlerInput<E extends Env = Env> {
+  c: Context<E>;
+  payload: LinearWebhookPayload;
   deliveryId?: string;
-  url?: string;
-  actor?: LinearActorRef;
-  updatedFrom?: unknown;
-  payload: TPayload;
-  raw: unknown;
 }
 ```
 
-`deliveryId` comes from the `Linear-Delivery` header. Linear signs the body,
-not that transport header. `raw` is available only after signature and
-timestamp verification.
+`payload` is the verified provider-native body. `deliveryId` comes from the
+`Linear-Delivery` header — a UUID exposed for application-owned deduplication.
+Linear signs the body, not that transport header, and the channel does not
+deduplicate.
 
-Comment, issue, and project events use `create`, `update`, or `remove` actions.
-Agent-session events use `created` or `prompted`.
-
-## Agent sessions
+## `LinearWebhookPayload`
 
 ```ts
-interface LinearAgentSessionPayload {
-  appUserId: string;
-  oauthClientId: string;
-  session: LinearAgentSessionRef;
-  promptContext?: string;
-  activity?: LinearAgentActivityRef;
-  previousComments: readonly LinearCommentRef[];
-  guidance: readonly unknown[];
+export type { LinearWebhookPayload } from '@linear/sdk/webhooks';
+```
+
+The channel re-exports Linear's official webhook union from
+`@linear/sdk/webhooks` and forwards the verified body unmodified, with Linear's
+own field names, nesting, `type`, `action`, and `data`. Entity deliveries carry
+`type` (`'Comment'`, `'Issue'`, `'Project'`, …), `action` (`'create'`,
+`'update'`, `'remove'`), and `data`; agent-session deliveries carry
+`type: 'AgentSessionEvent'`, `action` (`'created'`, `'prompted'`),
+`agentSession`, and `agentActivity`. The channel does not reshape payloads and
+forwards verified deliveries the union does not model.
+
+The official union includes a catch-all
+`EntityWebhookPayloadWithUnknownEntityData` member whose `type` stays widened to
+`string`, so a literal check such as `payload.type === 'Comment'` does **not**
+narrow the union on its own. Narrow application-side with a small type guard that
+pairs the `type` literal with a discriminating nested field, returning the
+official member type:
+
+```ts
+import type {
+  AgentSessionEventWebhookPayload,
+  EntityWebhookPayloadWithCommentData,
+} from '@linear/sdk/webhooks';
+
+function isCommentEvent(
+  payload: LinearWebhookPayload,
+): payload is EntityWebhookPayloadWithCommentData {
+  return payload.type === 'Comment' && 'body' in payload.data;
+}
+
+function isAgentSessionEvent(
+  payload: LinearWebhookPayload,
+): payload is AgentSessionEventWebhookPayload {
+  return payload.type === 'AgentSessionEvent' && 'agentSession' in payload;
 }
 ```
 
-`created` deliveries may contain `promptContext`, previous comments, and
-guidance. `prompted` deliveries contain the new user activity when supplied by
-Linear.
+The application derives conversation keys from native fields — for example
+`payload.organizationId` with `payload.data.issueId`/`parentId` or
+`payload.agentSession.id` — and passes them to `conversationKey(...)`.
 
 ## Identity
 
@@ -135,10 +134,6 @@ type LinearConversationRef =
       agentSessionId: string;
     };
 ```
-
-`LinearIssueConversationRef` and `LinearAgentSessionConversationRef` are the
-corresponding narrowed union members. Known events expose the narrowed
-conversation type implied by their `type`.
 
 Top-level comments omit `threadCommentId` and use the issue conversation.
 Replies use their root comment id. Agent-session conversations use the session

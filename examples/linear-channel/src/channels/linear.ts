@@ -1,6 +1,14 @@
-import { createLinearChannel, type LinearConversationRef } from '@flue/linear';
+import {
+	createLinearChannel,
+	type LinearConversationRef,
+	type LinearWebhookPayload,
+} from '@flue/linear';
 import { defineTool, dispatch } from '@flue/runtime';
 import { LinearClient } from '@linear/sdk';
+import type {
+	AgentSessionEventWebhookPayload,
+	EntityWebhookPayloadWithCommentData,
+} from '@linear/sdk/webhooks';
 import assistant from '../agents/assistant.ts';
 
 const organizationId = optionalEnv('LINEAR_ORGANIZATION_ID');
@@ -14,39 +22,60 @@ export const channel = createLinearChannel({
 	...(webhookId === undefined ? {} : { webhookId }),
 
 	// Path: /channels/linear/webhook
-	async webhook({ event }) {
-		switch (event.type) {
-			case 'comment': {
-				if (event.action !== 'create' || !event.conversation) return;
-				await dispatch(assistant, {
-					id: channel.conversationKey(event.conversation),
-					input: {
-						type: 'linear.comment.created',
-						deliveryId: event.deliveryId,
-						actor: event.actor,
-						comment: event.payload,
-					},
-				});
-				return;
-			}
-			case 'agent_session': {
-				await dispatch(assistant, {
-					id: channel.conversationKey(event.conversation),
-					input: {
-						type: `linear.agent_session.${event.action}`,
-						deliveryId: event.deliveryId,
-						promptContext: event.payload.promptContext,
-						activity: event.payload.activity,
-						session: event.payload.session,
-					},
-				});
-				return;
-			}
-			default:
-				return;
+	async webhook({ payload, deliveryId }) {
+		if (isCommentEvent(payload)) {
+			const comment = payload.data;
+			if (payload.action !== 'create' || !comment.issueId) return;
+			await dispatch(assistant, {
+				id: channel.conversationKey({
+					type: 'issue',
+					organizationId: payload.organizationId,
+					issueId: comment.issueId,
+					...(comment.parentId ? { threadCommentId: comment.parentId } : {}),
+				}),
+				input: {
+					type: 'linear.comment.created',
+					deliveryId,
+					actor: payload.actor,
+					comment,
+				},
+			});
+			return;
+		}
+
+		if (isAgentSessionEvent(payload)) {
+			await dispatch(assistant, {
+				id: channel.conversationKey({
+					type: 'agent-session',
+					organizationId: payload.organizationId,
+					agentSessionId: payload.agentSession.id,
+				}),
+				input: {
+					type: `linear.agent_session.${payload.action}`,
+					deliveryId,
+					promptContext: payload.promptContext,
+					activity: payload.agentActivity,
+					session: payload.agentSession,
+				},
+			});
 		}
 	},
 });
+
+// Narrow Linear's native union to the surfaces this app handles. The union's
+// catch-all member keeps `type` widened, so a literal check alone does not
+// narrow; combine it with the discriminating nested field.
+function isCommentEvent(
+	payload: LinearWebhookPayload,
+): payload is EntityWebhookPayloadWithCommentData {
+	return payload.type === 'Comment' && 'body' in payload.data;
+}
+
+function isAgentSessionEvent(
+	payload: LinearWebhookPayload,
+): payload is AgentSessionEventWebhookPayload {
+	return payload.type === 'AgentSessionEvent' && 'agentSession' in payload;
+}
 
 export function postMessage(ref: LinearConversationRef) {
 	return defineTool({

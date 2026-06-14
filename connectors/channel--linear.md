@@ -32,9 +32,17 @@ Create `<source-dir>/channels/linear.ts`. Adapt the imported agent, dispatched
 input, event policy, and tool:
 
 ```ts
-import { createLinearChannel, type LinearConversationRef } from '@flue/linear';
+import {
+  createLinearChannel,
+  type LinearConversationRef,
+  type LinearWebhookPayload,
+} from '@flue/linear';
 import { defineTool, dispatch } from '@flue/runtime';
 import { LinearClient } from '@linear/sdk';
+import type {
+  AgentSessionEventWebhookPayload,
+  EntityWebhookPayloadWithCommentData,
+} from '@linear/sdk/webhooks';
 import assistant from '../agents/assistant.ts';
 
 const organizationId = process.env.LINEAR_ORGANIZATION_ID;
@@ -50,39 +58,59 @@ export const channel = createLinearChannel({
   ...(webhookId ? { webhookId } : {}),
 
   // Path: /channels/linear/webhook
-  async webhook({ event }) {
-    switch (event.type) {
-      case 'comment': {
-        if (event.action !== 'create' || !event.conversation) return;
-        await dispatch(assistant, {
-          id: channel.conversationKey(event.conversation),
-          input: {
-            type: 'linear.comment.created',
-            deliveryId: event.deliveryId,
-            actor: event.actor,
-            comment: event.payload,
-          },
-        });
-        return;
-      }
-      case 'agent_session': {
-        await dispatch(assistant, {
-          id: channel.conversationKey(event.conversation),
-          input: {
-            type: `linear.agent_session.${event.action}`,
-            deliveryId: event.deliveryId,
-            promptContext: event.payload.promptContext,
-            activity: event.payload.activity,
-            session: event.payload.session,
-          },
-        });
-        return;
-      }
-      default:
-        return;
+  async webhook({ payload, deliveryId }) {
+    if (isCommentEvent(payload)) {
+      const comment = payload.data;
+      if (payload.action !== 'create' || !comment.issueId) return;
+      await dispatch(assistant, {
+        id: channel.conversationKey({
+          type: 'issue',
+          organizationId: payload.organizationId,
+          issueId: comment.issueId,
+          ...(comment.parentId ? { threadCommentId: comment.parentId } : {}),
+        }),
+        input: {
+          type: 'linear.comment.created',
+          deliveryId,
+          actor: payload.actor,
+          comment,
+        },
+      });
+      return;
+    }
+
+    if (isAgentSessionEvent(payload)) {
+      await dispatch(assistant, {
+        id: channel.conversationKey({
+          type: 'agent-session',
+          organizationId: payload.organizationId,
+          agentSessionId: payload.agentSession.id,
+        }),
+        input: {
+          type: `linear.agent_session.${payload.action}`,
+          deliveryId,
+          promptContext: payload.promptContext,
+          activity: payload.agentActivity,
+          session: payload.agentSession,
+        },
+      });
     }
   },
 });
+
+// Linear's native union has a catch-all member that keeps `type` widened, so a
+// literal `type` check alone does not narrow. Combine it with a nested field.
+function isCommentEvent(
+  payload: LinearWebhookPayload,
+): payload is EntityWebhookPayloadWithCommentData {
+  return payload.type === 'Comment' && 'body' in payload.data;
+}
+
+function isAgentSessionEvent(
+  payload: LinearWebhookPayload,
+): payload is AgentSessionEventWebhookPayload {
+  return payload.type === 'AgentSessionEvent' && 'agentSession' in payload;
+}
 
 export function postMessage(ref: LinearConversationRef) {
   return defineTool({
@@ -152,10 +180,18 @@ Linear signs the exact raw body with HMAC-SHA256 in `Linear-Signature`.
 `@flue/linear` also enforces the signed `webhookTimestamp` within one minute.
 Do not put a body parser or JSON reserialization step in front of the route.
 
-Linear retries deliveries that do not return `200` within five seconds. The
-channel's application deadline defaults to 4.5 seconds. Returning nothing
-produces an empty `200`; a JSON-compatible value becomes the response body;
-return a normal Hono or Fetch `Response` for explicit status control.
+Linear treats a delivery as failed if it does not return `200` within five
+seconds, then retries after one minute, one hour, and six hours. The channel
+does not enforce a timer; admit durable work quickly (dispatch, then return)
+and rely on idempotency rather than blocking on slow work before responding.
+Returning nothing produces an empty `200`; a JSON-compatible value becomes the
+response body; return a normal Hono or Fetch `Response` for explicit status
+control.
+
+The handler receives the provider-native `payload` typed by Linear's official
+`@linear/sdk/webhooks` `LinearWebhookPayload` union (discriminated on `type`,
+with entity events carrying `action` and `data`). Fields keep Linear's own
+names and nesting; the channel does not reshape them.
 
 The `Linear-Delivery` header is exposed for application-owned deduplication but
 is not part of the signed body. Claim it in durable storage before dispatch
@@ -168,9 +204,9 @@ actor. Enable the Agent session events webhook category and install the
 application with the permissions required by its intended operations,
 including `app:mentionable` when users should mention it.
 
-`created` events include the session and may include Linear's formatted
-`promptContext`, previous comments, and guidance. `prompted` events include the
-new user activity. Linear requires the webhook response within five seconds
+`created` events include `agentSession` and may include Linear's formatted
+`promptContext`, `previousComments`, and `guidance`. `prompted` events include
+the new `agentActivity`. Linear treats a delivery as failed after five seconds
 and expects a newly created session to receive an activity or external URL
 update within ten seconds.
 
@@ -186,10 +222,10 @@ Sign the exact bytes locally and cover:
 - valid and invalid HMAC signatures;
 - stale and future `webhookTimestamp` values;
 - fixed organization and webhook id mismatches;
-- comment, issue, project, `created`, and `prompted` normalization;
-- unsupported verified resource types;
+- native comment, issue, project, `created`, and `prompted` payload forwarding;
+- unmodeled verified resource types;
 - issue-thread and agent-session conversation keys;
-- handler responses, failures, and the 4.5-second maximum;
+- handler responses and failures;
 - SDK comment and agent-activity GraphQL requests against an injected fake
   Fetch transport in workerd with `nodejs_compat`;
 - Node and Cloudflare project builds.
