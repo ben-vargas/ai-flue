@@ -36,9 +36,10 @@ same token into Notion's connection UI.
 
 `event` is the official SDK's provider-native webhook payload union, so
 `switch (event.type)` narrows each modeled variant. The only adjustment is
-widening `authors`/`accessible_by` to Notion's documented `agent` principal
-type, which the current SDK type omits. A verified event whose `type` is newer
-than the installed SDK is still forwarded — typed as the union — and reached
+adding Notion's documented `agent` principal to `authors`, which the current
+SDK type omits. `accessible_by` remains limited to `person | bot`. A verified
+event whose `type` is newer than the installed SDK is still forwarded — typed
+as the union — and reached
 from a `default` arm. Outbound API calls, OAuth, subscriptions, credentials,
 deduplication, ordering, and persistence remain application-owned.
 

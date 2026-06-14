@@ -17,6 +17,7 @@ export {
   type NotionHandlerResult,
   type NotionKnownWebhookEvent,
   type NotionVerificationHandlerInput,
+  type NotionWebhookAccessibleByType,
   type NotionWebhookAuthorType,
   type NotionWebhookEvent,
   type NotionWebhookHandlerInput,
@@ -153,8 +154,9 @@ type NotionWebhookEvent = NotionKnownWebhookEvent;
 
 `NotionWebhookEvent` is the provider-native webhook payload union, sourced from
 the webhook payload types exported by the installed official Notion SDK. The
-only adjustment is widening `authors`/`accessible_by` to Notion's documented
-principal types; field names, nesting, and discriminants are otherwise the
+only adjustment is widening `authors` to include Notion's documented `agent`
+author type; `accessible_by` remains limited to the SDK's `person | bot`
+principal types. Field names, nesting, and discriminants are otherwise the
 provider's own. `switch (event.type)` narrows each modeled variant. The covered
 event types are:
 
@@ -180,13 +182,13 @@ it.
 
 ```ts
 type NotionWebhookAuthorType = 'person' | 'bot' | 'agent';
+type NotionWebhookAccessibleByType = 'person' | 'bot';
 ```
 
-`@flue/notion` widens the official SDK's current `authors` and optional
-`accessible_by` declarations to include Notion's documented `agent` author
-type. The SDK's `BaseWebhookPayload` types these arrays as `person | bot`
-only — the SDK type lags the documentation — so the channel applies a faithful
-widening without otherwise reshaping the provider payload.
+`@flue/notion` widens the official SDK's current `authors` declaration to
+include Notion's documented `agent` author type. It does not add `agent` to the
+optional `accessible_by` array, which remains `person | bot`. The channel does
+not otherwise reshape the provider payload.
 
 ## Unmodeled and future events
 

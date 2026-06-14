@@ -70,16 +70,16 @@ export interface NotionChannelOptions<E extends Env = Env> {
  * Notion's documented webhook author/principal type.
  *
  * The current official SDK's `BaseWebhookPayload` declares only `person` and
- * `bot`, but Notion's webhook documentation also lists `agent`. The channel
- * widens the native `authors` and `accessible_by` arrays to the documented set
- * without otherwise reshaping the provider payload.
+ * `bot`, but Notion's webhook documentation also lists `agent` for authors.
  */
 export type NotionWebhookAuthorType = 'person' | 'bot' | 'agent';
+
+export type NotionWebhookAccessibleByType = 'person' | 'bot';
 
 type WithDocumentedAuthors<T> = T extends unknown
 	? Omit<T, 'authors' | 'accessible_by'> & {
 			authors: Array<{ id: string; type: NotionWebhookAuthorType }>;
-			accessible_by?: Array<{ id: string; type: NotionWebhookAuthorType }>;
+			accessible_by?: Array<{ id: string; type: NotionWebhookAccessibleByType }>;
 		}
 	: never;
 
@@ -87,8 +87,8 @@ type WithDocumentedAuthors<T> = T extends unknown
  * Provider-native webhook payload union, sourced from the official Notion SDK's
  * exported `*WebhookPayload` types.
  *
- * The only adjustment is widening `authors`/`accessible_by` to Notion's
- * documented principal types (the SDK type lags the docs here). Field names,
+ * The only adjustment is widening `authors` to Notion's documented `agent`
+ * principal type while retaining `person | bot` for `accessible_by`. Field names,
  * nesting, and discriminants are otherwise the provider's own.
  */
 export type NotionKnownWebhookEvent = WithDocumentedAuthors<
@@ -127,8 +127,8 @@ export type NotionKnownWebhookEvent = WithDocumentedAuthors<
 
 /**
  * Provider-native payload delivered to the `webhook` callback: the official
- * Notion `*WebhookPayload` union (with `authors`/`accessible_by` widened to the
- * documented principal types). `switch (event.type)` narrows each modeled
+ * Notion `*WebhookPayload` union (with `agent` added to the `authors` principal
+ * types). `switch (event.type)` narrows each modeled
  * variant.
  *
  * Notion can add event families and API versions; an authenticated event

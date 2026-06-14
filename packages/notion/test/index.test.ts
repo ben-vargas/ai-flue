@@ -3,6 +3,7 @@ import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 import {
 	createNotionChannel,
 	type NotionChannel,
+	type NotionWebhookAccessibleByType,
 	type NotionWebhookAuthorType,
 	type NotionWebhookEvent,
 	type NotionWebhookHandlerInput,
@@ -212,7 +213,12 @@ describe('createNotionChannel()', () => {
 		const notion = createNotionChannel({ verification, webhook });
 
 		const response = await channelApp(notion).request(
-			jsonRequest(JSON.stringify({ verification_token: 'notion_setup_token' })),
+			jsonRequest(
+				JSON.stringify({
+					verification_token: 'notion_setup_token',
+					provider_added: { setup: true },
+				}),
+			),
 		);
 
 		expect(response.status).toBe(200);
@@ -478,7 +484,10 @@ describe('createNotionChannel()', () => {
 				expectTypeOf(pageCreated.data.parent.type).toEqualTypeOf<
 					'space' | 'block' | 'page' | 'database' | 'team' | 'agent'
 				>();
-				expectTypeOf(pageCreated.authors[0]!.type).toEqualTypeOf<NotionWebhookAuthorType>();
+				type Author = (typeof pageCreated.authors)[number];
+				type AccessibleBy = NonNullable<typeof pageCreated.accessible_by>[number];
+				expectTypeOf<Author['type']>().toEqualTypeOf<NotionWebhookAuthorType>();
+				expectTypeOf<AccessibleBy['type']>().toEqualTypeOf<NotionWebhookAccessibleByType>();
 				// Authenticated future/unknown event types are still forwarded at
 				// runtime (see the forwarding tests above), but they are not part of
 				// the official modeled union and are reached via a `default` arm

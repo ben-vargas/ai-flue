@@ -28,10 +28,9 @@ export function createNotionWebhookHandler<E extends Env>(
 		const signatureHeader = request.headers.get('x-notion-signature');
 		if (!signatureHeader) {
 			const raw = parseJson(body.value);
-			const verificationToken =
-				isRecord(raw) && Object.keys(raw).length === 1
-					? readNonEmptyString(raw, 'verification_token')
-					: undefined;
+			const verificationToken = isRecord(raw)
+				? readNonEmptyString(raw, 'verification_token')
+				: undefined;
 			if (!verificationToken) return response(401);
 			if (options.verificationToken !== undefined) {
 				return verificationToken === options.verificationToken ? response(200) : response(403);
