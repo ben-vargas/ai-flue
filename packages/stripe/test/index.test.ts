@@ -216,7 +216,7 @@ describe('createStripeChannel()', () => {
 		expect(webhook).toHaveBeenCalledOnce();
 	});
 
-	it('rejects malformed signed JSON and invalid signed event envelopes', async () => {
+	it('rejects malformed signed JSON but forwards verified events without re-validating shape', async () => {
 		const webhook = vi.fn();
 		const stripe = createStripeChannel({
 			client: stripeClient(),
@@ -225,17 +225,21 @@ describe('createStripeChannel()', () => {
 		});
 		const app = channelApp(stripe);
 
+		// Unparseable JSON fails the official SDK's verify/parse and is rejected.
 		const malformed = await app.request(await signedRequest('{"object":"event"', 'whsec_schema'));
-		const invalidEnvelope = await app.request(
+		expect(malformed.status).toBe(400);
+		expect(webhook).not.toHaveBeenCalled();
+
+		// A verified, well-formed snapshot envelope is forwarded as-is: the channel
+		// trusts the SDK's parse and no longer re-validates event-family fields.
+		const minimal = await app.request(
 			await signedRequest(
-				JSON.stringify({ object: 'event', id: 'evt_invalid', type: 'customer.created' }),
+				JSON.stringify({ object: 'event', id: 'evt_minimal', type: 'customer.created' }),
 				'whsec_schema',
 			),
 		);
-
-		expect(malformed.status).toBe(400);
-		expect(invalidEnvelope.status).toBe(400);
-		expect(webhook).not.toHaveBeenCalled();
+		expect(minimal.status).toBe(200);
+		expect(webhook).toHaveBeenCalledTimes(1);
 	});
 
 	it('enforces JSON media type and body limits with and without Content-Length', async () => {
@@ -308,7 +312,7 @@ describe('createStripeChannel()', () => {
 		expect(await honoResponse.json()).toEqual({ retry: true });
 	});
 
-	it('returns 500 when application code throws or returns a non-JSON value', async () => {
+	it('returns 500 when application code throws', async () => {
 		const body = JSON.stringify(snapshotEvent());
 		const throwing = createStripeChannel({
 			client: stripeClient(),
@@ -317,21 +321,38 @@ describe('createStripeChannel()', () => {
 				throw new Error('application failure');
 			},
 		});
-		const invalid = createStripeChannel({
-			client: stripeClient(),
-			webhookSecret: 'whsec_failure',
-			webhook: () => new Map() as never,
-		});
 
 		const throwingResponse = await channelApp(throwing).request(
 			await signedRequest(body, 'whsec_failure'),
 		);
-		const invalidResponse = await channelApp(invalid).request(
-			await signedRequest(body, 'whsec_failure'),
-		);
 
 		expect(throwingResponse.status).toBe(500);
-		expect(invalidResponse.status).toBe(500);
+	});
+
+	it('serializes non-plain return values with JSON.stringify semantics', async () => {
+		const body = JSON.stringify(snapshotEvent());
+		const map = createStripeChannel({
+			client: stripeClient(),
+			webhookSecret: 'whsec_serialize',
+			webhook: () => new Map() as never,
+		});
+		const notANumber = createStripeChannel({
+			client: stripeClient(),
+			webhookSecret: 'whsec_serialize',
+			webhook: () => Number.NaN as never,
+		});
+
+		const mapResponse = await channelApp(map).request(
+			await signedRequest(body, 'whsec_serialize'),
+		);
+		const nanResponse = await channelApp(notANumber).request(
+			await signedRequest(body, 'whsec_serialize'),
+		);
+
+		expect(mapResponse.status).toBe(200);
+		expect(await mapResponse.json()).toEqual({});
+		expect(nanResponse.status).toBe(200);
+		expect(await nanResponse.json()).toBeNull();
 	});
 
 	it('validates constructor inputs and publishes only POST /webhook', () => {
