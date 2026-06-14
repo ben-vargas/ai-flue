@@ -18,12 +18,14 @@ flue add discord
 ```
 
 The recipe installs and configures `@flue/discord` for inbound HTTP
-interactions, along with the project-owned `@discordjs/rest` client for outbound API calls. After running the command, you will have a new
+interactions, along with a project-owned `@discordjs/rest` client for outbound
+API calls. After running the command, you will have a new
 `src/channels/discord.ts` module exporting `channel` and `client`.
 
-Discord does not publish an official JavaScript REST SDK. `@discordjs/rest` is
-a community-maintained client; its capabilities are application code rather
-than features implemented by `@flue/discord`.
+Discord does not publish an official JavaScript REST SDK. The recipe uses the
+community-maintained `@discordjs/rest` client. Your application owns that client
+and its outbound API calls; `@flue/discord` handles only verified inbound HTTP
+interactions.
 
 ## Configure Discord
 
@@ -47,81 +49,48 @@ channel package.
 
 ## Supported HTTP interaction
 
-| Discord surface                                                                                | Webhook path                     |
-| ---------------------------------------------------------------------------------------------- | -------------------------------- |
-| [HTTP interactions](https://docs.discord.com/developers/interactions/receiving-and-responding) | `/channels/discord/interactions` |
+| Discord surface | Webhook path                     |
+| --------------- | -------------------------------- |
+| Interactions    | `/channels/discord/interactions` |
 
-Discord can deliver interactions through the Gateway or an outgoing webhook,
-but not both for the same application. `@flue/discord` implements the verified
-HTTP path. Discord Gateway is a persistent WebSocket transport and remains
-outside the channel model.
+Discord can deliver [interactions](https://docs.discord.com/developers/interactions/receiving-and-responding)
+through the Gateway or an outgoing webhook, but not both for the same
+application. `@flue/discord` implements the verified HTTP path. Discord Gateway
+is a persistent WebSocket transport and remains outside the channel model.
 
 Signed PING requests are answered with PONG internally before application code
 runs.
 
-### Handle interactions
+### Interactions
 
 ```ts title="src/channels/discord.ts"
-import {
-  type APIInteraction,
-  type APIInteractionResponse,
-  createDiscordChannel,
-  type DiscordDestinationRef,
-} from '@flue/discord';
-import { dispatch } from '@flue/runtime';
-import assistant from '../agents/assistant.ts';
+import { type APIInteractionResponse, createDiscordChannel } from '@flue/discord';
 
 export const channel = createDiscordChannel({
   publicKey: process.env.DISCORD_PUBLIC_KEY!,
 
   // Path: /channels/discord/interactions
   async interactions({ interaction }) {
-    if (interaction.type !== 2 || interaction.data.name !== 'ask') {
+    if (interaction.type === 4) {
       return {
-        type: 4,
-        data: { content: 'Unsupported interaction.', flags: 64 },
+        type: 8,
+        data: { choices: [] },
       } satisfies APIInteractionResponse;
     }
 
-    const destination = destinationFromInteraction(interaction);
-    if (!destination || destination.type === 'private') {
+    if (interaction.type === 2 && interaction.data.name === 'ask') {
       return {
         type: 4,
-        data: { content: 'Unsupported interaction.', flags: 64 },
+        data: { content: 'Your request was accepted.', flags: 64 },
       } satisfies APIInteractionResponse;
     }
-
-    await dispatch(assistant, {
-      id: channel.conversationKey(destination),
-      input: {
-        type: 'discord.command.ask',
-        interactionId: interaction.id,
-        data: interaction.data,
-      },
-    });
 
     return {
       type: 4,
-      data: { content: 'Your request was accepted.', flags: 64 },
+      data: { content: 'Unsupported interaction.', flags: 64 },
     } satisfies APIInteractionResponse;
   },
 });
-
-function destinationFromInteraction(
-  interaction: APIInteraction,
-): DiscordDestinationRef | undefined {
-  const channelId = interaction.channel?.id ?? interaction.channel_id;
-  if (!channelId) return;
-  if (interaction.guild_id) {
-    return { type: 'guild', guildId: interaction.guild_id, channelId };
-  }
-  if (interaction.context === 2 || interaction.channel?.type === 3) {
-    return { type: 'private', channelId };
-  }
-  if (interaction.context === 1 || interaction.channel?.type === 1) {
-    return { type: 'dm', channelId };
-  }
-}
 ```
 
 `interaction` is Discord's provider-native API v10 object. Its numeric `type`
@@ -157,9 +126,11 @@ for the response types allowed by each interaction family.
 
 ### Choose a conversation destination
 
-Not every interaction represents a durable Discord channel conversation. The
-callback above derives a destination from native `guild_id`, `channel.id`,
-`channel.type`, and `context` fields when those fields are present.
+Not every interaction represents a durable Discord channel conversation. When
+an interaction should continue an agent instance, application code can derive a
+`DiscordDestinationRef` from native `guild_id`, `channel.id`, `channel.type`, and
+`context` fields. The complete generated example from `flue add discord` shows
+that derivation and dispatches with `channel.conversationKey(ref)`.
 
 Some valid interactions, including modal submissions, may omit a channel.
 Private-channel interactions can be acknowledged through their interaction
