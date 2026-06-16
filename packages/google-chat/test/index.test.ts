@@ -171,7 +171,11 @@ describe('createGoogleChatChannel()', () => {
 				requestWithToken({ type: 'MESSAGE' }, unknownToken),
 			);
 
-		const unknownResponses = await Promise.all([unknownRequest(), unknownRequest(), unknownRequest()]);
+		const unknownResponses = await Promise.all([
+			unknownRequest(),
+			unknownRequest(),
+			unknownRequest(),
+		]);
 
 		expect(unknownResponses.map((response) => response.status)).toEqual([401, 401, 401]);
 		expect(unknownFetcher).toHaveBeenCalledOnce();
@@ -220,10 +224,7 @@ describe('createGoogleChatChannel()', () => {
 		);
 		const unknownChannel = createChannel(unknownFetcher);
 		const request = (channel: GoogleChatChannel) =>
-			app(channel).request(
-				'/interactions',
-				requestWithToken({ type: 'MESSAGE' }, token),
-			);
+			app(channel).request('/interactions', requestWithToken({ type: 'MESSAGE' }, token));
 
 		const responses = await Promise.all([
 			request(unknownChannel),
