@@ -10,6 +10,7 @@ Observable runtime types and global observation APIs are exported from `@flue/ru
 import {
   type AttachedAgentEvent,
   type FlueEvent,
+  type FlueEventContext,
   observe,
   type FlueEventSubscriber,
 } from '@flue/runtime';
@@ -144,7 +145,7 @@ See [Observability](/docs/guide/observability/) for application setup and export
 #### `FlueEventSubscriber`
 
 ```ts
-type FlueEventSubscriber = (event: FlueEvent, ctx: FlueContext) => void | Promise<void>;
+type FlueEventSubscriber = (event: FlueEvent, ctx: FlueEventContext) => void | Promise<void>;
 ```
 
 Receives the emitted decorated event object and its originating context. Treat the event as read-only. Subscriber failures are logged and do not halt event dispatch or the originating execution.

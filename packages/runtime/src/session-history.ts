@@ -4,7 +4,7 @@ import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { AssistantMessage, UserMessage } from '@earendil-works/pi-ai';
 import { AttachmentNotAvailableError } from './errors.ts';
 import type {
-	ActionSessionRef,
+	ChildSessionRef,
 	CompactionEntry,
 	DispatchMessageMetadata,
 	MessageEntry,
@@ -13,7 +13,6 @@ import type {
 	SessionData,
 	SessionEntry,
 	SignalMessage,
-	TaskSessionRef,
 } from './types.ts';
 
 export interface ContextEntry {
@@ -54,7 +53,7 @@ export class SessionHistory {
 
 	static fromData(data: SessionData | null): SessionHistory {
 		if (!data) return SessionHistory.empty();
-		if (data.version !== 6) {
+		if (data.version !== 7) {
 			throw new Error(
 				`[flue] Session data version ${String(data.version)} is unsupported. Clear persisted session state created by an earlier Flue beta.`,
 			);
@@ -239,19 +238,17 @@ export class SessionHistory {
 
 	toData(
 		affinityKey: string,
-		taskSessions: TaskSessionRef[],
-		actionSessions: ActionSessionRef[],
+		childSessions: ChildSessionRef[],
 		metadata: Record<string, any>,
 		createdAt: string,
 		updatedAt: string,
 	): SessionData {
 		return {
-			version: 6,
+			version: 7,
 			affinityKey,
 			entries: [...this.entries],
 			leafId: this.leafId,
-			taskSessions: [...taskSessions],
-			actionSessions: [...actionSessions],
+			childSessions: [...childSessions],
 			metadata,
 			createdAt,
 			updatedAt,
@@ -358,7 +355,10 @@ function pathToContextEntries(path: SessionEntry[]): ContextEntry[] {
 }
 
 function getPromptImages(message: AgentMessage): PromptImage[] {
-	if ((message.role !== 'user' && message.role !== 'toolResult') || !Array.isArray(message.content)) {
+	if (
+		(message.role !== 'user' && message.role !== 'toolResult') ||
+		!Array.isArray(message.content)
+	) {
 		return [];
 	}
 	return message.content.filter(isPromptImage);

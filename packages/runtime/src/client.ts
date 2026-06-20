@@ -13,11 +13,10 @@ import type {
 	AgentProfile,
 	AgentRuntimeConfig,
 	AgentDefinition,
-	FlueContext,
 	FlueEvent,
+	FlueEventContext,
 	FlueEventCallback,
 	FlueEventInput,
-	FlueHarness,
 	SandboxFactory,
 	SessionEnv,
 	SessionStore,
@@ -48,8 +47,8 @@ export interface FlueContextConfig {
 	submissionStore?: AgentSubmissionStore;
 }
 
-/** Extends FlueContext with server-only methods. Agent handlers only see FlueContext. */
-export interface FlueContextInternal extends FlueContext {
+/** Extends FlueEventContext with server-only methods. */
+export interface FlueContextInternal extends FlueEventContext {
 	readonly runId: string | undefined;
 	initializeRootHarness(agent: AgentDefinition): Promise<Harness>;
 	emitEvent(event: FlueEventInput): FlueEvent;

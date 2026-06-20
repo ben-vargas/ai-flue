@@ -1,6 +1,7 @@
 const TASK_SESSION_PREFIX = 'task:';
 const ACTION_SCOPE_PREFIX = 'action:';
 const SESSION_STORAGE_PREFIX = 'agent-session:';
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 interface SessionStorageIdentity {
 	instanceId: string;
@@ -39,39 +40,33 @@ export function createActionScopeName(invocationId: string): string {
 	return `${ACTION_SCOPE_PREFIX}${invocationId}`;
 }
 
-export function childActionSessionStorageKey(
+export function childSessionStorageKey(
 	parentStorageKey: string,
-	action: unknown,
+	child: unknown,
 ): string | undefined {
-	if (!action || typeof action !== 'object') return undefined;
-	const { invocationId, session, scope } = action as {
-		invocationId?: unknown;
-		session?: unknown;
-		scope?: unknown;
-	};
-	if (
-		typeof invocationId !== 'string' ||
-		typeof session !== 'string' ||
-		typeof scope !== 'string' ||
-		scope !== createActionScopeName(invocationId)
-	) {
-		return undefined;
-	}
+	if (!child || typeof child !== 'object') return undefined;
 	const parent = parseSessionStorageKey(parentStorageKey);
 	if (!parent) return undefined;
-	return createSessionStorageKey(parent.instanceId, `${parent.harness}:${scope}`, session);
-}
-
-export function childTaskSessionStorageKey(
-	parentStorageKey: string,
-	task: unknown,
-): string | undefined {
-	if (!task || typeof task !== 'object') return undefined;
-	const { session, taskId } = task as { session?: unknown; taskId?: unknown };
-	if (typeof session !== 'string' || typeof taskId !== 'string') return undefined;
-	const parent = parseSessionStorageKey(parentStorageKey);
-	if (!parent || session !== createTaskSessionName(parent.session, taskId)) return undefined;
-	return createSessionStorageKey(parent.instanceId, parent.harness, session);
+	const { type, session } = child as { type?: unknown; session?: unknown };
+	if (typeof session !== 'string') return undefined;
+	if (type === 'task') {
+		const { taskId } = child as { taskId?: unknown };
+		if (
+			typeof taskId !== 'string' ||
+			!UUID_PATTERN.test(taskId) ||
+			session !== createTaskSessionName(parent.session, taskId)
+		) {
+			return undefined;
+		}
+		return createSessionStorageKey(parent.instanceId, parent.harness, session);
+	}
+	if (type === 'action') {
+		const { invocationId } = child as { invocationId?: unknown };
+		if (typeof invocationId !== 'string' || !UUID_PATTERN.test(invocationId)) return undefined;
+		const scope = createActionScopeName(invocationId);
+		return createSessionStorageKey(parent.instanceId, `${parent.harness}:${scope}`, session);
+	}
+	return undefined;
 }
 
 function parseSessionStorageKey(storageKey: string): SessionStorageIdentity | undefined {

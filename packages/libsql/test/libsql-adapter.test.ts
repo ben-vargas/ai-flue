@@ -150,11 +150,11 @@ function createLibsqlRunner(
 
 function sessionData(): SessionData {
 	return {
-		version: 6,
+		version: 7,
 		affinityKey: 'affinity-1',
 		entries: [],
 		leafId: null,
-		taskSessions: [],
+		childSessions: [],
 		metadata: {},
 		createdAt: '2026-06-03T00:00:00.000Z',
 		updatedAt: '2026-06-03T00:00:00.000Z',

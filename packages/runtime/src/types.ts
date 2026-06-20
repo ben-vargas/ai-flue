@@ -59,8 +59,8 @@ export interface DirectAgentPayload {
 }
 
 /** Context passed to a {@link defineAgent} initializer. */
-export interface AgentCreateContext<TEnv = Record<string, any>> {
-	/** Agent instance id. */
+export interface AgentInitializerContext<TEnv = Record<string, any>> {
+	/** Agent instance id or workflow run id. */
 	readonly id: string;
 	/** Platform environment bindings supplied by the runtime. */
 	readonly env: TEnv;
@@ -401,13 +401,13 @@ export interface AgentRuntimeConfig {
 /** Opaque agent initializer created by {@link defineAgent}. */
 export interface AgentDefinition<TEnv = Record<string, any>> {
 	readonly __flueAgentDefinition: true;
-	initialize(context: AgentCreateContext<TEnv>): AgentRuntimeConfig | Promise<AgentRuntimeConfig>;
+	initialize(context: AgentInitializerContext<TEnv>): AgentRuntimeConfig | Promise<AgentRuntimeConfig>;
 }
 
-// ─── Flue Context ──────────────────────────────────────────────────────────
+// ─── Flue Event Context ────────────────────────────────────────────────────
 
-/** Internal event context used while processing agents and workflow runs. */
-export interface FlueContext<TEnv = Record<string, any>> {
+/** Event context for the agent interaction or workflow run that emitted an event. */
+export interface FlueEventContext<TEnv = Record<string, any>> {
 	/** Workflow run/instance id, or stable agent instance id during agent processing. */
 	readonly id: string;
 	/** Platform env bindings (process.env on Node, Cloudflare bindings on Workers). */
@@ -639,37 +639,32 @@ export interface PromptResultResponse<T> {
 // ─── Session Store ──────────────────────────────────────────────────────────
 
 export interface SessionData {
-	version: 6;
+	version: 7;
 	/** Opaque stable provider-facing identity used for prompt caching and routing affinity. */
 	affinityKey: string;
 	entries: SessionEntry[];
 	leafId: string | null;
-	/**
-	 * Child task sessions created by this session's delegated tasks. Framework
-	 * bookkeeping: the recursive deletion cascade uses these references to
-	 * remove child task-session storage with the parent.
-	 */
-	taskSessions: TaskSessionRef[];
-	actionSessions?: ActionSessionRef[];
+	/** Retained child sessions recursively deleted with this session. */
+	childSessions: ChildSessionRef[];
 	/** Application-owned session metadata. Flue never reads or writes keys here. */
 	metadata: Record<string, any>;
 	createdAt: string;
 	updatedAt: string;
 }
 
-/** Reference from a parent session to a child task session. */
-export interface TaskSessionRef {
-	/** Child task-session name (`task:<parentSession>:<taskId>`). */
-	session: string;
-	/** Task id that created the child session. */
-	taskId: string;
-}
-
-export interface ActionSessionRef {
-	invocationId: string;
-	session: string;
-	scope: string;
-}
+export type ChildSessionRef =
+	| {
+			type: 'task';
+			/** Child task-session name (`task:<parentSession>:<taskId>`). */
+			session: string;
+			/** Task id that created the child session. */
+			taskId: string;
+	  }
+	| {
+			type: 'action';
+			session: string;
+			invocationId: string;
+	  };
 
 export type SessionEntry = MessageEntry | CompactionEntry;
 

@@ -13,12 +13,12 @@ import {
 	WorkflowNotDiscoveredError,
 } from '../src/index.ts';
 import type { WorkflowInvokeRequest } from '../src/index.ts';
-import type { FlueContextInternal } from '../src/internal.ts';
 import {
 	configureFlueRuntime,
 	createFlueContext,
 	admitDetachedWorkflow,
 	failRecoveredRun,
+	handleWorkflowRequest,
 	InMemoryRunStore,
 	InMemorySessionStore,
 } from '../src/internal.ts';
@@ -223,9 +223,10 @@ describe('invoke()', () => {
 				createContext,
 				runStore,
 				eventStreamStore,
-				startWorkflowAdmission: async () => {
-					throw new Error('fiber rejected before scheduling');
-				},
+				startWorkflowAdmission: () => ({
+					admitted: Promise.reject(new Error('fiber rejected before scheduling')),
+					completion: new Promise(() => undefined),
+				}),
 			}),
 		).rejects.toThrow('fiber rejected before scheduling');
 
@@ -233,6 +234,70 @@ describe('invoke()', () => {
 		const stream = await eventStreamStore.readEvents(`runs/${runId}`, { offset: '-1' });
 		expect(stream.events.map((event) => (event.data as { type: string }).type)).toEqual(['run_end']);
 		expect(stream.closed).toBe(true);
+	});
+
+	it('returns a detached receipt when completion fails after admission', async () => {
+		const target = workflow(async () => undefined);
+		const runStore = new InMemoryRunStore();
+		const eventStreamStore = createTestEventStreamStore();
+		const runId = 'run_completion_failure';
+		const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+		try {
+			await expect(
+				admitDetachedWorkflow({
+					workflowName: 'target',
+					runId,
+					workflow: target,
+					input: {},
+					request: new Request('https://flue.invalid/_internal/workflow', { method: 'POST' }),
+					createContext,
+					runStore,
+					eventStreamStore,
+					startWorkflowAdmission: () => ({
+						admitted: Promise.resolve(),
+						completion: Promise.reject(new Error('fiber failed after admission')),
+					}),
+				}),
+			).resolves.toEqual({ runId });
+			await vi.waitFor(() => {
+				expect(consoleError).toHaveBeenCalledWith(
+					'[flue] Workflow run failed:',
+					runId,
+					expect.objectContaining({ message: 'fiber failed after admission' }),
+				);
+			});
+		} finally {
+			consoleError.mockRestore();
+		}
+	});
+
+	it('waits for completion after admission in synchronous mode', async () => {
+		let release!: (value: unknown) => void;
+		const completion = new Promise<unknown>((resolve) => {
+			release = resolve;
+		});
+		const request = new Request('http://localhost/flue/workflows/daily-report?wait=result', {
+			method: 'POST',
+		});
+		const responsePromise = handleWorkflowRequest({
+			request,
+			workflowName: 'daily-report',
+			workflow: workflow(async () => undefined),
+			createContext,
+			runStore: new InMemoryRunStore(),
+			eventStreamStore: createTestEventStreamStore(),
+			startWorkflowAdmission: () => ({ admitted: Promise.resolve(), completion }),
+		});
+		let settled = false;
+		responsePromise.then(() => {
+			settled = true;
+		});
+		await Promise.resolve();
+		expect(settled).toBe(false);
+		release({ delivered: true });
+		const response = await responsePromise;
+		expect(await response.json()).toMatchObject({ result: { delivered: true } });
 	});
 
 	it('terminalizes the run when event stream creation fails after run persistence', async () => {

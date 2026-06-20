@@ -137,11 +137,10 @@ export {
 // ─── Re-export session types needed for SessionStore implementations ────────
 
 export type {
-	ActionSessionRef,
+	ChildSessionRef,
 	CompactionEntry,
 	MessageEntry,
 	SessionData,
 	SessionEntry,
 	SessionStore,
-	TaskSessionRef,
 } from './types.ts';

@@ -70,7 +70,7 @@ export { defineTool } from './tool.ts';
 export { defineWorkflow } from './workflow-definition.ts';
 export type { WorkflowDefinition } from './workflow-definition.ts';
 export type {
-	AgentCreateContext,
+	AgentInitializerContext,
 	AgentDispatchRequest,
 	AgentProfile,
 	AgentRouteHandler,
@@ -85,8 +85,8 @@ export type {
 	DispatchReceipt,
 	DurabilityConfig,
 	FileStat,
-	FlueContext,
 	FlueEvent,
+	FlueEventContext,
 	FlueFs,
 	FlueHarness,
 	FlueLogger,
@@ -124,7 +124,6 @@ export type {
 	SkillOptions,
 	SkillReference,
 	TaskOptions,
-	TaskSessionRef,
 	ThinkingLevel,
 	ToolArgs,
 	ToolDefinition,

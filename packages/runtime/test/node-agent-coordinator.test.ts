@@ -338,9 +338,9 @@ describe('NodeAgentCoordinator', () => {
 			const storageKey = createSessionStorageKey('instance-1', 'default', 'default');
 			const now = new Date().toISOString();
 			await store.sessions.save(storageKey, {
-				version: 6,
+				version: 7,
 				affinityKey: generateSessionAffinityKey(),
-				taskSessions: [],
+				childSessions: [],
 				entries: [
 					{
 						type: 'message',
@@ -421,9 +421,9 @@ describe('NodeAgentCoordinator', () => {
 			const storageKey = createSessionStorageKey('instance-1', 'default', 'default');
 			const now = new Date().toISOString();
 			await store.sessions.save(storageKey, {
-				version: 6,
+				version: 7,
 				affinityKey: generateSessionAffinityKey(),
-				taskSessions: [],
+				childSessions: [],
 				entries: [
 					{
 						type: 'message',
@@ -666,8 +666,8 @@ describe('NodeAgentCoordinator', () => {
 				});
 				// The child task session is its own session: its record survives
 				// and its history keeps the aborted partial untouched.
-				expect(session?.taskSessions).toHaveLength(1);
-				const childSessionName = session?.taskSessions[0]?.session;
+				expect(session?.childSessions).toHaveLength(1);
+				const childSessionName = session?.childSessions[0]?.session;
 				if (!childSessionName) throw new Error('Expected a recorded task session.');
 				const childData = await store2.sessions.load(
 					createSessionStorageKey('instance-1', 'default', childSessionName),
@@ -770,18 +770,23 @@ describe('NodeAgentCoordinator', () => {
 			const coordinator = createNodeAgentCoordinator({
 				submissions: executionStore.submissions,
 				sessions: executionStore.sessions,
-				agents: [{ name: 'assistant', definition: makeAgentWithSequentialTools(firstRunCounts, async (_id, _args, signal) => {
-						bravoReachedResolve();
-						await new Promise<never>((_, reject) => {
-							if (signal?.aborted) reject(new Error('bravo aborted by shutdown'));
-							signal?.addEventListener(
-								'abort',
-								() => reject(new Error('bravo aborted by shutdown')),
-								{ once: true },
-							);
-						});
-						throw new Error('unreachable');
-					}) }],
+				agents: [
+					{
+						name: 'assistant',
+						definition: makeAgentWithSequentialTools(firstRunCounts, async (_id, _args, signal) => {
+							bravoReachedResolve();
+							await new Promise<never>((_, reject) => {
+								if (signal?.aborted) reject(new Error('bravo aborted by shutdown'));
+								signal?.addEventListener(
+									'abort',
+									() => reject(new Error('bravo aborted by shutdown')),
+									{ once: true },
+								);
+							});
+							throw new Error('unreachable');
+						}),
+					},
+				],
 				createContext: makeFauxCreateContext(provider, executionStore),
 				eventStreamStore: createTestEventStreamStore(),
 			});
@@ -838,10 +843,15 @@ describe('NodeAgentCoordinator', () => {
 				const restarted = createNodeAgentCoordinator({
 					submissions: store2.submissions,
 					sessions: store2.sessions,
-					agents: [{ name: 'assistant', definition: makeAgentWithSequentialTools(restartCounts, async () => ({
-							content: [{ type: 'text' as const, text: 'bravo result (rerun)' }],
-							details: {},
-						})) }],
+					agents: [
+						{
+							name: 'assistant',
+							definition: makeAgentWithSequentialTools(restartCounts, async () => ({
+								content: [{ type: 'text' as const, text: 'bravo result (rerun)' }],
+								details: {},
+							})),
+						},
+					],
 					createContext: makeFauxCreateContext(provider, store2),
 					eventStreamStore: createTestEventStreamStore(),
 				});
@@ -1118,9 +1128,9 @@ describe('NodeAgentCoordinator', () => {
 			const storageKey = createSessionStorageKey('instance-1', 'default', 'default');
 			const now = new Date().toISOString();
 			await store.sessions.save(storageKey, {
-				version: 6,
+				version: 7,
 				affinityKey: generateSessionAffinityKey(),
-				taskSessions: [],
+				childSessions: [],
 				entries: [
 					{
 						type: 'message',
@@ -1254,9 +1264,9 @@ describe('NodeAgentCoordinator', () => {
 			const storageKey = createSessionStorageKey('instance-1', 'default', 'default');
 			const now = new Date().toISOString();
 			await store.sessions.save(storageKey, {
-				version: 6,
+				version: 7,
 				affinityKey: generateSessionAffinityKey(),
-				taskSessions: [],
+				childSessions: [],
 				entries: [
 					{
 						type: 'message',
@@ -1355,9 +1365,9 @@ describe('NodeAgentCoordinator', () => {
 			const storageKey = createSessionStorageKey('instance-1', 'default', 'default');
 			const now = new Date().toISOString();
 			await store.sessions.save(storageKey, {
-				version: 6,
+				version: 7,
 				affinityKey: generateSessionAffinityKey(),
-				taskSessions: [],
+				childSessions: [],
 				entries: [
 					{
 						type: 'message',
@@ -1468,9 +1478,9 @@ describe('NodeAgentCoordinator', () => {
 			const storageKey = createSessionStorageKey('instance-1', 'default', 'default');
 			const now = new Date().toISOString();
 			await store.sessions.save(storageKey, {
-				version: 6,
+				version: 7,
 				affinityKey: generateSessionAffinityKey(),
-				taskSessions: [],
+				childSessions: [],
 				entries: [
 					{
 						type: 'message',
@@ -1552,10 +1562,15 @@ describe('NodeAgentCoordinator', () => {
 			const coordinator = createNodeAgentCoordinator({
 				submissions: executionStore.submissions,
 				sessions: executionStore.sessions,
-				agents: [{ name: 'assistant', definition: defineAgent(() => ({
-						model: `${provider.getModel().provider}/${provider.getModel().id}`,
-						tools: [lookup],
-					})) }],
+				agents: [
+					{
+						name: 'assistant',
+						definition: defineAgent(() => ({
+							model: `${provider.getModel().provider}/${provider.getModel().id}`,
+							tools: [lookup],
+						})),
+					},
+				],
 				createContext: makeFauxCreateContext(provider, executionStore),
 				eventStreamStore: createTestEventStreamStore(),
 			});
@@ -1610,10 +1625,15 @@ describe('NodeAgentCoordinator', () => {
 			const coordinator = createNodeAgentCoordinator({
 				submissions: executionStore.submissions,
 				sessions: executionStore.sessions,
-				agents: [{ name: 'assistant', definition: defineAgent(() => ({
-						model: `${provider.getModel().provider}/${provider.getModel().id}`,
-						tools: [lookup],
-					})) }],
+				agents: [
+					{
+						name: 'assistant',
+						definition: defineAgent(() => ({
+							model: `${provider.getModel().provider}/${provider.getModel().id}`,
+							tools: [lookup],
+						})),
+					},
+				],
 				createContext: makeFauxCreateContext(provider, executionStore),
 				eventStreamStore: createTestEventStreamStore(),
 			});
@@ -1776,9 +1796,9 @@ describe('NodeAgentCoordinator', () => {
 			const store = await openExecutionStore(dbPath);
 			const sessionKey = createSessionStorageKey('instance-1', 'default', 'default');
 			await store.sessions.save(sessionKey, {
-				version: 6,
+				version: 7,
 				affinityKey: generateSessionAffinityKey(),
-				taskSessions: [],
+				childSessions: [],
 				entries: [],
 				leafId: null,
 				metadata: {},
@@ -1988,9 +2008,14 @@ describe('NodeAgentCoordinator', () => {
 			const coordinator = createNodeAgentCoordinator({
 				submissions: executionStore.submissions,
 				sessions: executionStore.sessions,
-				agents: [{ name: 'assistant', definition: defineAgent(() => ({
-						model: `${provider.getModel().provider}/${provider.getModel().id}`,
-					})) }],
+				agents: [
+					{
+						name: 'assistant',
+						definition: defineAgent(() => ({
+							model: `${provider.getModel().provider}/${provider.getModel().id}`,
+						})),
+					},
+				],
 				createContext: makeFauxCreateContext(provider, executionStore),
 				eventStreamStore,
 			});
@@ -2017,9 +2042,9 @@ describe('NodeAgentCoordinator', () => {
 				const storageKey = createSessionStorageKey('instance-1', 'default', 'default');
 				const now = new Date().toISOString();
 				await executionStore.sessions.save(storageKey, {
-					version: 6,
+					version: 7,
 					affinityKey: generateSessionAffinityKey(),
-					taskSessions: [],
+					childSessions: [],
 					entries: [
 						{
 							type: 'message',
@@ -2091,9 +2116,14 @@ describe('NodeAgentCoordinator', () => {
 			const coordinator = createNodeAgentCoordinator({
 				submissions: executionStore.submissions,
 				sessions: executionStore.sessions,
-				agents: [{ name: 'assistant', definition: defineAgent(() => ({
-						model: `${provider.getModel().provider}/${provider.getModel().id}`,
-					})) }],
+				agents: [
+					{
+						name: 'assistant',
+						definition: defineAgent(() => ({
+							model: `${provider.getModel().provider}/${provider.getModel().id}`,
+						})),
+					},
+				],
 				createContext: makeFauxCreateContext(provider, executionStore),
 				eventStreamStore,
 			});

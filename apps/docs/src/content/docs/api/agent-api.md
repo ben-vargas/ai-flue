@@ -17,7 +17,7 @@ import {
   defineAgentProfile,
   defineTool,
   dispatch,
-  type AgentCreateContext,
+  type AgentInitializerContext,
   type AgentDispatchRequest,
   type AgentProfile,
   type AgentRuntimeConfig,
@@ -186,7 +186,7 @@ interface McpServerConnection {
 ```ts
 function defineAgent<TEnv = Record<string, any>>(
   initialize: (
-    context: AgentCreateContext<TEnv>,
+    context: AgentInitializerContext<TEnv>,
   ) => AgentRuntimeConfig | Promise<AgentRuntimeConfig>,
 ): AgentDefinition<TEnv>;
 ```
@@ -195,7 +195,7 @@ Defines an agent initializer. Default-export the returned value from an `agents/
 
 The initializer runs whenever a runner initializes a root harness from the agent definition. Do not treat it as a one-time constructor for a persistent agent instance id. Return a runtime config object with `model: '<provider>/<model>'`, `model: false`, or a profile with its own model field.
 
-#### `AgentCreateContext`
+#### `AgentInitializerContext`
 
 | Field | Type     | Description                                            |
 | ----- | -------- | ------------------------------------------------------ |

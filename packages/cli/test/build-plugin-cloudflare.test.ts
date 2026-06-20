@@ -55,6 +55,8 @@ describe('CloudflarePlugin', () => {
 		expect(entry).toContain('workflows.find((record) => record.name === workflowName)?.definition');
 		expect(entry).toContain("const INTERNAL_WORKFLOW_INVOKE_PATH = '/_flue/internal/workflow-invoke'");
 		expect(entry).toContain("doInstance.runFiber('flue:workflow:' + runId");
+		expect(entry).toContain('const admission = Promise.withResolvers();');
+		expect(entry).toContain('return { admitted: admission.promise, completion };');
 		expect(entry).toContain(
 			'const workflow = workflows.find((record) => record.name === workflowName)?.definition',
 		);

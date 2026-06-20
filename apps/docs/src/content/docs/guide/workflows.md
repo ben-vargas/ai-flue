@@ -47,7 +47,7 @@ An Action receives a deliberately small context:
 | `input`   | Parsed input; present only when the Action declares an input schema.        |
 | `log`     | Structured logging for the current execution.                               |
 
-Transport requests, environment bindings, and run IDs are not Action context. Validate transport-specific data before admission and pass required application data explicitly through `input`. Agent initialization may use platform bindings through its `AgentCreateContext`.
+Transport requests, environment bindings, and run IDs are not Action context. Validate transport-specific data before admission and pass required application data explicitly through `input`. Agent initialization may use platform bindings through its `AgentInitializerContext`.
 
 The workflow runner owns the agent policy, harness, and resources. The Action borrows them for one invocation. Calling an Action as an agent tool creates an isolated child execution scope with its own default and named sessions; it shares the parent configuration, sandbox, and filesystem, cannot reenter the waiting parent session, and is retained and cleaned up with its parent.
 

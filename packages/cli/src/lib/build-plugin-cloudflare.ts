@@ -440,7 +440,13 @@ async function dispatchWorkflow(request, doInstance, workflowName) {
         createContext: (options) => createWorkflowContextForRequest(options, doInstance),
         startWorkflowAdmission: (runId, run) => {
           assertAgentsDurabilityApi(doInstance, 'runFiber');
-          return doInstance.runFiber('flue:workflow:' + runId, () => runWithInstanceContext(doInstance, identity, run));
+          const admission = Promise.withResolvers();
+          const completion = doInstance.runFiber('flue:workflow:' + runId, () => {
+            admission.resolve();
+            return runWithInstanceContext(doInstance, identity, run);
+          });
+          completion.catch(admission.reject);
+          return { admitted: admission.promise, completion };
         },
       });
       return new Response(JSON.stringify(receipt), { status: 202, headers: { 'content-type': 'application/json' } });
@@ -457,7 +463,13 @@ async function dispatchWorkflow(request, doInstance, workflowName) {
       createContext: (options) => createWorkflowContextForRequest(options, doInstance),
       startWorkflowAdmission: (runId, run) => {
         assertAgentsDurabilityApi(doInstance, 'runFiber');
-        return doInstance.runFiber('flue:workflow:' + runId, () => runWithInstanceContext(doInstance, identity, run));
+        const admission = Promise.withResolvers();
+        const completion = doInstance.runFiber('flue:workflow:' + runId, () => {
+          admission.resolve();
+          return runWithInstanceContext(doInstance, identity, run);
+        });
+        completion.catch(admission.reject);
+        return { admitted: admission.promise, completion };
       },
     }));
 }

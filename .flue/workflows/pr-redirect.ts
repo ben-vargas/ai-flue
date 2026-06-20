@@ -40,7 +40,7 @@ import {
 } from '../lib/github.ts';
 
 // Subset of FlueLogger; declared locally so helpers can take a logger
-// without dragging the whole FlueContext through every signature.
+// without passing the whole execution context through every signature.
 type Logger = {
 	info: (msg: string, attrs?: Record<string, unknown>) => void;
 	warn: (msg: string, attrs?: Record<string, unknown>) => void;

@@ -91,7 +91,7 @@ import { observe } from '@flue/runtime';
 
 observe((event, ctx) => {
   // event is a fully decorated FlueEvent
-  // ctx is the FlueContext of the run that emitted it
+  // ctx is the FlueEventContext of the run that emitted it
 });
 ```
 

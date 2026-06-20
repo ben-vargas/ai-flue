@@ -1,7 +1,7 @@
 import * as v from 'valibot';
 import { isActionDefinition } from './action.ts';
 import type {
-	AgentCreateContext,
+	AgentInitializerContext,
 	AgentProfile,
 	AgentRuntimeConfig,
 	AgentDefinition,
@@ -74,7 +74,7 @@ export function defineAgentProfile(profile: AgentProfile): AgentProfile {
  */
 export function defineAgent<TEnv = Record<string, any>>(
 	initialize: (
-		context: AgentCreateContext<TEnv>,
+		context: AgentInitializerContext<TEnv>,
 	) => AgentRuntimeConfig | Promise<AgentRuntimeConfig>,
 ): AgentDefinition<TEnv> {
 	if (typeof initialize !== 'function') {
@@ -88,7 +88,7 @@ export function defineAgent<TEnv = Record<string, any>>(
 /** @deprecated Renamed to {@link defineAgent}. */
 export function createAgent<TEnv = Record<string, any>>(
 	initialize: (
-		context: AgentCreateContext<TEnv>,
+		context: AgentInitializerContext<TEnv>,
 	) => AgentRuntimeConfig | Promise<AgentRuntimeConfig>,
 ): AgentDefinition<TEnv> {
 	return defineAgent(initialize);

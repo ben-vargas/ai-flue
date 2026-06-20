@@ -75,6 +75,7 @@ export type {
 	InvokeWorkflowAttachedOptions,
 	StartWorkflowAdmissionFn,
 	WorkflowAttachedInvocationResult,
+	WorkflowSchedulingPhases,
 } from './runtime/handle-agent.ts';
 // Runtime modules consumed by the generated server entries.
 //

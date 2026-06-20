@@ -1,4 +1,4 @@
-import type { FlueContext, FlueEvent, FlueEventSubscriber } from '@flue/runtime';
+import type { FlueEvent, FlueEventContext, FlueEventSubscriber } from '@flue/runtime';
 import {
 	type Attributes,
 	type Context,
@@ -14,7 +14,7 @@ import {
 export interface OpenTelemetryObserverOptions {
 	tracer?: Tracer;
 	exportContent?: (event: FlueEvent) => FlueEvent | undefined;
-	resolveRootContext?: (event: FlueEvent, ctx: FlueContext) => Context | undefined;
+	resolveRootContext?: (event: FlueEvent, ctx: FlueEventContext) => Context | undefined;
 }
 
 export function createOpenTelemetryObserver(
@@ -428,7 +428,7 @@ function startSpan(
 	name: string,
 	parent: Span | undefined,
 	event: FlueEvent,
-	ctx: FlueContext,
+	ctx: FlueEventContext,
 	resolveRootContext: OpenTelemetryObserverOptions['resolveRootContext'],
 	options: SpanOptions,
 ): Span {

@@ -22,11 +22,7 @@ import type {
 import { streamSimple } from '@earendil-works/pi-ai';
 import type * as v from 'valibot';
 import { abortErrorFor, createCallHandle } from './abort.ts';
-import {
-	parseActionInput,
-	runActionWithParsedInput,
-	type ActionDefinition,
-} from './action.ts';
+import { parseActionInput, runActionWithParsedInput, type ActionDefinition } from './action.ts';
 import {
 	createActivateSkillTool,
 	createPackagedSkillReadTool,
@@ -92,15 +88,13 @@ import { generateOperationId, generateTurnId } from './runtime/ids.ts';
 import { getRegisteredApiKey, getRegisteredStoreResponses } from './runtime/providers.ts';
 import { reconstructInterruptedStream, StreamChunkWriter } from './runtime/stream-chunks.ts';
 import { createFlueFs } from './sandbox.ts';
+import { valibotToJsonSchema } from './schema.ts';
 import {
 	createUserContextMessage,
 	renderSignalMessage,
 	SessionHistory,
 } from './session-history.ts';
-import {
-	childActionSessionStorageKey,
-	childTaskSessionStorageKey,
-} from './session-identity.ts';
+import { childSessionStorageKey } from './session-identity.ts';
 import { execShellWithEvents, getErrorMessage } from './shell.ts';
 import {
 	classifySubmissionState,
@@ -111,10 +105,10 @@ import {
 } from './submission-state.ts';
 import { normalizeToolDefinition } from './tool.ts';
 import type {
-	ActionSessionRef,
 	AgentConfig,
 	AgentProfile,
 	CallHandle,
+	ChildSessionRef,
 	DispatchMessageMetadata,
 	FlueEvent,
 	FlueEventInput,
@@ -140,7 +134,6 @@ import type {
 	SkillOptions,
 	SkillReference,
 	TaskOptions,
-	TaskSessionRef,
 	ThinkingLevel,
 	ToolDefinition,
 } from './types.ts';
@@ -250,7 +243,7 @@ export interface CreateActionHarnessOptions {
 	env: SessionEnv;
 	tools: ToolDefinition[];
 	actions: ActionDefinition[];
-	retainSession(session: string, scope: string): Promise<void>;
+	retainSession(session: string): Promise<void>;
 }
 
 export interface ActionHarness extends FlueHarness {
@@ -401,8 +394,7 @@ export class Session implements FlueSession, AgentSubmissionSession {
 	readonly fs: FlueFs;
 	metadata: Record<string, any>;
 
-	private taskSessions: TaskSessionRef[];
-	private actionSessions: ActionSessionRef[];
+	private childSessions: ChildSessionRef[];
 	private agentLoop: Agent;
 	private storageKey: string;
 	private affinityKey: string;
@@ -530,8 +522,7 @@ export class Session implements FlueSession, AgentSubmissionSession {
 		this.submissionStore = options.submissionStore;
 
 		this.metadata = options.existingData?.metadata ?? {};
-		this.taskSessions = options.existingData?.taskSessions ?? [];
-		this.actionSessions = options.existingData?.actionSessions ?? [];
+		this.childSessions = options.existingData?.childSessions ?? [];
 		this.createdAt = options.existingData?.createdAt;
 
 		this.history = SessionHistory.fromData(options.existingData);
@@ -1226,7 +1217,7 @@ export class Session implements FlueSession, AgentSubmissionSession {
 			name: action.name,
 			label: action.name,
 			description: action.description,
-			parameters: (action.inputJsonSchema ?? {
+			parameters: (action.input ? valibotToJsonSchema(action.input) : {
 				type: 'object',
 				properties: {},
 				additionalProperties: false,
@@ -1256,21 +1247,22 @@ export class Session implements FlueSession, AgentSubmissionSession {
 			env: this.env,
 			tools: this.agentTools,
 			actions: this.actions,
-			retainSession: async (session, scope) => {
+			retainSession: async (session) => {
 				if (
-					this.actionSessions.some(
-						(ref) => ref.invocationId === invocationId && ref.session === session,
+					this.childSessions.some(
+						(ref) =>
+							ref.type === 'action' && ref.invocationId === invocationId && ref.session === session,
 					)
 				) {
 					return;
 				}
-				const reference = { invocationId, session, scope };
-				this.actionSessions.push(reference);
+				const reference = { type: 'action', invocationId, session } as const;
+				this.childSessions.push(reference);
 				try {
 					await this.save();
 				} catch (error) {
-					const index = this.actionSessions.indexOf(reference);
-					if (index !== -1) this.actionSessions.splice(index, 1);
+					const index = this.childSessions.indexOf(reference);
+					if (index !== -1) this.childSessions.splice(index, 1);
 					throw error;
 				}
 			},
@@ -1293,12 +1285,19 @@ export class Session implements FlueSession, AgentSubmissionSession {
 	}
 
 	private createActionLogger(action: string, toolCallId: string) {
-		const emit = (level: 'info' | 'warn' | 'error', message: string, attributes?: Record<string, unknown>) =>
+		const emit = (
+			level: 'info' | 'warn' | 'error',
+			message: string,
+			attributes?: Record<string, unknown>,
+		) =>
 			this.emit({ type: 'log', level, message, attributes: { ...attributes, action, toolCallId } });
 		return {
-			info: (message: string, attributes?: Record<string, unknown>) => emit('info', message, attributes),
-			warn: (message: string, attributes?: Record<string, unknown>) => emit('warn', message, attributes),
-			error: (message: string, attributes?: Record<string, unknown>) => emit('error', message, attributes),
+			info: (message: string, attributes?: Record<string, unknown>) =>
+				emit('info', message, attributes),
+			warn: (message: string, attributes?: Record<string, unknown>) =>
+				emit('warn', message, attributes),
+			error: (message: string, attributes?: Record<string, unknown>) =>
+				emit('error', message, attributes),
 		};
 	}
 
@@ -1314,13 +1313,21 @@ export class Session implements FlueSession, AgentSubmissionSession {
 			{ source: 'result' as const, tools: extraTools },
 		];
 		const seen = new Map<string, (typeof groups)[number]['source']>();
-		const frameworkReserved = new Set(['task', 'activate_skill', FINISH_TOOL_NAME, GIVE_UP_TOOL_NAME]);
+		const frameworkReserved = new Set([
+			'task',
+			'activate_skill',
+			FINISH_TOOL_NAME,
+			GIVE_UP_TOOL_NAME,
+		]);
 		for (const group of groups) {
 			for (const tool of group.tools) {
 				if (
 					frameworkReserved.has(tool.name) &&
 					group.source !== 'framework' &&
-					!(group.source === 'result' && (tool.name === FINISH_TOOL_NAME || tool.name === GIVE_UP_TOOL_NAME))
+					!(
+						group.source === 'result' &&
+						(tool.name === FINISH_TOOL_NAME || tool.name === GIVE_UP_TOOL_NAME)
+					)
 				) {
 					throw new ToolNameConflictError({
 						name: tool.name,
@@ -1823,8 +1830,7 @@ export class Session implements FlueSession, AgentSubmissionSession {
 			const now = new Date().toISOString();
 			const data = this.history.toData(
 				this.affinityKey,
-				this.taskSessions,
-				this.actionSessions,
+				this.childSessions,
 				this.metadata,
 				this.createdAt ?? now,
 				now,
@@ -1840,8 +1846,8 @@ export class Session implements FlueSession, AgentSubmissionSession {
 	}
 
 	private async recordTaskSession(session: string, taskId: string): Promise<void> {
-		if (!this.taskSessions.some((task) => task.session === session)) {
-			this.taskSessions.push({ session, taskId });
+		if (!this.childSessions.some((child) => child.type === 'task' && child.session === session)) {
+			this.childSessions.push({ type: 'task', session, taskId });
 			await this.save();
 		}
 	}
@@ -2628,12 +2634,8 @@ export async function deleteSessionTree(
 	if (seen.has(storageKey)) return;
 	seen.add(storageKey);
 	const data = await store.load(storageKey);
-	for (const task of data?.taskSessions ?? []) {
-		const childStorageKey = childTaskSessionStorageKey(storageKey, task);
-		if (childStorageKey) await deleteSessionTree(store, childStorageKey, seen);
-	}
-	for (const action of data?.actionSessions ?? []) {
-		const childStorageKey = childActionSessionStorageKey(storageKey, action);
+	for (const child of data?.childSessions ?? []) {
+		const childStorageKey = childSessionStorageKey(storageKey, child);
 		if (childStorageKey) await deleteSessionTree(store, childStorageKey, seen);
 	}
 	await store.delete(storageKey);

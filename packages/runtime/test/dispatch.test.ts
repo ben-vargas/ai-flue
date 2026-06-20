@@ -243,7 +243,6 @@ describe('dispatch()', () => {
 			dispatch({ agent: 'moderator', id: '  ', input: { type: 'flagged' } }),
 		).rejects.toThrow('requires a non-empty "id" target agent instance id');
 	});
-
 });
 
 describe('dispatched session processing', () => {
@@ -582,9 +581,9 @@ describe('dispatched session processing', () => {
 		};
 		const timestamp = '2026-06-01T00:00:00.000Z';
 		await store.save(`agent-session:${JSON.stringify([input.id, 'default', 'default'])}`, {
-			version: 6,
+			version: 7,
 			affinityKey: 'aff_01KT3P3GZGFBCKHKMQ11A7H2HW',
-			taskSessions: [],
+			childSessions: [],
 			entries: [
 				{
 					type: 'message',
@@ -645,9 +644,9 @@ describe('dispatched session processing', () => {
 		};
 		const timestamp = '2026-06-01T00:00:00.000Z';
 		await store.save(`agent-session:${JSON.stringify([input.id, 'default', 'default'])}`, {
-			version: 6,
+			version: 7,
 			affinityKey: 'aff_01KT3P3GZGFBCKHKMQ11A7H2HW',
-			taskSessions: [],
+			childSessions: [],
 			entries: [
 				{
 					type: 'message',
@@ -707,9 +706,9 @@ describe('dispatched session processing', () => {
 		};
 		const timestamp = '2026-06-01T00:00:00.000Z';
 		await store.save(`agent-session:${JSON.stringify([input.id, 'default', 'default'])}`, {
-			version: 6,
+			version: 7,
 			affinityKey: 'aff_01KT3P3GZGFBCKHKMQ11A7H2HW',
-			taskSessions: [],
+			childSessions: [],
 			entries: [
 				{
 					type: 'message',
@@ -766,9 +765,9 @@ describe('dispatched session processing', () => {
 		const retryableError = () =>
 			fauxAssistantMessage('', { stopReason: 'error', errorMessage: '429 Too Many Requests' });
 		await store.save(`agent-session:${JSON.stringify([input.id, 'default', 'default'])}`, {
-			version: 6,
+			version: 7,
 			affinityKey: 'aff_01KT3P3GZGFBCKHKMQ11A7H2HW',
-			taskSessions: [],
+			childSessions: [],
 			entries: [
 				{
 					type: 'message',
@@ -854,9 +853,9 @@ describe('dispatched session processing', () => {
 		};
 		const timestamp = '2026-06-01T00:00:00.000Z';
 		await store.save(`agent-session:${JSON.stringify([input.id, 'default', 'default'])}`, {
-			version: 6,
+			version: 7,
 			affinityKey: 'aff_01KT3P3GZGFBCKHKMQ11A7H2HW',
-			taskSessions: [],
+			childSessions: [],
 			entries: [
 				{
 					type: 'message',
@@ -1003,11 +1002,11 @@ describe('repairInterruptedToolCalls()', () => {
 
 		return {
 			data: {
-				version: 6,
+				version: 7,
 				affinityKey: generateSessionAffinityKey(),
 				entries,
 				leafId,
-				taskSessions: [],
+				childSessions: [],
 				metadata: {},
 				createdAt: now,
 				updatedAt: now,

@@ -44,12 +44,12 @@ describe('package entrypoints', () => {
 		expect(runtime).not.toHaveProperty('resetProvidersForTests');
 	});
 
-	it('keeps Action session persistence types adapter-only', () => {
+	it('keeps child session persistence types adapter-only', () => {
 		const rootDeclaration = readFileSync('types/index.d.ts', 'utf8');
 		const adapterDeclaration = readFileSync('dist/adapter.d.mts', 'utf8');
 
-		expect(rootDeclaration).not.toContain('ActionSessionRef');
-		expect(adapterDeclaration).toContain('ActionSessionRef');
+		expect(rootDeclaration).not.toContain('ChildSessionRef');
+		expect(adapterDeclaration).toContain('ChildSessionRef');
 	});
 
 	it('exposes only WorkflowDefinition from the public workflow type surface', () => {
@@ -58,6 +58,16 @@ describe('package entrypoints', () => {
 		expect(declarations).toContain('WorkflowDefinition');
 		expect(declarations).not.toContain('ExtractedWorkflow');
 		expect(declarations).not.toContain('InlineWorkflow');
+	});
+
+	it('exposes current context names without unreleased legacy names', () => {
+		const declarations = readFileSync('dist/index.d.mts', 'utf8');
+
+		expect(declarations).toContain('FlueEventContext');
+		expect(declarations).toContain('AgentInitializerContext');
+		expect(declarations).not.toContain('FlueContext,');
+		expect(declarations).not.toContain('AgentCreateContext');
+		expect(declarations).not.toContain('inputJsonSchema');
 	});
 
 	it('exposes flue() when a consumer imports @flue/runtime/routing', async () => {

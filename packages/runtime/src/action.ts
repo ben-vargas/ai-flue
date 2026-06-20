@@ -5,13 +5,7 @@ import {
 	ActionOutputValidationError,
 	WorkflowInputUnexpectedError,
 } from './errors.ts';
-import {
-	isTopLevelObjectSchema,
-	isValibotSchema,
-	parseValibot,
-	type ReadonlyJsonSchema,
-	valibotToJsonSchema,
-} from './schema.ts';
+import { isTopLevelObjectSchema, isValibotSchema, parseValibot } from './schema.ts';
 import { cloneJsonSerializable } from './json-snapshot.ts';
 import type { FlueHarness, FlueLogger } from './types.ts';
 
@@ -39,7 +33,6 @@ export interface ActionDefinition<
 	readonly description: string;
 	readonly input: TInput;
 	readonly output: TOutput;
-	readonly inputJsonSchema: TInput extends ActionInputSchema ? ReadonlyJsonSchema : undefined;
 	run(context: ActionContext<TInput>): ActionRunResult<TOutput> | Promise<ActionRunResult<TOutput>>;
 }
 
@@ -101,10 +94,6 @@ export function defineAction<
 		description: options.description,
 		input: options.input as TInput,
 		output: options.output as TOutput,
-		inputJsonSchema: (options.input ? valibotToJsonSchema(options.input) : undefined) as ActionDefinition<
-			TInput,
-			TOutput
-		>['inputJsonSchema'],
 		run: options.run,
 	});
 	definedActions.add(action);

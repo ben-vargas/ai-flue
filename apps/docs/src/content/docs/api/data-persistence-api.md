@@ -238,34 +238,33 @@ Offset format: offsets are strings in the Durable Streams format `<readSeq>_<seq
 
 ```ts
 interface SessionData {
-  version: 6;
+  version: 7;
   affinityKey: string;
   entries: SessionEntry[];
   leafId: string | null;
-  taskSessions: TaskSessionRef[];
+  childSessions: ChildSessionRef[];
   metadata: Record<string, any>;
   createdAt: string;
   updatedAt: string;
 }
 
-interface TaskSessionRef {
-  session: string;
-  taskId: string;
-}
+type ChildSessionRef =
+  | { type: 'task'; session: string; taskId: string }
+  | { type: 'action'; session: string; invocationId: string };
 ```
 
 `SessionData` is the complete persisted conversation record for one session.
 
-| Field          | Contract                                                                                                                                           |
-| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `version`      | Storage format version. Flue rejects unsupported versions.                                                                                         |
-| `affinityKey`  | Opaque Flue-generated provider-affinity key. Persist it unchanged.                                                                                 |
-| `entries`      | Stored message and compaction history.                                                                                                             |
-| `leafId`       | Current active leaf in the session history tree, or `null`.                                                                                        |
-| `taskSessions` | Framework bookkeeping: child task sessions created by delegated tasks. The recursive deletion cascade follows these references. Persist unchanged. |
-| `metadata`     | Application-owned session metadata. Flue never reads or writes keys here.                                                                          |
-| `createdAt`    | ISO timestamp for session creation.                                                                                                                |
-| `updatedAt`    | ISO timestamp for the last persisted update.                                                                                                       |
+| Field           | Contract                                                                                                                                                                                                                                                                            |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `version`       | Storage format version. Flue rejects unsupported versions.                                                                                                                                                                                                                          |
+| `affinityKey`   | Opaque Flue-generated provider-affinity key. Persist it unchanged.                                                                                                                                                                                                                  |
+| `entries`       | Stored message and compaction history.                                                                                                                                                                                                                                              |
+| `leafId`        | Current active leaf in the session history tree, or `null`.                                                                                                                                                                                                                         |
+| `childSessions` | Framework bookkeeping for retained task and Action child sessions. Persist unchanged. Recursive deletion derives task keys only from a validated parent session, task session, and task id, and derives Action scope only from the invocation id; malformed references are ignored. |
+| `metadata`      | Application-owned session metadata. Flue never reads or writes keys here.                                                                                                                                                                                                           |
+| `createdAt`     | ISO timestamp for session creation.                                                                                                                                                                                                                                                 |
+| `updatedAt`     | ISO timestamp for the last persisted update.                                                                                                                                                                                                                                        |
 
 `SessionData` may contain model-visible text, tool output, dispatch snapshots, and summaries derived from earlier content. Treat it as potentially sensitive.
 

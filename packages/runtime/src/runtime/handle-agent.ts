@@ -91,20 +91,15 @@ export type CreateWorkflowContextFn = (
 	options: CreateWorkflowContextOptions,
 ) => FlueContextInternal;
 
-/**
- * Background workflow admission wrapper. Receives the prepared workflow-run
- * callback and returns a promise that resolves with its result. Implementations:
- *
- *   - Node: just `run()` — no fiber, no DO.
- *   - Cloudflare: `doInstance.runFiber('flue:workflow:<runId>', run)`.
- *
- * The caller is responsible for any logging on completion/error; this wrapper
- * starts durably admitted workflow execution for any supported observation mode.
- */
+export interface WorkflowSchedulingPhases {
+	admitted: Promise<void>;
+	completion: Promise<unknown>;
+}
+
 export type StartWorkflowAdmissionFn = (
 	runId: string,
 	run: () => Promise<unknown>,
-) => Promise<unknown>;
+) => WorkflowSchedulingPhases;
 
 export interface HandleAgentOptions {
 	request: Request;
@@ -300,8 +295,7 @@ interface AdmittedWorkflowExecution {
 	lifecycle: WorkflowRunLifecycle;
 	startWorkflowAdmission: StartWorkflowAdmissionFn;
 	workflow: WorkflowDefinition;
-	completion?: Promise<unknown>;
-	admission?: Promise<void>;
+	scheduling?: WorkflowSchedulingPhases;
 }
 
 async function prepareWorkflowExecution(
@@ -343,47 +337,41 @@ async function prepareWorkflowExecution(
 	};
 }
 
-function startWorkflowExecution(execution: AdmittedWorkflowExecution): Promise<void> {
-	if (execution.admission) return execution.admission;
+function startWorkflowExecution(execution: AdmittedWorkflowExecution): WorkflowSchedulingPhases {
+	if (execution.scheduling) return execution.scheduling;
 	const { runId, lifecycle, workflow, startWorkflowAdmission } = execution;
-	let didRun = false;
-	let markStarted!: () => void;
-	const started = new Promise<void>((resolve) => {
-		markStarted = resolve;
-	});
-	const run = async (): Promise<unknown> => {
-		didRun = true;
-		markStarted();
-		return await withWorkflowRunLifecycle(lifecycle, () =>
+	const run = () =>
+		withWorkflowRunLifecycle(lifecycle, () =>
 			executeWorkflowDefinition(workflow, lifecycle.ctx, lifecycle.input),
 		);
-	};
 	try {
-		execution.completion = Promise.resolve(startWorkflowAdmission(runId, run));
-	} catch (error) {
-		execution.admission = emitRunEnd(lifecycle, { isError: true, error }).then(() => {
-			throw error;
-		});
-		return execution.admission;
-	}
-	const scheduling = execution.completion.then(
-		() => undefined,
-		async (error) => {
-			if (didRun) return;
+		const scheduling = startWorkflowAdmission(runId, run);
+		const completion = Promise.resolve(scheduling.completion);
+		completion.catch(() => undefined);
+		const admitted = Promise.resolve(scheduling.admitted).catch(async (error) => {
 			await emitRunEnd(lifecycle, { isError: true, error });
 			throw error;
-		},
-	);
-	execution.admission = Promise.race([started, scheduling]);
-	return execution.admission;
+		});
+		execution.scheduling = { admitted, completion };
+	} catch (error) {
+		const completion = Promise.reject(error);
+		completion.catch(() => undefined);
+		execution.scheduling = {
+			admitted: emitRunEnd(lifecycle, { isError: true, error }).then(() => {
+				throw error;
+			}),
+			completion,
+		};
+	}
+	return execution.scheduling;
 }
 
 async function detachWorkflowExecution(execution: AdmittedWorkflowExecution): Promise<void> {
-	const admission = startWorkflowExecution(execution);
-	execution.completion?.catch((error) => {
+	const scheduling = startWorkflowExecution(execution);
+	scheduling.completion.catch((error) => {
 		console.error('[flue] Workflow run failed:', execution.runId, error);
 	});
-	await admission;
+	await scheduling.admitted;
 }
 
 export async function admitDetachedWorkflow(
@@ -565,14 +553,9 @@ export async function invokeDirectAttached(
 }
 
 async function runSyncMode(execution: AdmittedWorkflowExecution): Promise<Response> {
-	let result: unknown;
-	try {
-		await startWorkflowExecution(execution);
-		result = await execution.completion;
-	} catch (error) {
-		await execution.completion?.catch(() => undefined);
-		throw error;
-	}
+	const scheduling = startWorkflowExecution(execution);
+	await scheduling.admitted;
+	const result = await scheduling.completion;
 	return new Response(
 		JSON.stringify({
 			result: result === undefined ? null : result,
@@ -905,11 +888,7 @@ function serializeError(error: unknown): unknown {
 
 // ─── Defaults ───────────────────────────────────────────────────────────────
 
-/**
- * Default background workflow runner: invoke `run()` directly so the workflow
- * executes in the current process. Used by the Node target. The Cloudflare
- * target overrides this with a `runFiber` wrapper for crash-recoverable
- * execution across DO hibernation.
- */
-const defaultStartWorkflowAdmission: StartWorkflowAdmissionFn = (_runId, run) =>
-	Promise.resolve().then(run);
+const defaultStartWorkflowAdmission: StartWorkflowAdmissionFn = (_runId, run) => ({
+	admitted: Promise.resolve(),
+	completion: Promise.resolve().then(run),
+});

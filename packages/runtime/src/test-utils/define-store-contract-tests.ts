@@ -63,7 +63,7 @@ function claim(submissionId: string, attemptId: string, ownerId = 'test-owner') 
 
 function sessionData(): SessionData {
 	return {
-		version: 6,
+		version: 7,
 		affinityKey: 'affinity-1',
 		entries: [
 			{
@@ -98,7 +98,7 @@ function sessionData(): SessionData {
 			},
 		],
 		leafId: 'entry-2',
-		taskSessions: [],
+		childSessions: [],
 		metadata: { label: 'example' },
 		createdAt: '2026-06-03T00:00:00.000Z',
 		updatedAt: '2026-06-03T00:00:01.000Z',

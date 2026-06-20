@@ -6,7 +6,6 @@ import { SessionAlreadyExistsError, SessionNotFoundError } from './errors.ts';
 import { generateSessionAffinityKey } from './runtime/ids.ts';
 import { createCwdSessionEnv, createFlueFs } from './sandbox.ts';
 import {
-	type CreateActionHarnessOptions,
 	type CreateTaskSessionOptions,
 	createPublicSession,
 	deleteSessionTree,
@@ -71,7 +70,7 @@ export class Harness implements FlueHarness {
 		private scopeName?: string,
 		private scopeDepth = 0,
 		private retainSession?: (session: string) => Promise<void>,
-		private scopeSignal?: AbortSignal,
+		scopeSignal?: AbortSignal,
 	) {
 		this.fs = createFlueFs(env);
 		if (scopeSignal) {
@@ -246,7 +245,7 @@ export class Harness implements FlueHarness {
 			sessionName,
 		);
 		// `metadata` is application-owned; the parent→child relationship is
-		// carried by the parent's typed `taskSessions` field, and task/parent
+		// carried by the parent's typed `childSessions` field, and task/parent
 		// correlation flows through event decoration below.
 		const data = createEmptySessionData();
 		const eventCallback: FlueEventInputCallback | undefined = this.eventCallback
@@ -294,11 +293,11 @@ export class Harness implements FlueHarness {
 			options.actions,
 			nestedScope,
 			options.depth,
-			(session) => options.retainSession(session, scope),
+			(session) => options.retainSession(session),
 			options.signal,
 		);
 		return harness;
-	}
+	};
 
 	close(): Promise<void> {
 		if (this.closePromise) return this.closePromise;
@@ -340,11 +339,11 @@ function normalizeSessionName(name: string | undefined): string {
 function createEmptySessionData(): SessionData {
 	const now = new Date().toISOString();
 	return {
-		version: 6,
+		version: 7,
 		affinityKey: generateSessionAffinityKey(),
 		entries: [],
 		leafId: null,
-		taskSessions: [],
+		childSessions: [],
 		metadata: {},
 		createdAt: now,
 		updatedAt: now,

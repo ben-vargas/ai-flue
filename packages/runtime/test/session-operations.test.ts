@@ -491,9 +491,9 @@ describe('session.prompt()', () => {
 		const store = new RecordingSessionStore();
 		const timestamp = '2026-06-01T00:00:00.000Z';
 		await store.save('agent-session:["session-operations-instance","default","default"]', {
-			version: 6,
+			version: 7,
 			affinityKey: 'aff_01KT3P3GZGFBCKHKMQ11A7H2HW',
-			taskSessions: [],
+			childSessions: [],
 			entries: [
 				{
 					type: 'message',
@@ -762,9 +762,7 @@ describe('session.task()', () => {
 					prompt && Array.isArray(prompt.content)
 						? prompt.content.filter((block) => block.type === 'image')
 						: [];
-				expect(images).toEqual([
-					{ type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' },
-				]);
+				expect(images).toEqual([{ type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' }]);
 				return fauxAssistantMessage('Image analyzed once.');
 			},
 			fauxAssistantMessage('Delegation complete.'),
@@ -1083,7 +1081,8 @@ describe('session.task()', () => {
 				const parent = store.records.get(
 					'agent-session:["session-operations-instance","default","default"]',
 				);
-				expect(parent?.taskSessions).toContainEqual({
+				expect(parent?.childSessions).toContainEqual({
+					type: 'task',
 					session: expect.stringMatching(/^task:default:/),
 					taskId: expect.any(String),
 				});
@@ -1127,10 +1126,18 @@ describe('session.task()', () => {
 		const parent = store.records.get(
 			'agent-session:["session-operations-instance","default","default"]',
 		);
-		expect(parent?.taskSessions).toHaveLength(2);
-		expect(parent?.taskSessions).toEqual([
-			{ session: expect.stringMatching(/^task:default:/), taskId: expect.any(String) },
-			{ session: expect.stringMatching(/^task:default:/), taskId: expect.any(String) },
+		expect(parent?.childSessions).toHaveLength(2);
+		expect(parent?.childSessions).toEqual([
+			{
+				type: 'task',
+				session: expect.stringMatching(/^task:default:/),
+				taskId: expect.any(String),
+			},
+			{
+				type: 'task',
+				session: expect.stringMatching(/^task:default:/),
+				taskId: expect.any(String),
+			},
 		]);
 	});
 
@@ -1166,13 +1173,17 @@ describe('session.task()', () => {
 		const parentKey = 'agent-session:["session-operations-instance","default","default"]';
 		const unrelatedKey = 'agent-session:["session-operations-instance","default","unrelated"]';
 		const parent = store.records.get(parentKey);
-		const task = parent?.taskSessions[0] as { session: string; taskId: string };
+		const task = parent?.childSessions[0] as {
+			type: 'task';
+			session: string;
+			taskId: string;
+		};
 		await store.save(unrelatedKey, {
-			version: 6,
+			version: 7,
 			affinityKey: 'aff_01J00000000000000000000000',
 			entries: [],
 			leafId: null,
-			taskSessions: [],
+			childSessions: [],
 			metadata: {},
 			createdAt: '2026-06-02T00:00:00.000Z',
 			updatedAt: '2026-06-02T00:00:00.000Z',

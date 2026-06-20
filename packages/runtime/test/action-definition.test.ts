@@ -8,7 +8,6 @@ import {
 	defineAgent,
 	defineWorkflow,
 	defineAction,
-	defineTool,
 	type FlueHarness,
 	type FlueLogger,
 } from '../src/index.ts';
@@ -123,35 +122,16 @@ describe('defineAction()', () => {
 		).toThrow('top-level object schema');
 	});
 
-	it('reuses one deeply frozen JSON Schema object for a shared Valibot schema', () => {
-		const input = v.object({ value: v.string() });
-		const first = defineAction({
-			name: 'first',
-			description: 'First action.',
-			input,
-			run: async () => undefined,
-		});
-		const second = defineAction({
-			name: 'second',
-			description: 'Second action.',
-			input,
+	it('keeps derived model schemas out of the Action definition', () => {
+		const action = defineAction({
+			name: 'typed',
+			description: 'Typed action.',
+			input: v.object({ value: v.string() }),
 			run: async () => undefined,
 		});
 
-		expect(second.inputJsonSchema).toBe(first.inputJsonSchema);
-		expect(Object.isFrozen(first.inputJsonSchema)).toBe(true);
-		expect(Object.isFrozen(first.inputJsonSchema.properties)).toBe(true);
-		expect(() => {
-			(first.inputJsonSchema as Record<string, unknown>).type = 'string';
-		}).toThrow(TypeError);
-		expect(second.inputJsonSchema.type).toBe('object');
-		const tool = defineTool({
-			name: 'shared',
-			description: 'Uses the shared schema.',
-			parameters: input,
-			execute: async () => 'ok',
-		});
-		expect(tool.parameters).toBe(first.inputJsonSchema);
+		expect(action).not.toHaveProperty('inputJsonSchema');
+		expectTypeOf(action).not.toHaveProperty('inputJsonSchema');
 	});
 
 	it('infers transformed context input and output while omitting undeclared input', () => {
@@ -235,7 +215,6 @@ describe('defineWorkflow()', () => {
 			description: 'Forged action.',
 			input: undefined,
 			output: undefined,
-			inputJsonSchema: undefined,
 			run: async () => undefined,
 		};
 
