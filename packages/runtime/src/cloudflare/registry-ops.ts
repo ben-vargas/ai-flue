@@ -24,7 +24,7 @@ import {
 	type RunStatus,
 	type WorkflowRunPointer,
 } from '../runtime/run-store.ts';
-import { ensureFlueSchemaVersion } from '../schema-version.ts';
+import { migrateFlueSqlSchema } from '../schema-version.ts';
 import type { SqlStorage } from '../sql-storage.ts';
 
 type SqlRow = Record<string, unknown>;
@@ -141,24 +141,25 @@ class SqlRegistryOps implements RegistryOps {
 }
 
 function ensureRegistryTables(sql: SqlStorage): void {
-	ensureFlueSchemaVersion(sql);
-	sql.exec(
-		`CREATE TABLE IF NOT EXISTS flue_registry_runs (
-		 run_id TEXT PRIMARY KEY,
-		 workflow_name TEXT,
-		 status TEXT NOT NULL,
-		 started_at TEXT NOT NULL,
-		 ended_at TEXT,
-		 duration_ms INTEGER,
-		 is_error INTEGER
-		)`,
-	);
-	sql.exec(
-		'CREATE INDEX IF NOT EXISTS flue_registry_status_started_idx ON flue_registry_runs (status, started_at DESC)',
-	);
-	sql.exec(
-		'CREATE INDEX IF NOT EXISTS flue_registry_workflow_started_idx ON flue_registry_runs (workflow_name, started_at DESC)',
-	);
+	migrateFlueSqlSchema(sql, () => {
+		sql.exec(
+			`CREATE TABLE IF NOT EXISTS flue_registry_runs (
+			 run_id TEXT PRIMARY KEY,
+			 workflow_name TEXT,
+			 status TEXT NOT NULL,
+			 started_at TEXT NOT NULL,
+			 ended_at TEXT,
+			 duration_ms INTEGER,
+			 is_error INTEGER
+			)`,
+		);
+		sql.exec(
+			'CREATE INDEX IF NOT EXISTS flue_registry_status_started_idx ON flue_registry_runs (status, started_at DESC)',
+		);
+		sql.exec(
+			'CREATE INDEX IF NOT EXISTS flue_registry_workflow_started_idx ON flue_registry_runs (workflow_name, started_at DESC)',
+		);
+	});
 }
 
 function rowToRunPointer(row: SqlRow): RunPointer {

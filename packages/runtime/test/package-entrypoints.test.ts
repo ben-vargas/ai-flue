@@ -41,6 +41,8 @@ describe('package entrypoints', () => {
 			registerProvider: expect.any(Function),
 		});
 		expect(runtime).not.toHaveProperty('Type');
+		expect(runtime).not.toHaveProperty('interceptExecution');
+		expect(runtime).not.toHaveProperty('registerExecutionInterceptor');
 		expect(runtime).not.toHaveProperty('resetFlueRuntimeForTests');
 		expect(runtime).not.toHaveProperty('resetProviderRuntime');
 	});

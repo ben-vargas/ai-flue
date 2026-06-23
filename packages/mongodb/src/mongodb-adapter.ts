@@ -20,7 +20,7 @@ export function mongodb(runner: MongoRunner, options: MongoOptions = {}): Persis
 			migrated = false;
 			const meta = runner.collection(collectionName(prefix, 'meta'));
 			const existingVersion = await meta.findOne({ _id: 'schema_version' });
-			if (existingVersion) assertSupportedFlueSchemaVersion(String(existingVersion.value));
+			if (existingVersion) assertMigratableSchemaVersion(String(existingVersion.value));
 			const topology = await runner.topology();
 			if (topology.kind === 'standalone' || !topology.transactions)
 				throw new TypeError(
@@ -64,14 +64,20 @@ export function mongodb(runner: MongoRunner, options: MongoOptions = {}): Persis
 			}, MIGRATION_LEASE_MS / 3);
 			try {
 				const lockedVersion = await meta.findOne({ _id: 'schema_version' });
-				if (lockedVersion) assertSupportedFlueSchemaVersion(String(lockedVersion.value));
+				if (lockedVersion) assertMigratableSchemaVersion(String(lockedVersion.value));
 				await ensureSchema(runner, prefix);
 				await renewal;
 				if (lockLost || !(await meta.findOne({ _id: 'migration_lock', ownerId })))
 					throw new TypeError('MongoDB migration lock ownership was lost.');
 				const verifiedVersion = await meta.findOne({ _id: 'schema_version' });
-				if (verifiedVersion) assertSupportedFlueSchemaVersion(String(verifiedVersion.value));
-				else await meta.insertOne({ _id: 'schema_version', value: FLUE_SCHEMA_VERSION });
+				if (verifiedVersion) {
+					assertMigratableSchemaVersion(String(verifiedVersion.value));
+					if (String(verifiedVersion.value) === '2')
+						await meta.updateOne(
+							{ _id: 'schema_version', value: verifiedVersion.value },
+							{ $set: { value: FLUE_SCHEMA_VERSION } },
+						);
+				} else await meta.insertOne({ _id: 'schema_version', value: FLUE_SCHEMA_VERSION });
 				await new ValueStore(runner, prefix).collectGarbage();
 				migrated = true;
 			} finally {
@@ -99,6 +105,11 @@ export function mongodb(runner: MongoRunner, options: MongoOptions = {}): Persis
 			}
 		},
 	};
+}
+
+function assertMigratableSchemaVersion(storedVersion: string): void {
+	if (storedVersion === '2' && FLUE_SCHEMA_VERSION === 3) return;
+	assertSupportedFlueSchemaVersion(storedVersion);
 }
 
 function isDuplicate(error: unknown): boolean {

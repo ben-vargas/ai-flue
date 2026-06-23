@@ -34,6 +34,7 @@ export {
 	type WorkflowRunOptions,
 	type WorkflowRunResult,
 } from './public/settle.ts';
+export { UnsupportedFlueEventVersionError } from './public/stream.ts';
 export type { FlueEventStream, FlueStreamOptions } from './public/stream.ts';
 export type {
 	AgentPromptResponse,
@@ -51,6 +52,10 @@ export type {
 	LlmToolResultMessage,
 	LlmTurnPurpose,
 	LlmUserMessage,
+	ModelRequest,
+	ModelRequestInfo,
+	ModelRequestInput,
+	ModelResponse,
 	PromptUsage,
 	RunRecord,
 	RunStatus,

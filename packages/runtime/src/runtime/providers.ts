@@ -33,6 +33,12 @@ export interface CloudflareAIBinding {
  */
 export type ProviderRegistration = HttpProviderRegistration | CloudflareAIBindingRegistration;
 
+export interface ProviderTelemetryRegistration {
+	providerName?: string;
+	serverAddress?: string;
+	serverPort?: number;
+}
+
 /** Register an HTTP-backed provider ID with {@link registerProvider}. */
 export interface HttpProviderRegistration {
 	/**
@@ -78,6 +84,7 @@ export interface HttpProviderRegistration {
 	 * you need OpenAI-hosted item persistence and accept its retention policy.
 	 */
 	storeResponses?: boolean;
+	telemetry?: ProviderTelemetryRegistration;
 }
 
 /** Register a Workers AI binding-backed provider ID with {@link registerProvider}. */
@@ -98,6 +105,7 @@ export interface CloudflareAIBindingRegistration {
 	 * See https://developers.cloudflare.com/ai-gateway/integrations/worker-binding-methods/.
 	 */
 	gateway?: CloudflareGatewayOptions | false;
+	telemetry?: ProviderTelemetryRegistration;
 }
 
 /**
@@ -163,6 +171,31 @@ export function hasRegisteredProvider(providerId: string): boolean {
 }
 
 /** Look up an API key registered for a provider ID. */
+export function getProviderTelemetry(providerId: string): ProviderTelemetryRegistration | undefined {
+	const telemetry = providersById.get(providerId)?.telemetry;
+	return {
+		...telemetry,
+		providerName: telemetry?.providerName ?? normalizeProviderName(providerId),
+	};
+}
+
+function normalizeProviderName(providerId: string): string {
+	return {
+		'amazon-bedrock': 'aws.bedrock',
+		anthropic: 'anthropic',
+		'azure-openai-responses': 'azure.ai.openai',
+		deepseek: 'deepseek',
+		google: 'gcp.gemini',
+		'google-vertex': 'gcp.vertex_ai',
+		groq: 'groq',
+		mistral: 'mistral_ai',
+		moonshotai: 'moonshot_ai',
+		'moonshotai-cn': 'moonshot_ai',
+		openai: 'openai',
+		xai: 'x_ai',
+	}[providerId] ?? providerId;
+}
+
 export function getRegisteredApiKey(providerId: string): string | undefined {
 	const registration = providersById.get(providerId);
 	if (!registration || isCloudflareBindingRegistration(registration)) return undefined;

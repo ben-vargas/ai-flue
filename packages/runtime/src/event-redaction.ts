@@ -1,5 +1,5 @@
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import type { FlueEventInput } from './types.ts';
+import type { FlueEventInput, FlueObservationDetail } from './types.ts';
 
 /**
  * Sentinel that replaces raw base64 image bytes in event payloads. Events keep
@@ -72,6 +72,19 @@ function redactToolResultImages(result: unknown): unknown {
 	if (!Array.isArray(content)) return result;
 	const redacted = redactContentImages(content);
 	return redacted === content ? result : { ...result, content: redacted };
+}
+
+export function redactObservationDetailImages(
+	detail: FlueObservationDetail | undefined,
+): FlueObservationDetail | undefined {
+	if (!detail || !Object.hasOwn(detail, 'effectiveResult')) return detail;
+	const effectiveResult = redactContentValueImages(detail.effectiveResult);
+	return effectiveResult === detail.effectiveResult ? detail : { ...detail, effectiveResult };
+}
+
+function redactContentValueImages(value: unknown): unknown {
+	if (!Array.isArray(value)) return value;
+	return redactContentImages(value);
 }
 
 function redactContentImages<T>(content: T[]): T[] {

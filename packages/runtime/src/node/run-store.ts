@@ -29,6 +29,7 @@ export class InMemoryRunStore implements RunStore {
 			status: 'active',
 			startedAt: input.startedAt,
 			input: input.input,
+			traceCarrier: input.traceCarrier,
 		});
 	}
 

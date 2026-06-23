@@ -85,7 +85,8 @@ defineStoreContractTests('AgentExecutionStore (node-sqlite)', {
 
 function sessionData(): SessionData {
 	return {
-		version: 7,
+		version: 8,
+		conversationId: 'conv_01KT3P3GZGFBCKHKMQ11A7H2HW',
 		affinityKey: 'affinity-1',
 		entries: [],
 		leafId: null,
@@ -257,7 +258,7 @@ describe('sqlite() PersistenceAdapter', () => {
 		const rows = db.prepare(`SELECT value FROM flue_meta WHERE key = 'schema_version'`).all() as {
 			value: string;
 		}[];
-		expect(rows).toEqual([{ value: '2' }]);
+		expect(rows).toEqual([{ value: '3' }]);
 		db.close();
 	});
 
@@ -277,6 +278,12 @@ describe('sqlite() PersistenceAdapter', () => {
 				status TEXT NOT NULL,
 				accepted_at INTEGER NOT NULL
 			);
+			CREATE TABLE flue_runs (
+				run_id TEXT PRIMARY KEY,
+				workflow_name TEXT,
+				status TEXT NOT NULL,
+				started_at TEXT NOT NULL
+			);
 		`);
 		db.close();
 
@@ -290,10 +297,56 @@ describe('sqlite() PersistenceAdapter', () => {
 		expect(columns.map((column) => column.name)).toEqual(
 			expect.arrayContaining(['terminal_event_key', 'terminal_event_json', 'terminal_event_offset']),
 		);
+		const runColumns = migrated.prepare('PRAGMA table_info(flue_runs)').all() as Array<{ name: string }>;
+		expect(runColumns.map((column) => column.name)).toEqual(
+			expect.arrayContaining(['traceparent', 'tracestate']),
+		);
 		expect(
 			migrated.prepare(`SELECT value FROM flue_meta WHERE key = 'schema_version'`).get(),
-		).toEqual({ value: '2' });
+		).toEqual({ value: '3' });
 		migrated.close();
+	});
+
+	it('repairs partial physical schemas already stamped with the current version', async () => {
+		const dir = createTempDir();
+		const dbPath = join(dir, 'partial-current-test.db');
+		const db = new DatabaseSync(dbPath);
+		db.exec(`
+			CREATE TABLE flue_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+			INSERT INTO flue_meta (key, value) VALUES ('schema_version', '3');
+			CREATE TABLE flue_agent_submissions (
+				sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+				submission_id TEXT NOT NULL UNIQUE,
+				session_key TEXT NOT NULL,
+				kind TEXT NOT NULL,
+				payload TEXT NOT NULL,
+				status TEXT NOT NULL,
+				accepted_at INTEGER NOT NULL,
+				terminal_event_key TEXT
+			);
+			CREATE TABLE flue_runs (
+				run_id TEXT PRIMARY KEY,
+				workflow_name TEXT,
+				status TEXT NOT NULL,
+				started_at TEXT NOT NULL,
+				traceparent TEXT
+			);
+		`);
+		db.close();
+
+		const adapter = sqlite(dbPath);
+		await adapter.migrate?.();
+		await adapter.close?.();
+		const repaired = new DatabaseSync(dbPath);
+		const submissionColumns = repaired.prepare('PRAGMA table_info(flue_agent_submissions)').all() as Array<{ name: string }>;
+		const runColumns = repaired.prepare('PRAGMA table_info(flue_runs)').all() as Array<{ name: string }>;
+		expect(submissionColumns.map((column) => column.name)).toEqual(
+			expect.arrayContaining(['terminal_event_key', 'terminal_event_json', 'terminal_event_offset']),
+		);
+		expect(runColumns.map((column) => column.name)).toEqual(
+			expect.arrayContaining(['traceparent', 'tracestate']),
+		);
+		repaired.close();
 	});
 
 	it('rejects opening a database stamped with a newer schema version', async () => {

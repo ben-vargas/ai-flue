@@ -110,6 +110,51 @@ export type LlmMessage = LlmUserMessage | LlmAssistantMessage | LlmToolResultMes
 /** Purpose of a model turn emitted with model-turn events. */
 export type LlmTurnPurpose = 'agent' | 'compaction' | 'compaction_prefix';
 
+export type LlmTool = {
+	name: string;
+	description: string;
+	parameters: unknown;
+};
+
+export interface FlueErrorInfo {
+	type: string;
+	name?: string;
+	code?: string;
+	message?: string;
+}
+
+export interface ModelRequestInput {
+	systemPrompt?: string;
+	messages: LlmMessage[];
+	tools?: LlmTool[];
+}
+
+export interface ModelRequestInfo {
+	providerId: string;
+	providerName: string;
+	requestedModel: string;
+	api: string;
+	serverAddress?: string;
+	serverPort?: number;
+	reasoningLevel?: string;
+	maxTokens?: number;
+	temperature?: number;
+	contextCompacted?: true;
+}
+
+export interface ModelRequest extends ModelRequestInfo {
+	input: ModelRequestInput;
+}
+
+export interface ModelResponse {
+	responseId?: string;
+	responseModel?: string;
+	output?: LlmAssistantMessage;
+	usage?: PromptUsage;
+	finishReason?: string;
+	error?: FlueErrorInfo;
+}
+
 /** Structured server error data. */
 export interface FluePublicError {
 	type: string;
@@ -167,7 +212,7 @@ export type FlueEvent = (
 	| { type: 'thinking_start' }
 	| { type: 'thinking_delta'; delta: string }
 	| { type: 'thinking_end'; content: string }
-	| { type: 'tool_start'; toolName: string; toolCallId: string; args?: unknown }
+	| { type: 'tool_start'; toolName: string; toolCallId: string }
 	| {
 			type: 'tool';
 			toolName: string;
@@ -181,14 +226,9 @@ export type FlueEvent = (
 			turnId: string;
 			purpose: LlmTurnPurpose;
 			durationMs: number;
-			model?: string;
-			provider?: string;
-			api?: string;
-			output?: LlmAssistantMessage;
-			usage?: PromptUsage;
-			stopReason?: string;
+			request: ModelRequestInfo;
+			response: ModelResponse;
 			isError: boolean;
-			error?: unknown;
 	  }
 	| { type: 'task_start'; taskId: string; prompt: string; agent?: string; cwd?: string }
 	| {
@@ -242,13 +282,15 @@ export type FlueEvent = (
 	  }
 ) & {
 	/** Durable event-format version. Readers branch on this when the format changes. */
-	v: 1;
+	v: 3;
 	eventIndex: number;
 	timestamp: string;
 	runId?: string;
 	instanceId?: string;
 	dispatchId?: string;
 	submissionId?: string;
+	agentName?: string;
+	conversationId?: string;
 	session?: string;
 	parentSession?: string;
 	taskId?: string;

@@ -20,7 +20,7 @@ import {
 	formatOffset,
 	parseOffset,
 } from './event-stream-store.ts';
-import { normalizeRunStreamEvent } from './handle-agent.ts';
+import { assertProductEventV3 } from '../product-event.ts';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -208,10 +208,11 @@ export async function handleStreamRead(opts: HandleStreamReadOptions): Promise<R
 
 // ─── Catch-up mode ──────────────────────────────────────────────────────────
 
-function publicEventData(path: string, result: EventStreamReadResult): unknown[] {
-	return result.events.map((event) =>
-		path.startsWith('runs/') ? normalizeRunStreamEvent(event.data) : event.data,
-	);
+function publicEventData(_path: string, result: EventStreamReadResult): unknown[] {
+	return result.events.map((event) => {
+		assertProductEventV3(event.data);
+		return event.data;
+	});
 }
 
 function streamErrorResponse(

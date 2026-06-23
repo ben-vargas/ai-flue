@@ -61,20 +61,26 @@ export function assertToolDefinition(
 	}
 }
 
-export async function validateAndRunTool<TTool extends ToolDefinition>(
+export function parseToolInput<TTool extends ToolDefinition>(
 	tool: TTool,
 	input?: unknown,
 	signal?: AbortSignal,
-): Promise<ToolOutput<TTool>> {
-	let context: { input: unknown; signal?: AbortSignal } | { signal?: AbortSignal } = { signal };
-	if (tool.input) {
-		const parsedInput = parseValibot(tool.input, input === undefined ? {} : input);
-		if (!parsedInput.success) {
-			throw new ToolInputValidationError({ tool: tool.name, issues: parsedInput.issues });
-		}
-		context = { input: parsedInput.output, signal };
+): { context: Parameters<TTool['run']>[0]; input: unknown } {
+	if (!tool.input) return { context: { signal } as Parameters<TTool['run']>[0], input: undefined };
+	const parsedInput = parseValibot(tool.input, input === undefined ? {} : input);
+	if (!parsedInput.success) {
+		throw new ToolInputValidationError({ tool: tool.name, issues: parsedInput.issues });
 	}
-	const result = await tool.run(context as never);
+	return {
+		context: { input: parsedInput.output, signal } as Parameters<TTool['run']>[0],
+		input: parsedInput.output,
+	};
+}
+
+export function validateToolOutput<TTool extends ToolDefinition>(
+	tool: TTool,
+	result: unknown,
+): ToolOutput<TTool> {
 	let output: unknown = result;
 	if (tool.output) {
 		const parsedOutput = parseValibot(tool.output, result);
@@ -90,6 +96,15 @@ export async function validateAndRunTool<TTool extends ToolDefinition>(
 	} catch (cause) {
 		throw new ToolOutputSerializationError({ tool: tool.name, cause });
 	}
+}
+
+export async function validateAndRunTool<TTool extends ToolDefinition>(
+	tool: TTool,
+	input?: unknown,
+	signal?: AbortSignal,
+): Promise<ToolOutput<TTool>> {
+	const parsed = parseToolInput(tool, input, signal);
+	return validateToolOutput(tool, await tool.run(parsed.context));
 }
 
 function assertNonEmptyString(value: unknown, label: string): asserts value is string {

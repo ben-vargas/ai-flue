@@ -75,8 +75,9 @@ process.on('disconnect', () => { void stop(0); });
 		// default export and dispatches all requests through `app.fetch`. When
 		// no app.ts is present, the generated entry constructs a thin default
 		// Hono that mounts `flue()` and renders canonical error envelopes.
-		const userAppImport = appEntry
-			? `import userApp from ${JSON.stringify(appEntry.replace(/\\/g, '/'))};`
+		const userAppImport = '';
+		const userAppLoad = appEntry
+			? `const { default: userApp } = await import(${JSON.stringify(appEntry.replace(/\\/g, '/'))});`
 			: '';
 		const userDbImport = dbEntry
 			? `import userPersistenceAdapter from ${JSON.stringify(dbEntry.replace(/\\/g, '/'))};`
@@ -102,6 +103,8 @@ import {
   createNodeAgentCoordinator,
   createNodeDispatchQueue,
   createRuntimeActivityGate,
+  createInstrumentationOwner,
+  runWithInstrumentationOwner,
   bashFactoryToSessionEnv,
   resolveModel,
   configureFlueRuntime,
@@ -169,12 +172,14 @@ export async function loadFlueNodeApplication(options = {}) {
     }
   }
   const runInRuntime = (fn) => outputContext.run(true, fn);
+  const instrumentationOwner = createInstrumentationOwner();
   let devLifecycle;
   let persistenceAdapter;
   let agentCoordinator;
   try {
-  return await runInRuntime(async () => {
+  return await runInRuntime(() => runWithInstrumentationOwner(instrumentationOwner, async () => {
   devLifecycle = isLocalMode && options.internalDevLogs === true ? installDevLifecycleLogger() : undefined;
+  ${userAppLoad}
 ${
 	dbEntry
 		? `// Custom persistence from db.ts. connect() is awaited once at startup so
@@ -223,9 +228,10 @@ agentCoordinator = createNodeAgentCoordinator({
 });
 const dispatchQueue = createNodeDispatchQueue(agentCoordinator);
 
-function createAgentContextForRequest({ id, request, initialEventIndex, dispatchId }) {
+function createAgentContextForRequest({ id, agentName, request, initialEventIndex, dispatchId }) {
   return createFlueContext({
     id,
+    agentName,
     dispatchId,
     initialEventIndex,
     env: runtimeEnv,
@@ -336,6 +342,11 @@ const flueApp = createDefaultFlueApp();`
           errors.push(error);
         }
         try {
+          await instrumentationOwner.dispose();
+        } catch (error) {
+          errors.push(error);
+        }
+        try {
           if (persistenceAdapter.close) await persistenceAdapter.close();
         } catch (error) {
           errors.push(error);
@@ -352,7 +363,7 @@ const flueApp = createDefaultFlueApp();`
       restoreOutput();
     },
   };
-  });
+  }));
   } catch (error) {
     const cleanupErrors = [];
     try {
@@ -362,6 +373,11 @@ const flueApp = createDefaultFlueApp();`
     }
     try {
       if (persistenceAdapter?.close) await persistenceAdapter.close();
+    } catch (cleanupError) {
+      cleanupErrors.push(cleanupError);
+    }
+    try {
+      await instrumentationOwner.dispose();
     } catch (cleanupError) {
       cleanupErrors.push(cleanupError);
     }

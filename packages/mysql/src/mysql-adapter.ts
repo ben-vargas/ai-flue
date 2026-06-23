@@ -162,6 +162,8 @@ const schemaTables = {
 		'status',
 		'started_at',
 		'payload',
+		'traceparent',
+		'tracestate',
 		'ended_at',
 		'is_error',
 		'duration_ms',
@@ -271,6 +273,8 @@ const criticalColumns: Record<string, SchemaColumn> = {
 	'flue_runs.workflow_name': { type: 'varchar(255)', collation: 'utf8mb4_bin', nullable: false },
 	'flue_runs.status': { type: 'varchar(16)', collation: 'ascii_bin', nullable: false },
 	'flue_runs.started_at': { type: 'varchar(64)', collation: 'ascii_bin', nullable: false },
+	'flue_runs.traceparent': { type: 'varchar(255)', collation: 'ascii_bin', nullable: true },
+	'flue_runs.tracestate': { type: 'longtext', nullable: true },
 	'flue_event_streams.path': { type: 'varchar(512)', collation: 'utf8mb4_bin', nullable: false },
 	'flue_event_streams.next_offset': { type: 'bigint', nullable: false, default: '0' },
 	'flue_event_streams.closed': { type: 'tinyint(1)', nullable: false, default: '0' },
@@ -291,6 +295,7 @@ const longtextColumns = [
 	'flue_agent_turn_journals.tool_request_json',
 	'flue_agent_stream_chunks.body',
 	'flue_runs.payload',
+	'flue_runs.tracestate',
 	'flue_runs.result',
 	'flue_runs.error',
 	'flue_event_stream_entries.data',
@@ -376,12 +381,14 @@ async function ensureTables(runner: MysqlRunner): Promise<void> {
 	const metaRows = await runner.query(
 		`SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'flue_meta'`,
 	);
+	let migratingFromV2 = false;
 	if (metaRows.length > 0) {
 		const versionRows = await runner.query(
 			`SELECT value FROM flue_meta WHERE \`key\` = 'schema_version'`,
 		);
 		const storedVersion = versionRows[0]?.value;
-		if (storedVersion !== undefined && storedVersion !== null)
+		migratingFromV2 = String(storedVersion) === '2' && FLUE_SCHEMA_VERSION === 3;
+		if (storedVersion !== undefined && storedVersion !== null && !migratingFromV2)
 			assertSupportedFlueSchemaVersion(String(storedVersion));
 	}
 	const ddl = [
@@ -396,7 +403,7 @@ async function ensureTables(runner: MysqlRunner): Promise<void> {
 		`CREATE TABLE IF NOT EXISTS flue_agent_session_deletions (session_key VARCHAR(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin PRIMARY KEY, started_at BIGINT NOT NULL) ENGINE=InnoDB`,
 		`CREATE TABLE IF NOT EXISTS flue_agent_dispatch_receipts (dispatch_id VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin PRIMARY KEY, accepted_at BIGINT NOT NULL) ENGINE=InnoDB`,
 		`CREATE TABLE IF NOT EXISTS flue_agent_attempt_markers (submission_id VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL, attempt_id VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL, created_at BIGINT NOT NULL, PRIMARY KEY (submission_id, attempt_id)) ENGINE=InnoDB`,
-		`CREATE TABLE IF NOT EXISTS flue_runs (run_id VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin PRIMARY KEY, workflow_name VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL, status VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL, started_at VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL, payload LONGTEXT, ended_at VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin, is_error TINYINT(1), duration_ms BIGINT, result LONGTEXT, error LONGTEXT, INDEX flue_runs_status_started_idx (status, started_at DESC, run_id DESC), INDEX flue_runs_workflow_started_idx (workflow_name, started_at DESC, run_id DESC)) ENGINE=InnoDB`,
+		`CREATE TABLE IF NOT EXISTS flue_runs (run_id VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin PRIMARY KEY, workflow_name VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL, status VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL, started_at VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL, payload LONGTEXT, traceparent VARCHAR(255) CHARACTER SET ascii COLLATE ascii_bin, tracestate LONGTEXT, ended_at VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin, is_error TINYINT(1), duration_ms BIGINT, result LONGTEXT, error LONGTEXT, INDEX flue_runs_status_started_idx (status, started_at DESC, run_id DESC), INDEX flue_runs_workflow_started_idx (workflow_name, started_at DESC, run_id DESC)) ENGINE=InnoDB`,
 		`CREATE TABLE IF NOT EXISTS flue_event_streams (path VARCHAR(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin PRIMARY KEY, next_offset BIGINT NOT NULL DEFAULT 0, closed TINYINT(1) NOT NULL DEFAULT 0) ENGINE=InnoDB`,
 		`CREATE TABLE IF NOT EXISTS flue_event_stream_entries (path VARCHAR(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL, seq BIGINT NOT NULL, data LONGTEXT NOT NULL, event_key VARCHAR(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin, PRIMARY KEY (path, seq), UNIQUE INDEX flue_event_stream_entries_path_event_key_idx (path, event_key)) ENGINE=InnoDB`,
 	];
@@ -406,6 +413,8 @@ async function ensureTables(runner: MysqlRunner): Promise<void> {
 		`ALTER TABLE flue_agent_submissions ADD COLUMN IF NOT EXISTS terminal_event LONGTEXT`,
 		`ALTER TABLE flue_agent_submissions ADD COLUMN IF NOT EXISTS terminal_offset VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin`,
 		`ALTER TABLE flue_event_stream_entries ADD COLUMN IF NOT EXISTS event_key VARCHAR(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin`,
+		`ALTER TABLE flue_runs ADD COLUMN IF NOT EXISTS traceparent VARCHAR(255) CHARACTER SET ascii COLLATE ascii_bin`,
+		`ALTER TABLE flue_runs ADD COLUMN IF NOT EXISTS tracestate LONGTEXT`,
 	]) await runner.query(statement);
 	const eventKeyIndexes = await runner.query(`SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'flue_event_stream_entries' AND INDEX_NAME = 'flue_event_stream_entries_path_event_key_idx'`);
 	if (eventKeyIndexes.length === 0) await runner.query(`CREATE UNIQUE INDEX flue_event_stream_entries_path_event_key_idx ON flue_event_stream_entries (path, event_key)`);
@@ -413,7 +422,7 @@ async function ensureTables(runner: MysqlRunner): Promise<void> {
 		`SELECT value FROM flue_meta WHERE \`key\` = 'schema_version'`,
 	);
 	const storedVersion = versionRows[0]?.value;
-	if (storedVersion !== undefined && storedVersion !== null)
+	if (storedVersion !== undefined && storedVersion !== null && !migratingFromV2)
 		assertSupportedFlueSchemaVersion(String(storedVersion));
 	const tables = await runner.query(
 		`SELECT TABLE_NAME AS table_name, ENGINE AS engine FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME LIKE 'flue\\_%'`,
@@ -481,7 +490,11 @@ async function ensureTables(runner: MysqlRunner): Promise<void> {
 		if (!found)
 			throw invalidMysqlSchema(`index on ${expected.table} (${expected.columns.join(', ')})`);
 	}
-	if (storedVersion === undefined || storedVersion === null) {
+	if (migratingFromV2) {
+		await runner.query(`UPDATE flue_meta SET value = ? WHERE \`key\` = 'schema_version'`, [
+			String(FLUE_SCHEMA_VERSION),
+		]);
+	} else if (storedVersion === undefined || storedVersion === null) {
 		await runner.query(
 			`INSERT INTO flue_meta (\`key\`, value) VALUES ('schema_version', ?) ON DUPLICATE KEY UPDATE value = value`,
 			[String(FLUE_SCHEMA_VERSION)],
@@ -1451,13 +1464,16 @@ class MysqlRunStore implements RunStore {
 
 	async createRun(input: CreateRunInput): Promise<void> {
 		await this.runner.query(
-			`INSERT IGNORE INTO flue_runs (run_id, workflow_name, status, started_at, payload)
-			 VALUES (?, ?, 'active', ?, ?)`,
+			`INSERT IGNORE INTO flue_runs
+			 (run_id, workflow_name, status, started_at, payload, traceparent, tracestate)
+			 VALUES (?, ?, 'active', ?, ?, ?, ?)`,
 			[
 				input.runId,
 				input.workflowName,
 				input.startedAt,
 				input.input !== undefined ? JSON.stringify(input.input) : null,
+				input.traceCarrier?.traceparent ?? null,
+				input.traceCarrier?.tracestate ?? null,
 			],
 		);
 	}
@@ -1482,7 +1498,7 @@ class MysqlRunStore implements RunStore {
 	async getRun(runId: string): Promise<RunRecord | null> {
 		const rows = await this.runner.query(
 			`SELECT run_id, workflow_name, status, started_at,
-			        payload, ended_at, is_error, duration_ms, result, error
+			        payload, traceparent, tracestate, ended_at, is_error, duration_ms, result, error
 			 FROM flue_runs WHERE run_id = ? LIMIT 1`,
 			[runId],
 		);
@@ -1494,6 +1510,14 @@ class MysqlRunStore implements RunStore {
 			status: row.status as RunStatus,
 			startedAt: String(row.started_at),
 			...(row.payload != null ? { input: JSON.parse(String(row.payload)) } : {}),
+			...(row.traceparent != null
+				? {
+						traceCarrier: {
+							traceparent: String(row.traceparent),
+							...(row.tracestate != null ? { tracestate: String(row.tracestate) } : {}),
+						},
+					}
+				: {}),
 			...(row.ended_at != null ? { endedAt: String(row.ended_at) } : {}),
 			...(row.is_error != null ? { isError: parseMysqlBoolean(row.is_error) } : {}),
 			...(row.duration_ms != null ? { durationMs: Number(row.duration_ms) } : {}),

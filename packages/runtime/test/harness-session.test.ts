@@ -1,13 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
 	defineAgent,
+	observe,
 	SessionAlreadyExistsError,
 	SessionBusyError,
 	SessionDeletedError,
 	SessionNotFoundError,
 } from '../src/index.ts';
 import { createFlueContext, type FlueContextConfig } from '../src/internal.ts';
-import type { FlueEvent, SessionData, SessionEnv, SessionStore } from '../src/types.ts';
+import type { FlueEvent, FlueObservation, SessionData, SessionEnv, SessionStore } from '../src/types.ts';
 
 describe('FlueHarness', () => {
 	it('uses the default harness name when init() receives no name', async () => {
@@ -70,29 +71,39 @@ describe('FlueHarness', () => {
 	it('redacts environment values from tool events when shell() receives environment variables', async () => {
 		const exec = vi.fn(async () => ({ stdout: 'configured', stderr: '', exitCode: 0 }));
 		const events: FlueEvent[] = [];
+		const observations: FlueObservation[] = [];
 		const store = new TrackingSessionStore();
 		const ctx = createContext(createEnv({ exec }), store);
 		ctx.setEventCallback((event) => {
 			events.push(event);
 		});
+		const stopObserving = observe((event, context) => {
+			if (context === ctx) observations.push(event);
+		});
 		const harness = await ctx.initializeRootHarness(defineAgent(() => ({ model: false })));
 
-		await harness.shell('printenv TOKEN', { env: { TOKEN: 'secret-value' }, cwd: '/repo' });
+		try {
+			await harness.shell('printenv TOKEN', { env: { TOKEN: 'secret-value' }, cwd: '/repo' });
 
-		expect(exec).toHaveBeenCalledWith('printenv TOKEN', {
-			env: { TOKEN: 'secret-value' },
-			cwd: '/repo',
-			signal: expect.any(AbortSignal),
-		});
-		expect(events).toContainEqual(
-			expect.objectContaining({
-				type: 'tool_start',
-				harness: 'default',
-				toolName: 'bash',
-				args: { command: 'printenv TOKEN', cwd: '/repo', env: { TOKEN: '<redacted>' } },
-			}),
-		);
-		expect(JSON.stringify(events)).not.toContain('secret-value');
+			expect(exec).toHaveBeenCalledWith('printenv TOKEN', {
+				env: { TOKEN: 'secret-value' },
+				cwd: '/repo',
+				signal: expect.any(AbortSignal),
+			});
+			expect(observations).toContainEqual(
+				expect.objectContaining({
+					type: 'tool_start',
+					harness: 'default',
+					toolName: 'bash',
+					args: { command: 'printenv TOKEN', cwd: '/repo', env: { TOKEN: '<redacted>' } },
+				}),
+			);
+			expect(events.find((event) => event.type === 'tool_start')).not.toHaveProperty('args');
+			expect(JSON.stringify(observations)).not.toContain('secret-value');
+			expect(JSON.stringify(events)).not.toContain('secret-value');
+		} finally {
+			stopObserving();
+		}
 	});
 
 	describe('session()', () => {
@@ -108,7 +119,8 @@ describe('FlueHarness', () => {
 			expect(created.name).toBe('default');
 			expect(reopened).toBe(created);
 			expect(store.peek('agent-session:["agent-instance","default","default"]')).toMatchObject({
-				version: 7,
+				version: 8,
+				conversationId: expect.stringMatching(/^conv_[0-9A-HJKMNP-TV-Z]{26}$/),
 				affinityKey: expect.stringMatching(/^aff_[0-9A-HJKMNP-TV-Z]{26}$/),
 				entries: [],
 				leafId: null,
@@ -126,6 +138,7 @@ describe('FlueHarness', () => {
 
 			expect(Object.keys(session).sort()).toEqual([
 				'compact',
+				'conversationId',
 				'delete',
 				'fs',
 				'name',
@@ -157,14 +170,15 @@ describe('FlueHarness', () => {
 			);
 
 			await expect(harness.session('review')).rejects.toThrow(
-				'Session data version 4 is unsupported. Clear persisted session state created by an earlier Flue beta.',
+				'Persisted session data version 4 is unsupported.',
 			);
 		});
 
 		it('rejects malformed persisted session affinity keys', async () => {
 			const store = new TrackingSessionStore();
 			await store.save('agent-session:["agent-instance","default","review"]', {
-				version: 7,
+				version: 8,
+				conversationId: 'conv_01J00000000000000000000000',
 				affinityKey: ['aff_01J00000000000000000000000'],
 				entries: [],
 				leafId: null,
@@ -185,7 +199,8 @@ describe('FlueHarness', () => {
 		it('rejects persisted session affinity keys with overflowing ULID timestamps', async () => {
 			const store = new TrackingSessionStore();
 			await store.save('agent-session:["agent-instance","default","review"]', {
-				version: 7,
+				version: 8,
+				conversationId: 'conv_01J00000000000000000000000',
 				affinityKey: 'aff_ZZZZZZZZZZZZZZZZZZZZZZZZZZ',
 				entries: [],
 				leafId: null,
@@ -193,7 +208,7 @@ describe('FlueHarness', () => {
 				metadata: {},
 				createdAt: '2026-06-02T00:00:00.000Z',
 				updatedAt: '2026-06-02T00:00:00.000Z',
-			} as SessionData);
+			} as unknown as SessionData);
 			const harness = await createContext(createEnv(), store).initializeRootHarness(
 				defineAgent(() => ({ model: false })),
 			);

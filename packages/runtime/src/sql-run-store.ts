@@ -23,7 +23,7 @@ import {
 	type RunStore,
 	type WorkflowRunPointer,
 } from './runtime/run-store.ts';
-import { ensureFlueSchemaVersion } from './schema-version.ts';
+import { migrateFlueSqlSchema } from './schema-version.ts';
 import type { SqlStorage } from './sql-storage.ts';
 
 type SqlRow = Record<string, unknown>;
@@ -41,13 +41,15 @@ class SqlRunStore implements RunStore {
 		// a terminal record back to 'active'.
 		this.sql.exec(
 			`INSERT OR IGNORE INTO flue_runs
-			 (run_id, workflow_name, status, started_at, payload, ended_at, is_error, duration_ms, result, error)
-			 VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL)`,
+			 (run_id, workflow_name, status, started_at, payload, traceparent, tracestate, ended_at, is_error, duration_ms, result, error)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL)`,
 			input.runId,
 			input.workflowName,
 			'active',
 			input.startedAt,
 			serializeSqlJson(input.input),
+			input.traceCarrier?.traceparent ?? null,
+			input.traceCarrier?.tracestate ?? null,
 		);
 	}
 
@@ -118,27 +120,30 @@ class SqlRunStore implements RunStore {
 }
 
 function ensureRunTables(sql: SqlStorage): void {
-	ensureFlueSchemaVersion(sql);
-	sql.exec(
-		`CREATE TABLE IF NOT EXISTS flue_runs (
-		 run_id TEXT PRIMARY KEY,
-		 workflow_name TEXT,
-		 status TEXT NOT NULL,
-		 started_at TEXT NOT NULL,
-		 payload TEXT,
-		 ended_at TEXT,
-		 is_error INTEGER,
-		 duration_ms INTEGER,
-		 result TEXT,
-		 error TEXT
-		)`,
-	);
-	sql.exec(
-		'CREATE INDEX IF NOT EXISTS flue_runs_workflow_started_idx ON flue_runs (workflow_name, started_at DESC)',
-	);
-	sql.exec(
-		'CREATE INDEX IF NOT EXISTS flue_runs_status_started_idx ON flue_runs (status, started_at DESC, run_id DESC)',
-	);
+	migrateFlueSqlSchema(sql, () => {
+		sql.exec(
+			`CREATE TABLE IF NOT EXISTS flue_runs (
+			 run_id TEXT PRIMARY KEY,
+			 workflow_name TEXT,
+			 status TEXT NOT NULL,
+			 started_at TEXT NOT NULL,
+			 payload TEXT,
+			 traceparent TEXT,
+			 tracestate TEXT,
+			 ended_at TEXT,
+			 is_error INTEGER,
+			 duration_ms INTEGER,
+			 result TEXT,
+			 error TEXT
+			)`,
+		);
+		sql.exec(
+			'CREATE INDEX IF NOT EXISTS flue_runs_workflow_started_idx ON flue_runs (workflow_name, started_at DESC)',
+		);
+		sql.exec(
+			'CREATE INDEX IF NOT EXISTS flue_runs_status_started_idx ON flue_runs (status, started_at DESC, run_id DESC)',
+		);
+	});
 }
 
 function serializeSqlJson(value: unknown): string | null {
@@ -155,6 +160,13 @@ function rowToRunRecord(row: SqlRow): RunRecord {
 		status: row.status as RunRecord['status'],
 		startedAt: String(row.started_at),
 		input,
+		traceCarrier:
+			typeof row.traceparent === 'string'
+				? {
+						traceparent: row.traceparent,
+						...(typeof row.tracestate === 'string' ? { tracestate: row.tracestate } : {}),
+					}
+				: undefined,
 		endedAt: typeof row.ended_at === 'string' ? row.ended_at : undefined,
 		isError:
 			row.is_error === null || row.is_error === undefined ? undefined : Boolean(row.is_error),

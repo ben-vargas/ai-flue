@@ -7,9 +7,9 @@ import {
 } from '@earendil-works/pi-ai';
 import * as v from 'valibot';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { defineAgent, ResultUnavailableError } from '../src/index.ts';
+import { defineAgent, observe, ResultUnavailableError } from '../src/index.ts';
 import { createFlueContext, InMemorySessionStore } from '../src/internal.ts';
-import type { FlueEvent, FlueSession, Skill } from '../src/types.ts';
+import type { FlueEvent, FlueObservation, FlueSession, Skill } from '../src/types.ts';
 import { createNoopSessionEnv } from './fixtures/session-env.ts';
 
 const providers: FauxProviderRegistration[] = [];
@@ -48,6 +48,52 @@ async function createSession(
 }
 
 describe('structured operation results', () => {
+	it('emits one lifecycle for a result tool', async () => {
+		const provider = createProvider();
+		provider.setResponses([
+			fauxAssistantMessage(fauxToolCall('finish', { answer: 'Paris' }), {
+				stopReason: 'toolUse',
+			}),
+		]);
+		const events: FlueEvent[] = [];
+		const observations: FlueObservation[] = [];
+		const stopObserving = observe((event, ctx) => {
+			if (ctx.id === 'structured-results-instance') observations.push(event);
+		});
+		try {
+			const session = await createSession(provider, { onEvent: (event) => events.push(event) });
+
+			await session.prompt('Name the capital of France.', {
+				result: v.object({ answer: v.string() }),
+			});
+
+			const lifecycle = events.filter(
+				(event) =>
+					(event.type === 'tool_start' || event.type === 'tool') && event.toolName === 'finish',
+			);
+			const observedLifecycle = observations.filter(
+				(event) =>
+					(event.type === 'tool_start' || event.type === 'tool') && event.toolName === 'finish',
+			);
+			expect(lifecycle).toHaveLength(2);
+			expect(observedLifecycle[0]).toMatchObject({
+				type: 'tool_start',
+				origin: 'framework',
+				args: { answer: 'Paris' },
+			});
+			expect(observedLifecycle[1]).toMatchObject({
+				type: 'tool',
+				origin: 'framework',
+				isError: false,
+			});
+			expect(lifecycle[0]).not.toHaveProperty('origin');
+			expect(lifecycle[0]).not.toHaveProperty('args');
+			expect(lifecycle[1]).not.toHaveProperty('origin');
+		} finally {
+			stopObserving();
+		}
+	});
+
 	it('returns validated data when an operation receives a result schema', async () => {
 		const provider = createProvider();
 		provider.setResponses([
@@ -159,19 +205,39 @@ describe('structured operation results', () => {
 				});
 			},
 		]);
-		const session = await createSession(provider);
-
-		const response = await session.prompt('Count the accepted entries.', {
-			result: v.object({ count: v.pipe(v.number(), v.minValue(0)) }),
+		const events: FlueEvent[] = [];
+		const observations: FlueObservation[] = [];
+		const stopObserving = observe((event, ctx) => {
+			if (ctx.id === 'structured-results-instance') observations.push(event);
 		});
+		try {
+			const session = await createSession(provider, { onEvent: (event) => events.push(event) });
 
-		expect(validationResult).toMatchObject({
-			role: 'toolResult',
-			toolName: 'finish',
-			isError: true,
-		});
-		expect(response.data).toEqual({ count: 2 });
-		expect(provider.state.callCount).toBe(2);
+			const response = await session.prompt('Count the accepted entries.', {
+				result: v.object({ count: v.pipe(v.number(), v.minValue(0)) }),
+			});
+
+			expect(validationResult).toMatchObject({
+				role: 'toolResult',
+				toolName: 'finish',
+				isError: true,
+			});
+			expect(response.data).toEqual({ count: 2 });
+			const starts = events.filter(
+				(event) => event.type === 'tool_start' && event.toolName === 'finish',
+			);
+			const observedStarts = observations.filter(
+				(event) => event.type === 'tool_start' && event.toolName === 'finish',
+			);
+			expect(starts).toHaveLength(2);
+			expect(starts[0]).not.toHaveProperty('args');
+			expect(starts[1]).not.toHaveProperty('args');
+			expect(observedStarts[0]).not.toHaveProperty('args');
+			expect(observedStarts[1]).toMatchObject({ args: { count: 2 } });
+			expect(provider.state.callCount).toBe(2);
+		} finally {
+			stopObserving();
+		}
 	});
 
 	it('throws ResultUnavailableError when the model gives up', async () => {
@@ -246,18 +312,18 @@ describe('structured operation results', () => {
 		expect(turns).toHaveLength(2);
 		expect(response.data).toEqual({ answer: 'complete' });
 		expect(response.usage).toEqual({
-			input: (turns[0]?.usage?.input ?? 0) + (turns[1]?.usage?.input ?? 0),
-			output: (turns[0]?.usage?.output ?? 0) + (turns[1]?.usage?.output ?? 0),
-			cacheRead: (turns[0]?.usage?.cacheRead ?? 0) + (turns[1]?.usage?.cacheRead ?? 0),
-			cacheWrite: (turns[0]?.usage?.cacheWrite ?? 0) + (turns[1]?.usage?.cacheWrite ?? 0),
-			totalTokens: (turns[0]?.usage?.totalTokens ?? 0) + (turns[1]?.usage?.totalTokens ?? 0),
+			input: (turns[0]?.response.usage?.input ?? 0) + (turns[1]?.response.usage?.input ?? 0),
+			output: (turns[0]?.response.usage?.output ?? 0) + (turns[1]?.response.usage?.output ?? 0),
+			cacheRead: (turns[0]?.response.usage?.cacheRead ?? 0) + (turns[1]?.response.usage?.cacheRead ?? 0),
+			cacheWrite: (turns[0]?.response.usage?.cacheWrite ?? 0) + (turns[1]?.response.usage?.cacheWrite ?? 0),
+			totalTokens: (turns[0]?.response.usage?.totalTokens ?? 0) + (turns[1]?.response.usage?.totalTokens ?? 0),
 			cost: {
-				input: (turns[0]?.usage?.cost.input ?? 0) + (turns[1]?.usage?.cost.input ?? 0),
-				output: (turns[0]?.usage?.cost.output ?? 0) + (turns[1]?.usage?.cost.output ?? 0),
-				cacheRead: (turns[0]?.usage?.cost.cacheRead ?? 0) + (turns[1]?.usage?.cost.cacheRead ?? 0),
+				input: (turns[0]?.response.usage?.cost.input ?? 0) + (turns[1]?.response.usage?.cost.input ?? 0),
+				output: (turns[0]?.response.usage?.cost.output ?? 0) + (turns[1]?.response.usage?.cost.output ?? 0),
+				cacheRead: (turns[0]?.response.usage?.cost.cacheRead ?? 0) + (turns[1]?.response.usage?.cost.cacheRead ?? 0),
 				cacheWrite:
-					(turns[0]?.usage?.cost.cacheWrite ?? 0) + (turns[1]?.usage?.cost.cacheWrite ?? 0),
-				total: (turns[0]?.usage?.cost.total ?? 0) + (turns[1]?.usage?.cost.total ?? 0),
+					(turns[0]?.response.usage?.cost.cacheWrite ?? 0) + (turns[1]?.response.usage?.cost.cacheWrite ?? 0),
+				total: (turns[0]?.response.usage?.cost.total ?? 0) + (turns[1]?.response.usage?.cost.total ?? 0),
 			},
 		});
 	});

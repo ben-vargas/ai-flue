@@ -51,7 +51,7 @@ function createNodeSqlStorage(db: DatabaseSync): SqlStorage {
 /** Check whether a SQL query is expected to return result rows. */
 function queryExpectsRows(query: string): boolean {
 	const trimmed = query.trimStart().toUpperCase();
-	if (trimmed.startsWith('SELECT') || trimmed.startsWith('WITH')) return true;
+	if (trimmed.startsWith('SELECT') || trimmed.startsWith('WITH') || trimmed.startsWith('PRAGMA')) return true;
 	if (/\bRETURNING\b/i.test(query)) return true;
 	return false;
 }
@@ -121,7 +121,10 @@ export function sqlite(path?: string): PersistenceAdapter {
 
 	return {
 		migrate() {
-			ensureSqlAgentExecutionTables(ensureOpen().sql);
+			const { sql } = ensureOpen();
+			ensureSqlAgentExecutionTables(sql);
+			createSqlRunStore(sql);
+			new SqliteEventStreamStore(sql);
 		},
 		connect() {
 			const { sql, runTransaction } = ensureOpen();

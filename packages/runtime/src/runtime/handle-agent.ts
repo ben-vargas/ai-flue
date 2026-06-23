@@ -3,6 +3,12 @@
 import * as v from 'valibot';
 import { parseActionInput, runActionWithParsedInput } from '../action.ts';
 import type { FlueContextInternal } from '../client.ts';
+import {
+	extractTraceCarrier,
+	interceptExecution,
+	type FlueTraceCarrier,
+} from '../execution-interceptor.ts';
+import { assertProductEventV3 } from '../product-event.ts';
 import { isWorkflowDefinition, type WorkflowDefinition } from '../workflow-definition.ts';
 import {
 	InvalidRequestError,
@@ -70,6 +76,7 @@ function parseDirectAgentPayload(payload: unknown): DirectAgentPayload {
  */
 export interface CreateAgentContextOptions {
 	id: string;
+	agentName: string;
 	request: Request;
 	initialEventIndex?: number;
 	dispatchId?: string;
@@ -168,9 +175,11 @@ export async function handleAgentRequest(opts: HandleAgentOptions): Promise<Resp
 	try {
 		const rawPayload = await parseJsonBody(request);
 		const payload = parseDirectAgentPayload(rawPayload);
+		const traceCarrier = extractTraceCarrier(request.headers);
 		const directOptions: DirectAttachedOptions = {
 			payload,
 			admitAttachedSubmission: opts.admitAttachedSubmission,
+			traceCarrier,
 		};
 		const streamUrl = invocationStreamUrl(request);
 		// Stream creation is owned by the coordinator at first accepted prompt
@@ -183,7 +192,12 @@ export async function handleAgentRequest(opts: HandleAgentOptions): Promise<Resp
 		if (new URL(request.url).searchParams.get('wait') === 'result') {
 			return runDirectSyncMode(directOptions, streamUrl, offset);
 		}
-		const receipt = await opts.admitAttachedSubmission(payload, undefined, false);
+		const receipt = await opts.admitAttachedSubmission(
+			payload,
+			undefined,
+			false,
+			traceCarrier,
+		);
 		return admissionResponse(
 			{ streamUrl, offset, submissionId: receipt.submissionId },
 			streamUrl,
@@ -242,6 +256,7 @@ export interface DirectAttachedOptions {
 	payload: DirectAgentPayload;
 	admitAttachedSubmission: AttachedAgentSubmissionAdmission;
 	onEvent?: AttachedAgentEventCallback;
+	traceCarrier?: FlueTraceCarrier;
 }
 
 export interface WorkflowAttachedInvocationResult {
@@ -278,6 +293,7 @@ interface WorkflowAdmissionOptions {
 	workflow: WorkflowDefinition;
 	input: unknown;
 	request: Request;
+	traceCarrier?: FlueTraceCarrier;
 	createContext: CreateWorkflowContextFn;
 	startWorkflowAdmission: StartWorkflowAdmissionFn;
 	runStore?: RunStore;
@@ -304,6 +320,7 @@ async function prepareWorkflowExecution(
 		workflow,
 		input,
 		request,
+		traceCarrier = extractTraceCarrier(request.headers),
 		createContext,
 		startWorkflowAdmission,
 		runStore,
@@ -319,6 +336,7 @@ async function prepareWorkflowExecution(
 			runId,
 			input,
 			request,
+			traceCarrier,
 			createContext,
 			runStore,
 			eventStreamStore,
@@ -444,6 +462,7 @@ export async function failRecoveredRun(opts: FailRecoveredRunOptions): Promise<v
 	await opts.eventStreamStore.createStream(runStreamPath(opts.runId));
 	const lifecycle: WorkflowRunLifecycle = {
 		...opts,
+		traceCarrier: run?.traceCarrier,
 		input,
 		ctx: opts.createContext({
 			runId: opts.runId,
@@ -453,10 +472,24 @@ export async function failRecoveredRun(opts: FailRecoveredRunOptions): Promise<v
 		startedAt,
 		startedAtMs: Number.isFinite(startedAtMs) ? startedAtMs : Date.now(),
 	};
-	const flushFanout = subscribeRunFanout(lifecycle);
-	emitRunResume(lifecycle);
-	await flushFanout();
-	await emitRunEnd(lifecycle, { isError: true, error: opts.error });
+	const operation = {
+		type: 'workflow' as const,
+		runId: opts.runId,
+		workflowName: opts.workflowName,
+		phase: 'resume' as const,
+		startedAt: lifecycle.startedAt,
+	};
+	const executionContext = {
+		eventContext: lifecycle.ctx,
+		runId: opts.runId,
+		traceCarrier: run?.traceCarrier,
+	};
+	await interceptExecution(operation, executionContext, async () => {
+		const flushFanout = subscribeRunFanout(lifecycle);
+		emitRunResume(lifecycle);
+		await flushFanout();
+		await emitRunEnd(lifecycle, { isError: true, error: opts.error });
+	});
 }
 
 async function readRecoveryEvents(opts: FailRecoveredRunOptions): Promise<FlueEvent[]> {
@@ -468,7 +501,8 @@ async function readRecoveryEvents(opts: FailRecoveredRunOptions): Promise<FlueEv
 	while (true) {
 		const result = await opts.eventStreamStore.readEvents(streamPath, { offset });
 		for (const event of result.events) {
-			events.push(normalizeRunStreamEvent(event.data));
+			assertProductEventV3(event.data);
+			events.push(event.data);
 		}
 		if (result.upToDate || result.events.length === 0) break;
 		offset = result.nextOffset;
@@ -515,16 +549,6 @@ async function reconcileTerminalRun(
 	await opts.eventStreamStore.closeStream(runStreamPath(opts.runId));
 }
 
-export function normalizeRunStreamEvent(value: unknown): FlueEvent {
-	if (!value || typeof value !== 'object') return value as FlueEvent;
-	const event = value as Record<string, unknown>;
-	if (event.type !== 'run_start' || 'input' in event || !('payload' in event)) {
-		return value as FlueEvent;
-	}
-	const { payload, ...rest } = event;
-	return { ...rest, input: payload } as FlueEvent;
-}
-
 function findTerminalRunEvent(
 	events: FlueEvent[],
 ): Extract<FlueEvent, { type: 'run_end' }> | undefined {
@@ -555,7 +579,7 @@ async function runDirectSyncMode(
 export async function invokeDirectAttached(
 	opts: DirectAttachedOptions,
 ): ReturnType<AttachedAgentSubmissionAdmission> {
-	return opts.admitAttachedSubmission(opts.payload, opts.onEvent);
+	return opts.admitAttachedSubmission(opts.payload, opts.onEvent, true, opts.traceCarrier);
 }
 
 async function runSyncMode(execution: AdmittedWorkflowExecution): Promise<Response> {
@@ -580,6 +604,7 @@ export async function invokeWorkflowAttached(
 		runId: opts.runId,
 		input: opts.input,
 		request: opts.request,
+		traceCarrier: extractTraceCarrier(opts.request.headers),
 		createContext: opts.createContext,
 		runStore: opts.runStore,
 		eventStreamStore: opts.eventStreamStore,
@@ -619,6 +644,7 @@ interface WorkflowRunLifecycleOptions {
 	runId: string;
 	input: unknown;
 	request: Request;
+	traceCarrier?: FlueTraceCarrier;
 	createContext: CreateWorkflowContextFn;
 	runStore?: RunStore;
 	eventStreamStore: EventStreamStore;
@@ -647,6 +673,7 @@ async function createWorkflowRunLifecycle(
 					workflowName,
 					startedAt,
 					input: options.input,
+					traceCarrier: options.traceCarrier,
 				}),
 			);
 	} catch (error) {
@@ -687,25 +714,39 @@ async function withWorkflowRunLifecycle<T>(
 	lifecycle: WorkflowRunLifecycle,
 	body: () => T | Promise<T>,
 ): Promise<T> {
-	const flushFanout = subscribeRunFanout(lifecycle);
-	emitRunStart(lifecycle);
-	let didFlushFanout = false;
-	let result: T;
-	try {
-		result = await body();
-		await flushFanout();
-		didFlushFanout = true;
-	} catch (error) {
-		if (!didFlushFanout) {
-			try {
-				await flushFanout();
-			} catch {}
+	const operation = {
+		type: 'workflow' as const,
+		runId: lifecycle.runId,
+		workflowName: lifecycle.workflowName,
+		phase: 'start' as const,
+		startedAt: lifecycle.startedAt,
+	};
+	const executionContext = {
+		eventContext: lifecycle.ctx,
+		runId: lifecycle.runId,
+		traceCarrier: lifecycle.traceCarrier,
+	};
+	return interceptExecution(operation, executionContext, async () => {
+		const flushFanout = subscribeRunFanout(lifecycle);
+		emitRunStart(lifecycle);
+		let didFlushFanout = false;
+		let result: T;
+		try {
+			result = await body();
+			await flushFanout();
+			didFlushFanout = true;
+		} catch (error) {
+			if (!didFlushFanout) {
+				try {
+					await flushFanout();
+				} catch {}
+			}
+			await emitRunEnd(lifecycle, { isError: true, error });
+			throw error;
 		}
-		await emitRunEnd(lifecycle, { isError: true, error });
-		throw error;
-	}
-	await emitRunEnd(lifecycle, { result, isError: false });
-	return result;
+		await emitRunEnd(lifecycle, { result, isError: false });
+		return result;
+	});
 }
 
 function emitRunStart(lifecycle: WorkflowRunLifecycle): void {

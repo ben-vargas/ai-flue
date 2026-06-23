@@ -64,6 +64,17 @@ export interface StreamConnectionOptions {
  * never used as a checkpoint: response prefetch advances it past batches that
  * have not been delivered yet.
  */
+export class UnsupportedFlueEventVersionError extends Error {
+	readonly received: unknown;
+	readonly supported = 3;
+
+	constructor(received: unknown) {
+		super(`Flue event version ${String(received)} is unsupported. Clear historical event data created by an earlier Flue beta.`);
+		this.name = 'UnsupportedFlueEventVersionError';
+		this.received = received;
+	}
+}
+
 export function createFlueEventStream<T = FlueEvent>(
 	streamOpts: FlueStreamOptions,
 	connectionOpts: StreamConnectionOptions,
@@ -143,6 +154,7 @@ export function createFlueEventStream<T = FlueEvent>(
 	let fetchDone = false;
 	let finalBatch: { upToDate: boolean; offset: string } | undefined;
 	let streamFailure: { error: unknown } | undefined;
+	let terminalFailure: unknown;
 	let currentOffset = streamOpts.offset ?? '-1';
 
 	/** Wakes a next() call waiting for the next batch, end, or cancellation. */
@@ -205,6 +217,7 @@ export function createFlueEventStream<T = FlueEvent>(
 
 	const nextResult = async (): Promise<IteratorResult<T>> => {
 		while (true) {
+			if (terminalFailure !== undefined) throw terminalFailure;
 			if (abortController.signal.aborted) {
 				removeExternalAbortListener?.();
 				return { value: undefined as T, done: true };
@@ -228,7 +241,18 @@ export function createFlueEventStream<T = FlueEvent>(
 			}
 
 			if (pending) {
-				const value = pending.items[pending.next++] as T;
+				let value: T;
+				try {
+					value = assertSupportedEventVersion(pending.items[pending.next] as T);
+				} catch (error) {
+					terminalFailure = error;
+					deliveryDone = true;
+					pending = undefined;
+					releaseBatch();
+					cancel(error);
+					throw error;
+				}
+				pending.next++;
 				if (pending.next >= pending.items.length) {
 					currentOffset = pending.offset;
 					if (pending.final) {
@@ -316,6 +340,12 @@ export function createFlueEventStream<T = FlueEvent>(
 			return iterator;
 		},
 	};
+}
+
+function assertSupportedEventVersion<T>(value: T): T {
+	const version = value && typeof value === 'object' ? (value as { v?: unknown }).v : undefined;
+	if (version !== 3) throw new UnsupportedFlueEventVersionError(version);
+	return value;
 }
 
 function isAbortError(err: unknown): boolean {

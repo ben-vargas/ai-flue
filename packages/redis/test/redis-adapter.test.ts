@@ -98,7 +98,8 @@ function dispatchInput(dispatchId = 'dispatch-1') {
 
 function sessionData(label: string): SessionData {
 	return {
-		version: 7,
+		version: 8,
+		conversationId: 'conv_01KT3P3GZGFBCKHKMQ11A7H2HW',
 		affinityKey: label,
 		entries: [],
 		leafId: null,
@@ -320,6 +321,14 @@ describeRedis('redis() concurrency', () => {
 });
 
 describeRedis('redis() migration', () => {
+	it('migrates schema version 2 to 3', async () => {
+		const stores = await createHarness();
+		void stores;
+		await harness?.client.hSet(`${harness?.prefix}:meta`, 'schemaVersion', '2');
+		await harness?.adapter.migrate?.();
+		expect(await harness?.client.hGet(`${harness?.prefix}:meta`, 'schemaVersion')).toBe('3');
+		await cleanupHarness();
+	});
 	it('rejects a newer schema version', async () => {
 		const stores = await createHarness();
 		void stores;

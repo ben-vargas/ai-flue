@@ -305,6 +305,21 @@ describeMongo('mongodb() integration', () => {
 		await expect(value.eventStreamStore.appendEvent('x', {})).rejects.toThrow();
 		await cleanup();
 	});
+	it('migrates schema version 2 to 3', async () => {
+		const value = await stores();
+		void value;
+		if (!harness) throw new TypeError('Harness is required.');
+		await harness.db
+			.collection<{ _id: string; value: number }>('flue_meta')
+			.updateOne({ _id: 'schema_version' }, { $set: { value: 2 } });
+		await harness.adapter.migrate?.();
+		expect(
+			await harness.db
+				.collection<{ _id: string; value: number }>('flue_meta')
+				.findOne({ _id: 'schema_version' }),
+		).toMatchObject({ value: 3 });
+		await cleanup();
+	});
 	it('rejects a newer schema version', async () => {
 		const value = await stores();
 		void value;
@@ -314,6 +329,38 @@ describeMongo('mongodb() integration', () => {
 			.updateOne({ _id: 'schema_version' }, { $set: { value: 999 } });
 		await expect(harness.adapter.migrate?.()).rejects.toThrow(PersistedSchemaVersionError);
 		await cleanup();
+	});
+	it('keeps the first run when independent clients create it concurrently', async () => {
+		if (!url) throw new TypeError('TEST_MONGODB_URL is required.');
+		const first = await createHarness();
+		const secondClient = new MongoClient(url);
+		await secondClient.connect();
+		const second = mongodb(createRunner(secondClient, first.db));
+		await second.migrate?.();
+		const a = (await first.adapter.connect()).runStore;
+		const b = (await second.connect()).runStore;
+		await expect(
+			Promise.all([
+				a.createRun({
+					runId: 'run',
+					workflowName: 'first',
+					startedAt: '2026-01-01T00:00:00.000Z',
+					input: { source: 'first' },
+				}),
+				b.createRun({
+					runId: 'run',
+					workflowName: 'second',
+					startedAt: '2026-01-02T00:00:00.000Z',
+					input: { source: 'second' },
+				}),
+			]),
+		).resolves.toEqual([undefined, undefined]);
+		const run = await a.getRun('run');
+		expect(run?.workflowName === 'first' || run?.workflowName === 'second').toBe(true);
+		expect(run?.input).toEqual({ source: run?.workflowName });
+		await first.db.dropDatabase();
+		await first.adapter.close?.();
+		await second.close?.();
 	});
 	it('round trips an arbitrary value larger than 16 MiB', async () => {
 		const value = await stores();

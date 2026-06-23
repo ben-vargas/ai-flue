@@ -18,6 +18,18 @@ function createStore() {
 	return store;
 }
 
+function appendEvent(store: ReturnType<typeof createStore>, path: string, value: Record<string, unknown>) {
+	return store.appendEvent(path, {
+		type: 'log',
+		level: 'info',
+		message: 'test',
+		v: 3,
+		eventIndex: 0,
+		timestamp: '2026-06-22T00:00:00.000Z',
+		...value,
+	});
+}
+
 /** Parse an SSE body into ordered frames, skipping comment-only blocks. */
 function parseSseFrames(body: string): Array<{ event: string; data: string }> {
 	return body
@@ -68,40 +80,31 @@ describe('handleStreamRead()', () => {
 		);
 	});
 
-	it('normalizes legacy run_start payloads when reading persisted run streams', async () => {
+	it('rejects unsupported persisted event versions when reading streams', async () => {
 		const store = createStore();
 		await store.createStream('runs/legacy');
-		await store.appendEvent('runs/legacy', {
+		await appendEvent(store, 'runs/legacy', {
 			type: 'run_start',
-			v: 1,
+			v: 2,
 			runId: 'legacy',
 			workflowName: 'report',
 			startedAt: '2026-06-19T00:00:00.000Z',
-			payload: { report: 'weekly' },
+			input: { report: 'weekly' },
 		});
 
-		const response = await handleStreamRead({
+		await expect(handleStreamRead({
 			store,
 			path: 'runs/legacy',
 			request: new Request('http://localhost/runs/legacy'),
+		})).rejects.toMatchObject({
+			meta: { storedVersion: 2, supportedVersion: 3 },
 		});
-
-		expect(await response.json()).toEqual([
-			{
-				type: 'run_start',
-				v: 1,
-				runId: 'legacy',
-				workflowName: 'report',
-				startedAt: '2026-06-19T00:00:00.000Z',
-				input: { report: 'weekly' },
-			},
-		]);
 	});
 
 	it('returns only the requested trailing events when tail modifies offset=-1', async () => {
 		const store = createStore();
 		await store.createStream('runs/test');
-		for (let index = 0; index < 105; index++) await store.appendEvent('runs/test', { index });
+		for (let index = 0; index < 105; index++) await appendEvent(store, 'runs/test', { index });
 
 		const first = await handleStreamRead({
 			store,
@@ -110,15 +113,19 @@ describe('handleStreamRead()', () => {
 		});
 
 		expect(first.status).toBe(200);
-		expect(await first.json()).toEqual([{ index: 102 }, { index: 103 }, { index: 104 }]);
+		expect(await first.json()).toEqual([
+			expect.objectContaining({ index: 102, v: 3 }),
+			expect.objectContaining({ index: 103, v: 3 }),
+			expect.objectContaining({ index: 104, v: 3 }),
+		]);
 		expect(first.headers.get('stream-up-to-date')).toBe('true');
 	});
 
 	it('clamps tail to full history when it exceeds the stream length or the stream is empty', async () => {
 		const store = createStore();
 		await store.createStream('runs/full');
-		await store.appendEvent('runs/full', { index: 0 });
-		await store.appendEvent('runs/full', { index: 1 });
+		await appendEvent(store, 'runs/full', { index: 0 });
+		await appendEvent(store, 'runs/full', { index: 1 });
 		await store.createStream('runs/empty');
 
 		const full = await handleStreamRead({
@@ -132,7 +139,10 @@ describe('handleStreamRead()', () => {
 			request: new Request('http://localhost/runs/empty?tail=5'),
 		});
 
-		expect(await full.json()).toEqual([{ index: 0 }, { index: 1 }]);
+		expect(await full.json()).toEqual([
+			expect.objectContaining({ index: 0, v: 3 }),
+			expect.objectContaining({ index: 1, v: 3 }),
+		]);
 		expect(await empty.json()).toEqual([]);
 		expect(empty.headers.get('stream-next-offset')).toBe('-1');
 	});
@@ -140,9 +150,9 @@ describe('handleStreamRead()', () => {
 	it('ignores tail with concrete and now offsets', async () => {
 		const store = createStore();
 		await store.createStream('runs/test');
-		const firstOffset = await store.appendEvent('runs/test', { index: 0 });
-		await store.appendEvent('runs/test', { index: 1 });
-		await store.appendEvent('runs/test', { index: 2 });
+		const firstOffset = await appendEvent(store, 'runs/test', { index: 0 });
+		await appendEvent(store, 'runs/test', { index: 1 });
+		await appendEvent(store, 'runs/test', { index: 2 });
 
 		const concrete = await handleStreamRead({
 			store,
@@ -155,7 +165,10 @@ describe('handleStreamRead()', () => {
 			request: new Request('http://localhost/runs/test?offset=now&tail=1'),
 		});
 
-		expect(await concrete.json()).toEqual([{ index: 1 }, { index: 2 }]);
+		expect(await concrete.json()).toEqual([
+			expect.objectContaining({ index: 1, v: 3 }),
+			expect.objectContaining({ index: 2, v: 3 }),
+		]);
 		expect(await now.json()).toEqual([]);
 	});
 
@@ -179,11 +192,11 @@ describe('handleStreamRead()', () => {
 	it('applies tail to the initial read in long-poll and SSE live modes', async () => {
 		const store = createStore();
 		await store.createStream('runs/long-poll');
-		await store.appendEvent('runs/long-poll', { index: 0 });
-		await store.appendEvent('runs/long-poll', { index: 1 });
+		await appendEvent(store, 'runs/long-poll', { index: 0 });
+		await appendEvent(store, 'runs/long-poll', { index: 1 });
 		await store.createStream('runs/sse');
-		await store.appendEvent('runs/sse', { index: 0 });
-		await store.appendEvent('runs/sse', { index: 1 });
+		await appendEvent(store, 'runs/sse', { index: 0 });
+		await appendEvent(store, 'runs/sse', { index: 1 });
 		await store.closeStream('runs/sse');
 
 		const longPoll = await handleStreamRead({
@@ -198,17 +211,17 @@ describe('handleStreamRead()', () => {
 		});
 		const frames = parseSseFrames(await sse.text());
 
-		expect(await longPoll.json()).toEqual([{ index: 1 }]);
+		expect(await longPoll.json()).toEqual([expect.objectContaining({ index: 1, v: 3 })]);
 		expect(frames).toHaveLength(2);
 		const [dataFrame] = frames;
 		if (!dataFrame) throw new Error('Expected an SSE data frame.');
-		expect(JSON.parse(dataFrame.data)).toEqual([{ index: 1 }]);
+		expect(JSON.parse(dataFrame.data)).toEqual([expect.objectContaining({ index: 1, v: 3 })]);
 	});
 
 	it('omits ETag for offset=now catch-up reads', async () => {
 		const store = createStore();
 		await store.createStream('runs/test');
-		await store.appendEvent('runs/test', { type: 'log' });
+		await appendEvent(store, 'runs/test', { type: 'log' });
 
 		const response = await handleStreamRead({
 			store,
@@ -224,7 +237,7 @@ describe('handleStreamRead()', () => {
 		const store = createStore();
 		await store.createStream('runs/test');
 		for (let index = 0; index < 100; index++) {
-			await store.appendEvent('runs/test', { index });
+			await appendEvent(store, 'runs/test', { index });
 		}
 
 		const response = await handleStreamRead({
@@ -243,12 +256,12 @@ describe('handleStreamRead()', () => {
 		const request = new Request('http://localhost/runs/test?offset=now&live=long-poll');
 		const responsePromise = handleStreamRead({ store, path: 'runs/test', request });
 		await Promise.resolve();
-		await store.appendEvent('runs/test', { type: 'log' });
+		await appendEvent(store, 'runs/test', { type: 'log' });
 
 		const response = await responsePromise;
 
 		expect(response.status).toBe(200);
-		expect(await response.json()).toEqual([{ type: 'log' }]);
+		expect(await response.json()).toEqual([expect.objectContaining({ type: 'log', v: 3 })]);
 	});
 
 	it('rejects malformed offset values with a canonical error envelope', async () => {
@@ -298,7 +311,7 @@ describe('handleStreamRead()', () => {
 	it('replays a catch-up read as a 304 when If-None-Match matches the ETag', async () => {
 		const store = createStore();
 		await store.createStream('runs/test');
-		await store.appendEvent('runs/test', { type: 'log' });
+		await appendEvent(store, 'runs/test', { type: 'log' });
 
 		const first = await handleStreamRead({
 			store,
@@ -334,7 +347,7 @@ describe('handleStreamRead()', () => {
 	it('returns an immediate 204 for a tail long-poll on a closed stream', async () => {
 		const store = createStore();
 		await store.createStream('runs/test');
-		const tail = await store.appendEvent('runs/test', { type: 'log' });
+		const tail = await appendEvent(store, 'runs/test', { type: 'log' });
 		await store.closeStream('runs/test');
 
 		const started = Date.now();
@@ -354,7 +367,7 @@ describe('handleStreamRead()', () => {
 	it('wakes a tail long-poll when a new event is appended', async () => {
 		const store = createStore();
 		await store.createStream('runs/test');
-		const tail = await store.appendEvent('runs/test', { n: 1 });
+		const tail = await appendEvent(store, 'runs/test', { n: 1 });
 
 		const responsePromise = handleStreamRead({
 			store,
@@ -362,20 +375,20 @@ describe('handleStreamRead()', () => {
 			request: new Request(`http://localhost/runs/test?offset=${tail}&live=long-poll`),
 		});
 		await new Promise((resolve) => setTimeout(resolve, 50));
-		await store.appendEvent('runs/test', { n: 2 });
+		await appendEvent(store, 'runs/test', { n: 2 });
 
 		const response = await responsePromise;
 
 		expect(response.status).toBe(200);
-		expect(await response.json()).toEqual([{ n: 2 }]);
+		expect(await response.json()).toEqual([expect.objectContaining({ n: 2, v: 3 })]);
 		expect(response.headers.get('stream-next-offset')).toMatch(/^\d{16}_\d{16}$/);
 	});
 
 	it('frames SSE data and control events and ends the body on a closed stream', async () => {
 		const store = createStore();
 		await store.createStream('runs/test');
-		await store.appendEvent('runs/test', { n: 1 });
-		const lastOffset = await store.appendEvent('runs/test', { n: 2 });
+		await appendEvent(store, 'runs/test', { n: 1 });
+		const lastOffset = await appendEvent(store, 'runs/test', { n: 2 });
 		await store.closeStream('runs/test');
 
 		const response = await handleStreamRead({
@@ -394,7 +407,10 @@ describe('handleStreamRead()', () => {
 		expect(frames.map((frame) => frame.event)).toEqual(['data', 'control']);
 		const [dataFrame, controlFrame] = frames;
 		if (!dataFrame || !controlFrame) throw new Error('Expected SSE data and control frames.');
-		expect(JSON.parse(dataFrame.data)).toEqual([{ n: 1 }, { n: 2 }]);
+		expect(JSON.parse(dataFrame.data)).toEqual([
+			expect.objectContaining({ n: 1, v: 3 }),
+			expect.objectContaining({ n: 2, v: 3 }),
+		]);
 		expect(JSON.parse(controlFrame.data)).toEqual({
 			streamNextOffset: lastOffset,
 			streamClosed: true,

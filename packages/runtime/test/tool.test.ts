@@ -9,14 +9,18 @@ import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import {
 	defineAgent,
 	defineTool,
+	instrument,
+	observe,
 	ToolLegacyDefinitionError,
 	ToolNameConflictError,
+	type FlueExecutionContext,
+	type FlueExecutionOperation,
 	type ToolInput,
 	type ToolOutput,
 } from '../src/index.ts';
 import { createFlueContext, InMemorySessionStore } from '../src/internal.ts';
 import { validateAndRunTool } from '../src/tool.ts';
-import type { FlueEvent, SessionData, SessionStore } from '../src/types.ts';
+import type { FlueEvent, FlueObservation, SessionData, SessionStore } from '../src/types.ts';
 import { createNoopSessionEnv } from './fixtures/session-env.ts';
 
 const providers: FauxProviderRegistration[] = [];
@@ -237,6 +241,217 @@ describe('defineTool()', () => {
 });
 
 describe('custom tools', () => {
+	it('emits one lifecycle and execution interception for a builtin tool', async () => {
+		const provider = createProvider();
+		provider.setResponses([
+			fauxAssistantMessage(fauxToolCall('bash', { command: 'pwd' }), { stopReason: 'toolUse' }),
+			fauxAssistantMessage('Done.'),
+		]);
+		const events: FlueEvent[] = [];
+		const observations: FlueObservation[] = [];
+		const intercepted: FlueExecutionOperation[] = [];
+		const context = createContext(provider);
+		context.subscribeEvent((event) => {
+			events.push(event);
+		});
+		const dispose = instrument({
+			observe(event, observedContext) {
+				if (observedContext === context) observations.push(event);
+			},
+			async interceptor(operation, _context, next) {
+				intercepted.push(operation);
+				return next();
+			},
+			dispose() {},
+		});
+		try {
+			const harness = await context.initializeRootHarness(
+				defineAgent(() => ({
+					model: `${provider.getModel().provider}/${provider.getModel().id}`,
+				})),
+			);
+
+			await (await harness.session()).prompt('Check the directory.');
+
+			const lifecycle = events.filter(
+				(event) => (event.type === 'tool_start' || event.type === 'tool') && event.toolName === 'bash',
+			);
+			const observedStart = observations.find(
+				(event) => event.type === 'tool_start' && event.toolName === 'bash',
+			);
+			expect(lifecycle).toHaveLength(2);
+			expect(observedStart).toMatchObject({ args: { command: 'pwd' } });
+			expect(lifecycle[0]).not.toHaveProperty('args');
+			expect(lifecycle[1]).toMatchObject({ type: 'tool', isError: false });
+			expect(intercepted.filter((operation) => operation.type === 'tool')).toHaveLength(1);
+		} finally {
+			await dispose();
+		}
+	});
+
+	it('emits one lifecycle and execution interception with transformed input', async () => {
+		const provider = createProvider();
+		provider.setResponses([
+			fauxAssistantMessage(fauxToolCall('lookup', { limit: '2' }), { stopReason: 'toolUse' }),
+			fauxAssistantMessage('Done.'),
+		]);
+		const events: FlueEvent[] = [];
+		const observations: FlueObservation[] = [];
+		const intercepted: FlueExecutionOperation[] = [];
+		const context = createContext(provider);
+		context.subscribeEvent((event) => {
+			events.push(event);
+		});
+		const dispose = instrument({
+			observe(event, observedContext) {
+				if (observedContext === context) observations.push(event);
+			},
+			async interceptor(operation, _context, next) {
+				intercepted.push(operation);
+				return next();
+			},
+			dispose() {},
+		});
+		try {
+			const harness = await context.initializeRootHarness(
+				defineAgent(() => ({
+					model: `${provider.getModel().provider}/${provider.getModel().id}`,
+					tools: [
+						defineTool({
+							name: 'lookup',
+							description: 'Look up values.',
+							input: v.object({ limit: v.pipe(v.string(), v.transform(Number)) }),
+							run: async ({ input }) => input.limit,
+						}),
+					],
+				})),
+			);
+
+			await (await harness.session()).prompt('Look up values.');
+
+			const lifecycle = events.filter(
+				(event) =>
+					(event.type === 'tool_start' || event.type === 'tool') && event.toolName === 'lookup',
+			);
+			const observedStart = observations.find(
+				(event) => event.type === 'tool_start' && event.toolName === 'lookup',
+			);
+			expect(lifecycle).toHaveLength(2);
+			expect(observedStart).toMatchObject({ args: { limit: 2 } });
+			expect(lifecycle[0]).not.toHaveProperty('args');
+			expect(lifecycle[1]).toMatchObject({ type: 'tool', isError: false });
+			expect(intercepted.filter((operation) => operation.type === 'tool')).toHaveLength(1);
+		} finally {
+			await dispose();
+		}
+	});
+
+	it('emits a start without args and skips execution interception when validation fails', async () => {
+		const provider = createProvider();
+		provider.setResponses([
+			fauxAssistantMessage(fauxToolCall('lookup', { count: 'invalid' }), { stopReason: 'toolUse' }),
+			fauxAssistantMessage('Done.'),
+		]);
+		const events: FlueEvent[] = [];
+		const observations: FlueObservation[] = [];
+		const intercepted: FlueExecutionOperation[] = [];
+		const context = createContext(provider);
+		context.subscribeEvent((event) => {
+			events.push(event);
+		});
+		const dispose = instrument({
+			observe(event, observedContext) {
+				if (observedContext === context) observations.push(event);
+			},
+			async interceptor(operation, _context, next) {
+				intercepted.push(operation);
+				return next();
+			},
+			dispose() {},
+		});
+		try {
+			const harness = await context.initializeRootHarness(
+				defineAgent(() => ({
+					model: `${provider.getModel().provider}/${provider.getModel().id}`,
+					tools: [
+						defineTool({
+							name: 'lookup',
+							description: 'Look up values.',
+							input: v.object({
+								count: v.pipe(
+									v.string(),
+									v.check((value) => value === 'valid'),
+								),
+							}),
+							run: async () => 'unused',
+						}),
+					],
+				})),
+			);
+
+			await (await harness.session()).prompt('Look up values.');
+
+			const start = events.find(
+				(event) => event.type === 'tool_start' && event.toolName === 'lookup',
+			);
+			expect(start).toBeDefined();
+			expect(start).not.toHaveProperty('args');
+			const results = events.filter(
+				(event) => event.type === 'tool' && event.toolName === 'lookup',
+			);
+			const observedResult = observations.find(
+				(event) => event.type === 'tool' && event.toolName === 'lookup',
+			);
+			expect(results).toEqual([expect.objectContaining({ isError: true })]);
+			expect(observedResult).toMatchObject({
+				errorInfo: {
+					type: 'tool_input_validation',
+					name: 'ToolInputValidationError',
+					message: expect.any(String),
+				},
+			});
+			expect(results[0]).not.toHaveProperty('errorInfo');
+			expect(intercepted.filter((operation) => operation.type === 'tool')).toEqual([]);
+		} finally {
+			await dispose();
+		}
+	});
+
+	it('emits a lifecycle without args when Pi rejects tool input before execution', async () => {
+		const provider = createProvider();
+		provider.setResponses([
+			fauxAssistantMessage(fauxToolCall('lookup', { count: 'invalid' }), { stopReason: 'toolUse' }),
+			fauxAssistantMessage('Done.'),
+		]);
+		const events: FlueEvent[] = [];
+		const context = createContext(provider);
+		context.subscribeEvent((event) => {
+			events.push(event);
+		});
+		const harness = await context.initializeRootHarness(
+			defineAgent(() => ({
+				model: `${provider.getModel().provider}/${provider.getModel().id}`,
+				tools: [
+					defineTool({
+						name: 'lookup',
+						description: 'Look up values.',
+						input: v.object({ count: v.number() }),
+						run: async () => 'unused',
+					}),
+				],
+			})),
+		);
+
+		await (await harness.session()).prompt('Look up values.');
+
+		const start = events.find((event) => event.type === 'tool_start' && event.toolName === 'lookup');
+		expect(start).toBeDefined();
+		expect(start).not.toHaveProperty('args');
+		expect(events.filter((event) => event.type === 'tool' && event.toolName === 'lookup')).toEqual([
+			expect.objectContaining({ isError: true }),
+		]);
+	});
+
 	it('rejects legacy markers on an inline runtime tool', async () => {
 		const provider = createProvider();
 
@@ -319,35 +534,87 @@ describe('custom tools', () => {
 		]);
 	});
 
-	it('publishes canonical output in tool event details', async () => {
+	it('provides complete execution identity to agent, model, and tool interceptors', async () => {
+		const provider = createProvider();
+		provider.setResponses([
+			fauxAssistantMessage(fauxToolCall('lookup', {}), { stopReason: 'toolUse' }),
+			fauxAssistantMessage('Done.'),
+		]);
+		const intercepted: Array<{ operation: FlueExecutionOperation; context: FlueExecutionContext }> = [];
+		const dispose = instrument({
+			observe() {},
+			async interceptor(operation, context, next) {
+				intercepted.push({ operation, context });
+				return next();
+			},
+			dispose() {},
+		});
+		try {
+			const harness = await createContext(provider).initializeRootHarness(
+				defineAgent(() => ({
+					model: `${provider.getModel().provider}/${provider.getModel().id}`,
+					tools: [defineTool({ name: 'lookup', description: 'Look up a value.', run: async () => ({ found: true }) })],
+				})),
+			);
+			const session = await harness.session();
+
+			await session.prompt('Look up the value.');
+
+			const agent = intercepted.find(({ operation }) => operation.type === 'agent');
+			const model = intercepted.find(({ operation }) => operation.type === 'model');
+			const tool = intercepted.find(({ operation }) => operation.type === 'tool');
+			expect(agent).toMatchObject({ context: { instanceId: 'tool-test-instance', harness: 'default', conversationId: session.conversationId, session: 'default', operationId: expect.any(String) } });
+			expect(model).toMatchObject({ context: { instanceId: 'tool-test-instance', harness: 'default', conversationId: session.conversationId, session: 'default', operationId: agent?.context.operationId, turnId: expect.any(String) } });
+			expect(tool).toMatchObject({ operation: { toolName: 'lookup' }, context: { instanceId: 'tool-test-instance', harness: 'default', conversationId: session.conversationId, session: 'default', operationId: agent?.context.operationId, turnId: expect.any(String) } });
+		} finally {
+			await dispose();
+		}
+	});
+
+	it('publishes the effective output separately from the product tool result', async () => {
 		const provider = createProvider();
 		provider.setResponses([
 			fauxAssistantMessage(fauxToolCall('lookup', {}), { stopReason: 'toolUse' }),
 			fauxAssistantMessage('Done.'),
 		]);
 		const events: FlueEvent[] = [];
+		const observations: FlueObservation[] = [];
 		const context = createContext(provider);
 		context.subscribeEvent((event) => {
 			events.push(event);
 		});
-		const harness = await context.initializeRootHarness(
-			defineAgent(() => ({
-				model: `${provider.getModel().provider}/${provider.getModel().id}`,
-				tools: [
-					defineTool({
-						name: 'lookup',
-						description: 'Look up a value.',
-						run: async () => ({ found: true }),
-					}),
-				],
-			})),
-		);
-
-		await (await harness.session()).prompt('Look up the value.');
-
-		expect(events.find((event) => event.type === 'tool' && event.toolName === 'lookup')).toMatchObject({
-			result: { details: { customTool: 'lookup', output: { found: true } } },
+		const stopObserving = observe((event, observedContext) => {
+			if (observedContext === context) observations.push(event);
 		});
+		try {
+			const harness = await context.initializeRootHarness(
+				defineAgent(() => ({
+					model: `${provider.getModel().provider}/${provider.getModel().id}`,
+					tools: [
+						defineTool({
+							name: 'lookup',
+							description: 'Look up a value.',
+							run: async () => ({ found: true }),
+						}),
+					],
+				})),
+			);
+
+			await (await harness.session()).prompt('Look up the value.');
+
+			const productEvent = events.find(
+				(event) => event.type === 'tool' && event.toolName === 'lookup',
+			);
+			expect(productEvent).toMatchObject({
+				result: { details: { customTool: 'lookup', output: { found: true } } },
+			});
+			expect(productEvent).not.toHaveProperty('effectiveResult');
+			expect(
+				observations.find((event) => event.type === 'tool' && event.toolName === 'lookup'),
+			).toMatchObject({ effectiveResult: { found: true } });
+		} finally {
+			stopObserving();
+		}
 	});
 
 	it('caches one frozen provider schema across model turns', async () => {

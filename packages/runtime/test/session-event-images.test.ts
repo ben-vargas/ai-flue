@@ -122,7 +122,7 @@ describe('session event image redaction', () => {
 			(event): event is Extract<FlueEvent, { type: 'turn_request' }> =>
 				event.type === 'turn_request',
 		);
-		const userInput = turnRequest?.input.messages.find((message) => message.role === 'user');
+		const userInput = turnRequest?.request.input.messages.find((message) => message.role === 'user');
 		expect(userInput?.content).toContainEqual({
 			type: 'image',
 			data: IMAGE_DATA_OMITTED,
@@ -171,7 +171,7 @@ describe('session event image redaction', () => {
 			(event): event is Extract<FlueEvent, { type: 'tool' }> =>
 				event.type === 'tool' && event.toolName === 'screenshot',
 		);
-		expect(toolCall?.result.content).toEqual([
+		expect((toolCall?.result as { content?: unknown[] } | undefined)?.content).toEqual([
 			{ type: 'image', data: IMAGE_DATA_OMITTED, mimeType: 'image/png' },
 		]);
 		const turnEnd = events.find(

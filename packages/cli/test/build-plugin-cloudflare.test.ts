@@ -38,7 +38,7 @@ describe('CloudflarePlugin', () => {
 		expect(entry).toContain('createSqlRunStore');
 		expect(entry).toContain('createContext: createAgentContextForRequest');
 		expect(entry).toContain(
-			'function createAgentContextForRequest({ executionStore, instance, request, initialEventIndex, dispatchId })',
+			'function createAgentContextForRequest({ executionStore, instance, agentName, request, initialEventIndex, dispatchId })',
 		);
 	});
 

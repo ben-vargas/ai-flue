@@ -8,7 +8,14 @@
 
 import type { AgentToolResult } from '@earendil-works/pi-agent-core';
 import { formatBashResult } from './agent.ts';
-import type { FlueEventInput, SessionEnv, ShellOptions, ShellResult } from './types.ts';
+import { interceptExecution, type FlueExecutionContext } from './execution-interceptor.ts';
+import type {
+	FlueEventInput,
+	FlueObservationDetail,
+	SessionEnv,
+	ShellOptions,
+	ShellResult,
+} from './types.ts';
 
 /**
  * Run `command` through `env.exec` wrapped in the bash tool-event envelope:
@@ -20,10 +27,11 @@ import type { FlueEventInput, SessionEnv, ShellOptions, ShellResult } from './ty
  */
 export async function execShellWithEvents(
 	env: SessionEnv,
-	emit: (event: FlueEventInput) => void,
+	emit: (event: FlueEventInput, detail?: FlueObservationDetail) => void,
 	command: string,
 	options: ShellOptions | undefined,
 	signal: AbortSignal | undefined,
+	executionContext: FlueExecutionContext,
 	record?: (
 		toolCallId: string,
 		args: Record<string, unknown>,
@@ -45,15 +53,22 @@ export async function execShellWithEvents(
 	if (options?.cwd !== undefined) args.cwd = options.cwd;
 	if (options?.env !== undefined) args.env = redactEnvValues(options.env);
 
-	emit({ type: 'tool_start', toolName: 'bash', toolCallId, args });
+	emit(
+		{ type: 'tool_start', toolName: 'bash', toolCallId },
+		{ origin: 'caller', toolType: 'function', args },
+	);
 
 	try {
-		const result = await env.exec(command, {
-			env: options?.env,
-			cwd: options?.cwd,
-			timeoutMs: options?.timeoutMs,
-			signal,
-		});
+		const result = await interceptExecution(
+			{ type: 'tool', toolCallId, toolName: 'bash' },
+			executionContext,
+			() => env.exec(command, {
+				env: options?.env,
+				cwd: options?.cwd,
+				timeoutMs: options?.timeoutMs,
+				signal,
+			}),
+		);
 		const shellResult: ShellResult = {
 			stdout: result.stdout,
 			stderr: result.stderr,
@@ -61,14 +76,17 @@ export async function execShellWithEvents(
 		};
 		const toolResult = formatBashResult(shellResult, command);
 		await record?.(toolCallId, args, toolResult, false);
-		emit({
-			type: 'tool',
-			toolName: 'bash',
-			toolCallId,
-			isError: false,
-			result: toolResult,
-			durationMs: Date.now() - startedAt,
-		});
+		emit(
+			{
+				type: 'tool',
+				toolName: 'bash',
+				toolCallId,
+				isError: false,
+				result: toolResult,
+				durationMs: Date.now() - startedAt,
+			},
+			{ origin: 'caller', toolType: 'function' },
+		);
 		return shellResult;
 	} catch (error) {
 		// Aligns with formatBashResult's `details: { command, exitCode }`
@@ -81,16 +99,31 @@ export async function execShellWithEvents(
 			details: { command, exitCode: -1 },
 		};
 		await record?.(toolCallId, args, errResult, true);
-		emit({
-			type: 'tool',
-			toolName: 'bash',
-			toolCallId,
-			isError: true,
-			result: errResult,
-			durationMs: Date.now() - startedAt,
-		});
+		emit(
+			{
+				type: 'tool',
+				toolName: 'bash',
+				toolCallId,
+				isError: true,
+				result: errResult,
+				durationMs: Date.now() - startedAt,
+			},
+			{
+				origin: 'caller',
+				toolType: 'function',
+				errorInfo: classifyShellError(error),
+			},
+		);
 		throw error;
 	}
+}
+
+function classifyShellError(error: unknown): { type: string; name?: string; message?: string } {
+	if (error instanceof DOMException && error.name === 'AbortError') {
+		return { type: 'AbortError', name: error.name, message: error.message };
+	}
+	if (error instanceof Error) return { type: error.name || '_OTHER', name: error.name, message: error.message };
+	return { type: '_OTHER', ...(typeof error === 'string' ? { message: error } : {}) };
 }
 
 export function getErrorMessage(error: unknown): string {

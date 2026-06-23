@@ -50,11 +50,13 @@ export class MongoRunStore implements RunStore {
 						status: 'active',
 						startedAt: new Date(input.startedAt).toISOString(),
 						payload: payload ?? null,
+						traceCarrier: input.traceCarrier ?? null,
 					});
 				committed = true;
 			});
 		} catch (error) {
 			if (!committed && payload) await this.values.discardStaged(payload);
+			if (isDuplicate(error)) return;
 			throw error;
 		}
 		if (!committed && payload) await this.values.discardStaged(payload);
@@ -151,9 +153,20 @@ export class MongoRunStore implements RunStore {
 				? { result: await this.values.read(row.result as unknown as StoredValue) }
 				: {}),
 			...(row.error ? { error: await this.values.read(row.error as unknown as StoredValue) } : {}),
+			...(row.traceCarrier ? { traceCarrier: row.traceCarrier as RunRecord['traceCarrier'] } : {}),
 		};
 	}
 }
+
+function isDuplicate(error: unknown): boolean {
+	return Boolean(
+		error &&
+			typeof error === 'object' &&
+			'code' in error &&
+			(error as { code: unknown }).code === 11000,
+	);
+}
+
 function pointer(row: MongoDocument): RunPointer {
 	return {
 		runId: String(row.runId),

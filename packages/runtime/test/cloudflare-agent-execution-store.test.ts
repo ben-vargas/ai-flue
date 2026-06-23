@@ -164,7 +164,8 @@ describe('createSqlAgentExecutionStore()', () => {
 		const store = createSqlSessionStore({ sql, transactionSync });
 		const imageData = 'a'.repeat(IMAGE_DATA_CHUNK_LENGTH + 7);
 		const data = {
-			version: 7 as const,
+			version: 8 as const,
+			conversationId: 'conv_00000000000000000000000000',
 			affinityKey: 'aff_00000000000000000000000000',
 			childSessions: [],
 			entries: [
@@ -214,7 +215,8 @@ describe('createSqlAgentExecutionStore()', () => {
 		const store = createSqlSessionStore({ sql, transactionSync });
 		const imageData = '😀'.repeat(IMAGE_DATA_CHUNK_LENGTH / 2 + 1);
 		const data = {
-			version: 7 as const,
+			version: 8 as const,
+			conversationId: 'conv_00000000000000000000000000',
 			affinityKey: 'aff_00000000000000000000000000',
 			childSessions: [],
 			entries: [
@@ -312,7 +314,8 @@ describe('createSqlAgentExecutionStore()', () => {
 		const { sql, transactionSync } = makeFakeSql();
 		const store = createSqlSessionStore({ sql, transactionSync });
 		const data = {
-			version: 7 as const,
+			version: 8 as const,
+			conversationId: 'conv_00000000000000000000000000',
 			affinityKey: 'aff_00000000000000000000000000',
 			childSessions: [],
 			entries: [
@@ -344,7 +347,8 @@ describe('createSqlAgentExecutionStore()', () => {
 		const { db, sql, transactionSync } = makeFakeSql();
 		const store = createSqlSessionStore({ sql, transactionSync });
 		const data = {
-			version: 7 as const,
+			version: 8 as const,
+			conversationId: 'conv_00000000000000000000000000',
 			affinityKey: 'aff_00000000000000000000000000',
 			childSessions: [],
 			entries: [
@@ -380,7 +384,8 @@ describe('createSqlAgentExecutionStore()', () => {
 		const { db, sql, transactionSync } = makeFakeSql();
 		const store = createSqlSessionStore({ sql, transactionSync });
 		const data = {
-			version: 7 as const,
+			version: 8 as const,
+			conversationId: 'conv_00000000000000000000000000',
 			affinityKey: 'aff_00000000000000000000000000',
 			childSessions: [],
 			entries: [
@@ -414,7 +419,8 @@ describe('createSqlAgentExecutionStore()', () => {
 		const { db, sql, transactionSync } = makeFakeSql();
 		const store = createSqlSessionStore({ sql, transactionSync });
 		const createData = (entryId: string, imageData: string) => ({
-			version: 7 as const,
+			version: 8 as const,
+			conversationId: 'conv_00000000000000000000000000',
 			affinityKey: 'aff_00000000000000000000000000',
 			childSessions: [],
 			entries: [
@@ -451,9 +457,10 @@ describe('createSqlAgentExecutionStore()', () => {
 		const store = createSqlSessionStore({ sql, transactionSync });
 		await expect(
 			store.save('session-1', {
-				version: 7,
+				version: 8,
 				childSessions: [],
-				affinityKey: 'aff_00000000000000000000000000',
+				conversationId: 'conv_00000000000000000000000000',
+			affinityKey: 'aff_00000000000000000000000000',
 				entries: [
 					{
 						type: 'message',

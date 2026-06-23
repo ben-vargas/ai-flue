@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { defineAgent, ProviderRegistrationError } from '../src/index.ts';
 import { createFlueContext, InMemorySessionStore, resolveModel } from '../src/internal.ts';
 import {
+	getProviderTelemetry,
 	registerProvider,
 	resetProviderRuntime,
 } from '../src/runtime/providers.ts';
@@ -203,6 +204,26 @@ describe('registerProvider()', () => {
 		});
 
 		expect(() => resolveModel('no-model-http/')).toThrow();
+	});
+
+	it('normalizes exact catalog provider ids without reclassifying gateways', () => {
+		expect(getProviderTelemetry('amazon-bedrock')).toEqual({ providerName: 'aws.bedrock' });
+		expect(getProviderTelemetry('google-vertex')).toEqual({ providerName: 'gcp.vertex_ai' });
+		expect(getProviderTelemetry('mistral')).toEqual({ providerName: 'mistral_ai' });
+		expect(getProviderTelemetry('cloudflare-ai-gateway')).toEqual({ providerName: 'cloudflare-ai-gateway' });
+		expect(getProviderTelemetry('custom-openai-compatible')).toEqual({ providerName: 'custom-openai-compatible' });
+	});
+
+	it('preserves explicit telemetry provider identity over catalog normalization', () => {
+		registerProvider('openai', {
+			baseUrl: 'https://gateway.test/openai',
+			telemetry: { providerName: 'company.gateway', serverAddress: 'gateway.test' },
+		});
+
+		expect(getProviderTelemetry('openai')).toEqual({
+			providerName: 'company.gateway',
+			serverAddress: 'gateway.test',
+		});
 	});
 
 	it('removes provider registrations when a new runtime begins', () => {

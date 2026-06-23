@@ -64,7 +64,7 @@ import {
 	type DirectAgentSubmissionInput,
 } from './runtime/agent-submissions.ts';
 import type { DispatchInput } from './runtime/dispatch-queue.ts';
-import { FLUE_SCHEMA_VERSION, ensureFlueSchemaVersion } from './schema-version.ts';
+import { migrateFlueSqlSchema } from './schema-version.ts';
 import { createSessionStorageKey } from './session-identity.ts';
 import {
 	createSqlPersistedChunkStore,
@@ -72,52 +72,13 @@ import {
 } from './sql-persisted-chunk-store.ts';
 import type { SessionData, SessionEntry, SessionStore } from './types.ts';
 
-/**
- * Bring the agent execution store schema to the current version.
- * Called by `createSqlAgentExecutionStore` (Cloudflare DO path) and
- * by the `sqlite()` adapter's `migrate()` method (Node).
- *
- * Stamps a fresh database with the current schema version and throws when
- * the database records an unknown or newer version, then runs idempotent DDL.
- */
-function migrateSqlAgentExecutionSchema(sql: SqlStorage): void {
-	sql.exec(
-		`CREATE TABLE IF NOT EXISTS flue_meta (
-		 key TEXT PRIMARY KEY,
-		 value TEXT NOT NULL
-		)`,
-	);
-	const version = sql
-		.exec(`SELECT value FROM flue_meta WHERE key = 'schema_version'`)
-		.toArray()[0]?.value;
-	if (String(version) !== '1' || FLUE_SCHEMA_VERSION !== 2) return;
-	const tables = sql
-		.exec(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'flue_agent_submissions'`)
-		.toArray();
-	if (tables.length > 0) {
-		const columns = new Set(
-			sql.exec('PRAGMA table_info(flue_agent_submissions)').toArray().map((row) => String(row.name)),
-		);
-		if (!columns.has('terminal_event_key')) {
-			sql.exec('ALTER TABLE flue_agent_submissions ADD COLUMN terminal_event_key TEXT');
-		}
-		if (!columns.has('terminal_event_json')) {
-			sql.exec('ALTER TABLE flue_agent_submissions ADD COLUMN terminal_event_json TEXT');
-		}
-		if (!columns.has('terminal_event_offset')) {
-			sql.exec('ALTER TABLE flue_agent_submissions ADD COLUMN terminal_event_offset TEXT');
-		}
-	}
-	sql.exec(`UPDATE flue_meta SET value = ? WHERE key = 'schema_version'`, String(FLUE_SCHEMA_VERSION));
-}
-
 export function ensureSqlAgentExecutionTables(sql: SqlStorage): void {
-	migrateSqlAgentExecutionSchema(sql);
-	ensureFlueSchemaVersion(sql);
-	ensureSessionTable(sql);
-	ensureSubmissionTable(sql);
-	ensureTurnJournalTable(sql);
-	ensureSqlPersistedChunkTable(sql);
+	migrateFlueSqlSchema(sql, () => {
+		ensureSessionTable(sql);
+		ensureSubmissionTable(sql);
+		ensureTurnJournalTable(sql);
+		ensureSqlPersistedChunkTable(sql);
+	});
 }
 
 /**

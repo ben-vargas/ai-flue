@@ -1,5 +1,5 @@
 import type { AgentExecutionStore } from '../agent-execution-store.ts';
-import { ensureFlueSchemaVersion } from '../schema-version.ts';
+import { migrateFlueSqlSchema } from '../schema-version.ts';
 import {
 	createSqlAgentExecutionStoreFromSql,
 	ensureSessionTable,
@@ -23,9 +23,10 @@ export function createSqlSessionStore(storage: DurableObjectStorage): SessionSto
 			'[flue] Cloudflare workflow session persistence requires Durable Object SQLite.',
 		);
 	}
-	ensureFlueSchemaVersion(sql);
-	ensureSessionTable(sql);
-	ensureSqlPersistedChunkTable(sql);
+	migrateFlueSqlSchema(sql, () => {
+		ensureSessionTable(sql);
+		ensureSqlPersistedChunkTable(sql);
+	});
 	const runTransaction = <T>(closure: () => T): T => transactionSync.call(storage, closure) as T;
 	return new SqlSessionStore(sql, runTransaction);
 }

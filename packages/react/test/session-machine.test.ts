@@ -188,7 +188,7 @@ describe('AgentSession', () => {
 		const stale = controlledStream<AttachedAgentEvent>('offset-stale');
 		const active = streamThenFail<AttachedAgentEvent>(
 			{
-				v: 1,
+				v: 3,
 				type: 'idle',
 				eventIndex: 1,
 				timestamp: '2026-06-12T00:00:00.000Z',
@@ -245,7 +245,7 @@ describe('AgentSession', () => {
 	it('does not duplicate an interrupted turn when its partial batch is redelivered', async () => {
 		vi.useFakeTimers();
 		const start = {
-			v: 1,
+			v: 3,
 			type: 'message_start',
 			message: { role: 'assistant', content: [] },
 			eventIndex: 1,
@@ -255,7 +255,7 @@ describe('AgentSession', () => {
 			turnId: 'turn-1',
 		} as const satisfies AttachedAgentEvent;
 		const delta = {
-			v: 1,
+			v: 3,
 			type: 'text_delta',
 			text: 'partial',
 			eventIndex: 2,
@@ -343,7 +343,7 @@ describe('WorkflowRun', () => {
 		const stale = controlledStream<FlueEvent>('offset-stale');
 		const active = streamThenFail<FlueEvent>(
 			{
-				v: 1,
+				v: 3,
 				type: 'log',
 				level: 'info',
 				message: 'active',
@@ -393,7 +393,7 @@ describe('WorkflowRun', () => {
 
 	it('deduplicates redelivered workflow events', async () => {
 		const event = {
-			v: 1,
+			v: 3,
 			type: 'log',
 			level: 'info',
 			message: 'once',

@@ -134,6 +134,18 @@ type ResultOutcome<T> =
 	| { type: 'finished'; value: T }
 	| { type: 'gave_up'; reason: string };
 
+interface PreparedResultTool {
+	args: unknown;
+	run(): Promise<Awaited<ReturnType<AgentTool<any>['execute']>>>;
+	result(value: Awaited<ReturnType<AgentTool<any>['execute']>>): unknown;
+}
+
+const resultToolPreparers = new WeakMap<AgentTool<any>, (params: unknown) => PreparedResultTool>();
+
+export function prepareResultTool(tool: AgentTool<any>, params: unknown): PreparedResultTool | undefined {
+	return resultToolPreparers.get(tool)?.(params);
+}
+
 export interface ResultToolBundle<T> {
 	tools: AgentTool<any>[];
 	getOutcome(): ResultOutcome<T>;
@@ -218,6 +230,37 @@ export function createResultTools<S extends v.GenericSchema>(
 		},
 	};
 
+	resultToolPreparers.set(finishTool, (params) => {
+		if (outcome.type !== 'pending') {
+			return { args: params, run: async () => alreadyDoneToolError(outcome), result: resultToolValue };
+		}
+		const candidate = wrapped ? (params as { result: unknown }).result : params;
+		const parsed = parseValibot(schema, candidate);
+		if (!parsed.success) {
+			const issues = parsed.issues
+				.map((issue) =>
+					issue.path ? `${issue.message} (at ${formatIssuePath(issue.path)})` : issue.message,
+				)
+				.join('; ');
+			throw new Error(
+				`Result does not match the required schema: ${issues}. ` +
+					`Please call \`${FINISH_TOOL_NAME}\` again with a corrected payload.`,
+			);
+		}
+		return {
+			args: parsed.output,
+			run: async () => {
+				outcome = { type: 'finished', value: parsed.output };
+				return {
+					content: [{ type: 'text', text: 'Result accepted. The task is complete.' }],
+					details: { tool: FINISH_TOOL_NAME, result: parsed.output },
+					terminate: true,
+				};
+			},
+			result: resultToolValue,
+		};
+	});
+
 	const giveUpTool: AgentTool<any> = {
 		name: GIVE_UP_TOOL_NAME,
 		label: GIVE_UP_TOOL_NAME,
@@ -253,6 +296,28 @@ export function createResultTools<S extends v.GenericSchema>(
 		},
 	};
 
+	resultToolPreparers.set(giveUpTool, (params) => {
+		if (outcome.type !== 'pending') {
+			return { args: params, run: async () => alreadyDoneToolError(outcome), result: resultToolValue };
+		}
+		const reason = (params as { reason: unknown }).reason;
+		if (typeof reason !== 'string' || reason.trim().length === 0) {
+			throw new Error(`\`${GIVE_UP_TOOL_NAME}\` requires a non-empty \`reason\` string.`);
+		}
+		return {
+			args: { reason },
+			run: async () => {
+				outcome = { type: 'gave_up', reason };
+				return {
+					content: [{ type: 'text', text: 'Acknowledged.' }],
+					details: { tool: GIVE_UP_TOOL_NAME, reason },
+					terminate: true,
+				};
+			},
+			result: resultToolValue,
+		};
+	});
+
 	return {
 		tools: [finishTool, giveUpTool],
 		getOutcome: () => outcome,
@@ -260,6 +325,15 @@ export function createResultTools<S extends v.GenericSchema>(
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
+
+function resultToolValue(value: Awaited<ReturnType<AgentTool<any>['execute']>>): unknown {
+	const details = value.details as Record<string, unknown>;
+	if ('result' in details) return details.result;
+	if ('reason' in details) return details.reason;
+	return value.content.length === 1 && value.content[0]?.type === 'text'
+		? value.content[0].text
+		: value.content;
+}
 
 function needsEnvelope(schema: v.GenericSchema): boolean {
 	// Tool parameters must be an object at the top level; anything else gets

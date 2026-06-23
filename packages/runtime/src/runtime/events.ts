@@ -1,6 +1,7 @@
 /** Global, isolate-scoped subscription to live Flue runtime activity. */
 
-import type { FlueEvent, FlueEventContext } from '../types.ts';
+import { createObservation, type FlueObservationSubscriber } from '../observation.ts';
+import type { FlueEvent, FlueEventContext, FlueObservationDetail } from '../types.ts';
 
 /**
  * Receives a decorated event and its originating context. Workflow
@@ -9,9 +10,9 @@ import type { FlueEvent, FlueEventContext } from '../types.ts';
  * Subscriber failures are logged and do not halt dispatch or the originating
  * execution. Returned promises are observed for rejection but are not awaited.
  */
-export type FlueEventSubscriber = (event: FlueEvent, ctx: FlueEventContext) => void | Promise<void>;
+export type FlueEventSubscriber = FlueObservationSubscriber;
 
-const subscribers = new Set<FlueEventSubscriber>();
+const subscribers = new Set<FlueObservationSubscriber>();
 
 /**
  * Subscribe to live workflow-run or agent-interaction activity emitted in this isolate.
@@ -51,10 +52,15 @@ export function observe(subscriber: FlueEventSubscriber): () => void {
  * Called from `createFlueContext`'s `emitEvent` after the per-context
  * subscribers have run.
  */
-export function dispatchGlobalEvent(event: FlueEvent, ctx: FlueEventContext): void {
+export function dispatchGlobalEvent(
+	event: FlueEvent,
+	ctx: FlueEventContext,
+	detail?: FlueObservationDetail,
+): void {
+	const observation = createObservation(event, detail);
 	for (const subscriber of [...subscribers]) {
 		try {
-			Promise.resolve(subscriber(event, ctx)).catch(reportSubscriberFailure);
+			Promise.resolve(subscriber(observation, ctx)).catch(reportSubscriberFailure);
 		} catch (error) {
 			reportSubscriberFailure(error);
 		}

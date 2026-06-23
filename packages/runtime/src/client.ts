@@ -17,6 +17,7 @@ import type {
 	FlueEventContext,
 	FlueEventCallback,
 	FlueEventInput,
+	FlueObservationDetail,
 	SandboxFactory,
 	SessionEnv,
 	SessionStore,
@@ -25,6 +26,7 @@ import type {
 
 export interface FlueContextConfig {
 	id: string;
+	agentName?: string;
 	runId?: string;
 	dispatchId?: string;
 	env: Record<string, any>;
@@ -53,7 +55,7 @@ export interface FlueContextInternal extends FlueEventContext {
 	initializeRootHarness(agent: AgentDefinition): Promise<Harness>;
 	createEvent(event: FlueEventInput): FlueEvent;
 	publishEvent(event: FlueEvent): void;
-	emitEvent(event: FlueEventInput): FlueEvent;
+	emitEvent(event: FlueEventInput, observation?: FlueObservationDetail): FlueEvent;
 	subscribeEvent(callback: FlueEventCallback): () => void;
 	flushEventCallbacks(): Promise<void>;
 	setEventCallback(callback: FlueEventCallback | undefined): void;
@@ -73,12 +75,13 @@ export function createFlueContext(config: FlueContextConfig): FlueContextInterna
 		...(config.runId === undefined ? { instanceId: config.id } : { runId: config.runId }),
 		...(config.dispatchId === undefined ? {} : { dispatchId: config.dispatchId }),
 		...(submissionId === undefined ? {} : { submissionId }),
-		v: 1,
+		...(config.agentName === undefined ? {} : { agentName: config.agentName }),
+		v: 3,
 		eventIndex: eventIndex++,
 		timestamp: new Date().toISOString(),
 	});
 
-	const publishEvent = (decorated: FlueEvent): void => {
+	const publishEvent = (decorated: FlueEvent, observation?: FlueObservationDetail): void => {
 		for (const subscriber of subscribers) {
 			try {
 				const callback = subscriber(decorated);
@@ -99,12 +102,12 @@ export function createFlueContext(config: FlueContextConfig): FlueContextInterna
 		// per-context subscribers and receive the originating `ctx` as
 		// a second argument so cross-cutting code can read runtime identity
 		// and environment metadata.
-		dispatchGlobalEvent(decorated, ctx);
+		dispatchGlobalEvent(decorated, ctx, observation);
 	};
 
-	const emitEvent = (event: FlueEventInput): FlueEvent => {
+	const emitEvent = (event: FlueEventInput, observation?: FlueObservationDetail): FlueEvent => {
 		const decorated = createEvent(event);
-		publishEvent(decorated);
+		publishEvent(decorated, observation);
 		return decorated;
 	};
 
@@ -115,6 +118,10 @@ export function createFlueContext(config: FlueContextConfig): FlueContextInterna
 
 		get runId() {
 			return config.runId;
+		},
+
+		get agentName() {
+			return config.agentName;
 		},
 
 		get env() {
@@ -192,7 +199,7 @@ export function createFlueContext(config: FlueContextConfig): FlueContextInterna
 export async function initializeRootHarness(
 	agent: AgentDefinition,
 	config: FlueContextConfig,
-	emitEvent: (event: FlueEventInput) => void,
+	emitEvent: (event: FlueEventInput, observation?: FlueObservationDetail) => void,
 ): Promise<Harness> {
 	const resolvedOptions = await agent.initialize({ id: config.id, env: config.env });
 	const definition = assertResolvedAgentProfile(
@@ -248,6 +255,7 @@ export async function initializeRootHarness(
 		toolFactory,
 		config.submissionStore,
 		definition.actions,
+		config.runId === undefined ? { instanceId: config.id } : { runId: config.runId },
 	);
 }
 

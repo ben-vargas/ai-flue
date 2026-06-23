@@ -7,11 +7,6 @@
  * {@link PersistenceAdapter} contract: the built-in SQL backends implement it
  * with a one-row `flue_meta` key/value table; non-SQL adapters implement the
  * same obligation natively (a key, a meta document, etc.).
- *
- * There is deliberately no migration framework here — just the stamp and the
- * loud check. `PersistenceAdapter.migrate()` is defined as "bring the store to
- * the current version"; when a future version changes a persisted format, the
- * migration logic lands alongside a bump of {@link FLUE_SCHEMA_VERSION}.
  */
 
 import { PersistedSchemaVersionError } from './errors.ts';
@@ -23,7 +18,7 @@ import type { SqlStorage } from './sql-storage.ts';
  * Bump this when a persisted format changes incompatibly, together with
  * `migrate()` logic that brings older stores to the new version.
  */
-export const FLUE_SCHEMA_VERSION = 2;
+export const FLUE_SCHEMA_VERSION = 3;
 
 /**
  * Throw {@link PersistedSchemaVersionError} unless the stored version matches
@@ -42,30 +37,58 @@ export function assertSupportedFlueSchemaVersion(storedVersion: string): void {
 	});
 }
 
-/**
- * Stamp-or-check the schema version for a SQLite-dialect store.
- *
- * Creates the `flue_meta` key/value table if missing, records the current
- * {@link FLUE_SCHEMA_VERSION} when no version row exists yet, and throws
- * {@link PersistedSchemaVersionError} when the stored version does not match.
- * Called by every table-ensuring path of the built-in SQL stores, so opening
- * any store against an incompatible database fails before any data is read.
- */
-export function ensureFlueSchemaVersion(sql: SqlStorage): void {
+export function migrateFlueSqlSchema(sql: SqlStorage, ensureCurrentSchema: () => void): void {
 	sql.exec(
 		`CREATE TABLE IF NOT EXISTS flue_meta (
 		 key TEXT PRIMARY KEY,
 		 value TEXT NOT NULL
 		)`,
 	);
-	const rows = sql.exec(`SELECT value FROM flue_meta WHERE key = 'schema_version'`).toArray();
-	const stored = rows[0]?.value;
-	if (stored === undefined || stored === null) {
-		sql.exec(
-			`INSERT OR IGNORE INTO flue_meta (key, value) VALUES ('schema_version', ?)`,
-			String(FLUE_SCHEMA_VERSION),
-		);
-		return;
+	const stored = sql.exec(`SELECT value FROM flue_meta WHERE key = 'schema_version'`).toArray()[0]?.value;
+	if (stored !== undefined && stored !== null && !['1', '2', '3'].includes(String(stored))) {
+		assertSupportedFlueSchemaVersion(String(stored));
 	}
-	assertSupportedFlueSchemaVersion(String(stored));
+
+	repairSubmissionColumns(sql);
+	repairRunColumns(sql);
+	ensureCurrentSchema();
+
+	sql.exec(
+		`INSERT INTO flue_meta (key, value) VALUES ('schema_version', ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+		String(FLUE_SCHEMA_VERSION),
+	);
+	const persisted = sql.exec(`SELECT value FROM flue_meta WHERE key = 'schema_version'`).toArray()[0]?.value;
+	assertSupportedFlueSchemaVersion(String(persisted));
+}
+
+function repairSubmissionColumns(sql: SqlStorage): void {
+	if (!tableExists(sql, 'flue_agent_submissions')) return;
+	const columns = tableColumns(sql, 'flue_agent_submissions');
+	if (!columns.has('terminal_event_key')) {
+		sql.exec('ALTER TABLE flue_agent_submissions ADD COLUMN terminal_event_key TEXT');
+	}
+	if (!columns.has('terminal_event_json')) {
+		sql.exec('ALTER TABLE flue_agent_submissions ADD COLUMN terminal_event_json TEXT');
+	}
+	if (!columns.has('terminal_event_offset')) {
+		sql.exec('ALTER TABLE flue_agent_submissions ADD COLUMN terminal_event_offset TEXT');
+	}
+}
+
+function repairRunColumns(sql: SqlStorage): void {
+	if (!tableExists(sql, 'flue_runs')) return;
+	const columns = tableColumns(sql, 'flue_runs');
+	if (!columns.has('traceparent')) sql.exec('ALTER TABLE flue_runs ADD COLUMN traceparent TEXT');
+	if (!columns.has('tracestate')) sql.exec('ALTER TABLE flue_runs ADD COLUMN tracestate TEXT');
+}
+
+function tableExists(sql: SqlStorage, table: string): boolean {
+	return sql
+		.exec(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`, table)
+		.toArray().length > 0;
+}
+
+function tableColumns(sql: SqlStorage, table: 'flue_agent_submissions' | 'flue_runs'): Set<string> {
+	return new Set(sql.exec(`PRAGMA table_info(${table})`).toArray().map((row) => String(row.name)));
 }

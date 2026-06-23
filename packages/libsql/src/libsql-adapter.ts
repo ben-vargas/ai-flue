@@ -195,11 +195,12 @@ async function ensureTables(runner: LibsqlRunner): Promise<void> {
 		`);
 		const versionRows = await tx.query(`SELECT value FROM flue_meta WHERE key = 'schema_version'`);
 		const storedVersion = versionRows[0]?.value;
+		const migratingFromV2 = String(storedVersion) === '2' && FLUE_SCHEMA_VERSION === 3;
 		if (storedVersion === undefined || storedVersion === null) {
 			await tx.query(`INSERT OR IGNORE INTO flue_meta (key, value) VALUES ('schema_version', ?)`, [
 				String(FLUE_SCHEMA_VERSION),
 			]);
-		} else {
+		} else if (!migratingFromV2) {
 			assertSupportedFlueSchemaVersion(String(storedVersion));
 		}
 
@@ -343,6 +344,8 @@ async function ensureTables(runner: LibsqlRunner): Promise<void> {
 				status TEXT NOT NULL,
 				started_at TEXT NOT NULL,
 				payload TEXT,
+				traceparent TEXT,
+				tracestate TEXT,
 				ended_at TEXT,
 				is_error INTEGER,
 				duration_ms INTEGER,
@@ -350,6 +353,22 @@ async function ensureTables(runner: LibsqlRunner): Promise<void> {
 				error TEXT
 			)
 		`);
+		for (const statement of [
+			`ALTER TABLE flue_runs ADD COLUMN traceparent TEXT`,
+			`ALTER TABLE flue_runs ADD COLUMN tracestate TEXT`,
+		]) {
+			try {
+				await tx.query(statement);
+			} catch (error) {
+				if (!String(error).toLowerCase().includes('duplicate column')) throw error;
+			}
+		}
+
+		if (migratingFromV2) {
+			await tx.query(`UPDATE flue_meta SET value = ? WHERE key = 'schema_version'`, [
+				String(FLUE_SCHEMA_VERSION),
+			]);
+		}
 
 		await tx.query(`
 			CREATE INDEX IF NOT EXISTS flue_runs_status_started_idx
@@ -1380,13 +1399,16 @@ class LibsqlRunStore implements RunStore {
 		// Idempotent first-writer-wins: a replayed runId must neither raise a
 		// unique violation nor resurrect a terminal record back to 'active'.
 		await this.runner.query(
-			`INSERT OR IGNORE INTO flue_runs (run_id, workflow_name, status, started_at, payload)
-			 VALUES (?, ?, 'active', ?, ?)`,
+			`INSERT OR IGNORE INTO flue_runs
+			 (run_id, workflow_name, status, started_at, payload, traceparent, tracestate)
+			 VALUES (?, ?, 'active', ?, ?, ?, ?)`,
 			[
 				input.runId,
 				input.workflowName,
 				input.startedAt,
 				input.input !== undefined ? JSON.stringify(input.input) : null,
+				input.traceCarrier?.traceparent ?? null,
+				input.traceCarrier?.tracestate ?? null,
 			],
 		);
 	}
@@ -1411,7 +1433,7 @@ class LibsqlRunStore implements RunStore {
 	async getRun(runId: string): Promise<RunRecord | null> {
 		const rows = await this.runner.query(
 			`SELECT run_id, workflow_name, status, started_at,
-			        payload, ended_at, is_error, duration_ms, result, error
+			        payload, traceparent, tracestate, ended_at, is_error, duration_ms, result, error
 			 FROM flue_runs WHERE run_id = ? LIMIT 1`,
 			[runId],
 		);
@@ -1423,6 +1445,14 @@ class LibsqlRunStore implements RunStore {
 			status: row.status as RunStatus,
 			startedAt: String(row.started_at),
 			...(row.payload != null ? { input: JSON.parse(String(row.payload)) } : {}),
+			...(typeof row.traceparent === 'string'
+				? {
+						traceCarrier: {
+							traceparent: row.traceparent,
+							...(typeof row.tracestate === 'string' ? { tracestate: row.tracestate } : {}),
+						},
+					}
+				: {}),
 			...(row.ended_at != null ? { endedAt: String(row.ended_at) } : {}),
 			...(row.is_error != null ? { isError: parseSqliteBoolean(row.is_error) } : {}),
 			...(row.duration_ms != null ? { durationMs: Number(row.duration_ms) } : {}),

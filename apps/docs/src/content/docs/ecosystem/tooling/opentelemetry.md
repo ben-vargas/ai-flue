@@ -1,120 +1,98 @@
 ---
 title: OpenTelemetry
-description: Export Flue workflows, operations, model turns, tools, tasks, compactions, and logs as OpenTelemetry traces.
+description: Export Flue workflows, agents, model calls, and tools with OpenTelemetry GenAI semantics.
 package:
   name: '@flue/opentelemetry'
   href: https://www.npmjs.com/package/@flue/opentelemetry
 ---
 
-`@flue/opentelemetry` converts Flue's live `observe(...)` event stream into OpenTelemetry traces. It creates semantic spans and events but does not configure an SDK, exporter, sampling, credentials, or shutdown behavior.
+`@flue/opentelemetry` projects Flue's live runtime observations into standard OpenTelemetry GenAI spans and metrics. It does not configure an SDK, exporter, sampling, credentials, or deployment-specific flushing.
 
-See [Observability](/docs/guide/observability/) to inspect workflow runs, understand the observer model, and compare integrations.
+The package implements the Development GenAI conventions pinned at commit `4c8addb53718b544134be47e256237026fe88875`. Its Flue-to-GenAI projection revision is `5` and its Flue extension revision is `3`; the GenAI semantic-convention revision and schema remain unchanged. Updating any revision requires an explicit compatibility review.
 
-## Quickstart
+## Configure
 
-Add [OpenTelemetry](https://opentelemetry.io) tracing to an existing Flue project by installing the adapter and API alongside an SDK and exporter for your deployment target:
+Install the adapter and OpenTelemetry API alongside an SDK and exporter compatible with your deployment target:
 
 ```sh
 pnpm add @flue/opentelemetry @opentelemetry/api
 ```
 
-## Overview
-
-`@flue/opentelemetry` supplies an observer that converts Flue runtime events into OpenTelemetry spans. Register it once in your application entrypoint, after initializing an OpenTelemetry SDK and exporter:
+Configure the SDK first, then register one instrumentation instance:
 
 ```ts title="src/app.ts (abridged)"
-import { createOpenTelemetryObserver } from '@flue/opentelemetry';
-import { observe } from '@flue/runtime';
+import { createOpenTelemetryInstrumentation } from '@flue/opentelemetry';
+import { instrument } from '@flue/runtime';
 
-observe(createOpenTelemetryObserver());
+const instrumentation = createOpenTelemetryInstrumentation();
+const disposeInstrumentation = instrument(instrumentation);
 ```
 
-The observer creates spans for workflow runs, finite agent operations, model turns, tools, delegated tasks, and compactions. It also attaches Flue logs to the nearest tracked span. The package does not choose or configure your OpenTelemetry SDK, exporter, sampling, credentials, or shutdown behavior.
+Pass configured tracer, meter, or structural Logger instances when the application owns them. Generated Node applications automatically dispose registrations created while evaluating `app.ts` after admissions and active work drain. Call `await disposeInstrumentation()` yourself only when registering outside that lifecycle, then flush or shut down the application-owned SDK/exporter separately.
 
-## Configure
+## Trace model
 
-| Requirement                                  | Purpose                                                                                                                     |
-| -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| OpenTelemetry SDK                            | **Required for tracing** — Provides tracing for the deployment runtime and must be configured before observer registration. |
-| OpenTelemetry exporter                       | **Required for span delivery** — Delivers spans to the selected observability backend.                                      |
-| Sampling, credentials, and shutdown behavior | **Application-specific** — Controls collection, authenticates delivery when needed, and flushes pending spans.              |
+| Flue activity | OpenTelemetry representation |
+| --- | --- |
+| Workflow invocation | `invoke_workflow <name>` |
+| Prompt or skill | `invoke_agent <agent>` |
+| Delegated task | one task-owned `invoke_agent <agent>` |
+| Provider inference | `chat <requested-model>` client span |
+| GenAI tool execution | `execute_tool <name>` |
+| Caller shell execution | `flue.operation shell` |
+| Context compaction | `flue.compaction` with child chat spans |
 
-Configure the SDK before the observer registration shown above. The adapter uses `trace.getTracer('@flue/opentelemetry')` by default; pass `{ tracer }` when the application already owns a configured tracer.
+Provider chat spans cover provider inference only. The projection reads canonical model telemetry directly: semantic `request.providerName` becomes `gen_ai.provider.name`, while `request.providerId` remains the Flue registration identity. It does not fall back to removed top-level event fields. Local tools are sibling spans under the agent invocation and correlate with model output through `gen_ai.tool.call.id`.
 
-## What the adapter traces
+`gen_ai.conversation.id` identifies one persisted Flue session. It is not a workflow run, submission, dispatch, operation, trace, session name, or provider-affinity key. Flue correlation fields remain under documented `flue.*` attributes when no exact standard field exists.
 
-| Flue activity          | OpenTelemetry representation                     |
-| ---------------------- | ------------------------------------------------ |
-| Workflow invocation    | `flue.workflow <name>` span                      |
-| Finite agent operation | `flue.operation <kind>` span                     |
-| Model turn             | `chat <model>` client span with GenAI attributes |
-| Tool call              | `flue.tool <name>` span                          |
-| Delegated task         | `flue.task <agent>` span                         |
-| Context compaction     | `flue.compaction` span                           |
-| Flue log               | `flue.log` event on the nearest tracked span     |
+## Protect content
 
-Spans include applicable Flue correlation fields and event indexes. Model-turn spans record token usage and estimated cost as attributes; the package does not create native OpenTelemetry metrics. Operation and compaction usage values are roll-ups, so do not sum them with nested model-turn values. Nested durations can also overlap.
+Content is disabled by default. This excludes implemented model messages, reasoning, system instructions, tool definitions, descriptions, arguments/results, exception messages, and external-content paths. Workflow values are not currently exported even when capture is enabled.
 
-The observer tracks open spans in local memory. Each process or Cloudflare isolate exports only the activity it handles, and live event indexes do not prove that workflow history persistence succeeded.
-
-## Attach application trace context
-
-Workflow and standalone operation spans start as independent roots by default. Use `resolveRootContext` to attach an otherwise-root Flue span beneath application-owned context:
-
-```ts title="src/app.ts"
-import { context, propagation } from '@opentelemetry/api';
-import { createOpenTelemetryObserver } from '@flue/opentelemetry';
-import { observe } from '@flue/runtime';
-
-observe(
-  createOpenTelemetryObserver({
-    resolveRootContext(_event, ctx) {
-      if (!ctx.req) return undefined;
-
-      return propagation.extract(context.active(), Object.fromEntries(ctx.req.headers));
-    },
-  }),
-);
-```
-
-The resolver runs only when there is no tracked Flue parent. This is application-owned extraction, not automatic Flue propagation: dispatched work does not carry HTTP trace context, and durable processing may see a synthetic request rather than the original carrier. Persist or resolve any context needed across admission or isolate boundaries in application-owned state.
-
-The adapter also does not activate its spans as ambient context around provider SDK calls. Separate provider auto-instrumentation may require application-owned composition to appear beneath the intended Flue span.
-
-## Interpret workflow recovery
-
-A recovered Cloudflare workflow does not retry or continue authored workflow code. When Flue terminalizes an admitted interrupted run, `run_resume` starts a separate recovery-handling span and closes locally tracked interrupted descendants.
-
-The new segment links to the predecessor only when that span context remains available in the same isolate. After an isolate reset, correlate segments with `flue.run.id` and event indexes; Flue does not durably propagate OpenTelemetry trace context.
-
-## Export content safely
-
-By default, spans contain identifiers, durations, model and provider attributes, token and cost metadata, log levels, and generic failure messages. Workflow inputs and results, detailed errors, model input and output, tool values, task content, and log content are omitted.
-
-Provide `exportContent(event)` to opt specific events into content export. It receives a shallow event copy; return a sanitized event to export its supported values or `undefined` to omit content:
+Use one instrumentation-wide policy to enable and redact content:
 
 ```ts
-observe(
-  createOpenTelemetryObserver({
-    exportContent(event) {
-      if (event.type !== 'log') return undefined;
-
-      return {
-        ...event,
-        message: redactLogMessage(event.message),
-        attributes: redactLogAttributes(event.attributes),
-      };
+const instrumentation = createOpenTelemetryInstrumentation({
+  content: {
+    enabled: process.env.OTEL_GENAI_CAPTURE_CONTENT === 'true',
+    transform(content) {
+      return redactSecrets(content);
     },
-  }),
-);
+  },
+});
 ```
 
-Clone nested paths before modifying them. Passing `exportContent: (event) => event` intentionally exports unsanitized supported content and should be used only when the configured backend is appropriate for that data. Flue redacts image data in recognized content blocks, but arbitrary application-owned values still require sanitization.
+The `enabled` value is the global privacy ceiling. A detached converted value passes through `transform` once; returning `undefined` suppresses both destinations. Transforms are trusted application code; Flue does not validate their returned GenAI shape. Structural limits run afterward: `maxMessageParts` retains the first complete parts per input/output message and first top-level system instructions, and `maxToolDefinitions` retains the first definitions. Limit values must be finite nonnegative safe integers.
 
-## Runtime and delivery
+`externalContent` is a side-effect-only sink for system instructions and input/output messages. It receives a detached, structurally limited clone with a stable `contentType` scope regardless of span sampling or `inline`. Returns and mutations cannot alter inline content, failures only diagnose, and tool content is never delivered. Set `inline: false` to skip serialization while retaining this external delivery.
 
-The adapter contains target-agnostic tracing code, but the OpenTelemetry SDK and exporter must support the deployment runtime. On Node.js, initialize the SDK before observer registration and flush it during application shutdown. On Cloudflare, verify SDK compatibility, export delivery, and execution-lifetime handling in the deployed Worker or Durable Object rather than relying only on Node tests.
+`maxAttributeBytes` measures the exact final UTF-8 inline string and does not limit external delivery. Object-shaped tool arguments/results use standard `gen_ai.tool.call.*` attributes; strings, arrays, primitives, and `null` use `flue.tool.call.arguments` or `flue.tool.call.result` under the same privacy and size policy. Tool descriptions and plain-text fallbacks remain raw strings. Bounded `flue.telemetry.content.*` attributes mark structural truncation and inline byte omission. The adapter does not invent flattened child keys beneath `gen_ai.*`.
+
+## Metrics and Logs
+
+The instrumentation emits client-operation, token-usage, workflow, agent-invocation, and tool-duration histograms. Metric dimensions exclude execution IDs; review your application-controlled workflow, agent, tool, provider, and model names for appropriate cardinality. Input token totals include cache-read and cache-creation input tokens.
+
+Logs require explicit Logger injection. Failed inference operations emit the standard `gen_ai.client.operation.exception` event at WARN/13. Error type is always recorded; transformed exception messages are included only when content capture is enabled. Logger absence does not affect traces or metrics.
+
+## Propagation and recovery
+
+Flue validates and persists `traceparent` and optional `tracestate` at workflow and direct-agent admission. Baggage is not persisted. Durable direct-agent processing activates its extracted admission context, and execution interceptors activate owning spans around workflow, agent, model-stream, tool, and task work. `dispatch(...)` does not currently propagate trace context.
+
+Workflow recovery restores the persisted admission carrier as the parent of a new recovery-handling span. The new span begins at `run_resume`; it does not reconstruct or backdate the interrupted span. Recovery does not replay provider or tool execution. Stored stream chunks create no chat spans or usage observations, and synthetic interrupted-tool repairs create no `execute_tool` spans.
+
+## Streaming limitation
+
+Pi does not expose authoritative raw provider stream-item timing. Flue therefore omits time-to-first-chunk and time-per-output-chunk metrics instead of deriving inaccurate values from semantic text/reasoning deltas or recovered chunks.
+
+## Migrate from the observer API
+
+Replace `createOpenTelemetryObserver()` with `createOpenTelemetryInstrumentation()`, register it with `instrument(...)` instead of `observe(...)`, and replace `exportContent` with the global `content` policy. The legacy custom model/tool content attributes are removed rather than emitted alongside the standard fields.
+
+## Unsupported operations
+
+Flue does not emit invented spans for agent creation, planning, embeddings, retrieval, memory operations, remote agent clients, or evaluations. These operations remain absent until Flue exposes a genuine corresponding boundary.
 
 ## Verify
 
-Run a workflow with a model turn and tool call, then confirm span hierarchy, Flue correlation attributes, usage values, and metadata-only defaults in a non-production backend. If you enable content export or root-context resolution, verify those policies separately with representative sensitive data and each supported deployment target.
+Use an in-memory OpenTelemetry exporter in tests to verify hierarchy, names, kinds, status, attributes, metrics, and default content omission. Hosted backend rendering is backend-specific; standards-correct OTel output is the portable contract.

@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { emptyAgentState, reduceAgentEvent } from '../src/agent-reducer.ts';
 
 const base = {
-	v: 1 as const,
+	v: 3 as const,
 	instanceId: 'instance-1',
 	timestamp: '2026-06-12T00:00:00.000Z',
 };
@@ -398,7 +398,7 @@ describe('reduceAgentEvent()', () => {
 			type: 'idle',
 			eventIndex: 10,
 			timestamp: base.timestamp,
-			v: 1,
+			v: 3,
 			instanceId: base.instanceId,
 			submissionId: 'submission-1',
 		});

@@ -174,12 +174,13 @@ async function ensureTables(runner: PostgresRunner): Promise<void> {
 		`);
 		const versionRows = await tx.query(`SELECT value FROM flue_meta WHERE key = 'schema_version'`);
 		const storedVersion = versionRows[0]?.value;
+		const migratingFromV2 = String(storedVersion) === '2' && FLUE_SCHEMA_VERSION === 3;
 		if (storedVersion === undefined || storedVersion === null) {
 			await tx.query(
 				`INSERT INTO flue_meta (key, value) VALUES ('schema_version', $1) ON CONFLICT (key) DO NOTHING`,
 				[String(FLUE_SCHEMA_VERSION)],
 			);
-		} else {
+		} else if (!migratingFromV2) {
 			assertSupportedFlueSchemaVersion(String(storedVersion));
 		}
 
@@ -315,6 +316,8 @@ async function ensureTables(runner: PostgresRunner): Promise<void> {
 				status TEXT NOT NULL,
 				started_at TEXT NOT NULL,
 				payload TEXT,
+				traceparent TEXT,
+				tracestate TEXT,
 				ended_at TEXT,
 				is_error BOOLEAN,
 				duration_ms INTEGER,
@@ -322,6 +325,14 @@ async function ensureTables(runner: PostgresRunner): Promise<void> {
 				error TEXT
 			)
 		`);
+		await tx.query(`ALTER TABLE flue_runs ADD COLUMN IF NOT EXISTS traceparent TEXT`);
+		await tx.query(`ALTER TABLE flue_runs ADD COLUMN IF NOT EXISTS tracestate TEXT`);
+
+		if (migratingFromV2) {
+			await tx.query(`UPDATE flue_meta SET value = $1 WHERE key = 'schema_version'`, [
+				String(FLUE_SCHEMA_VERSION),
+			]);
+		}
 
 		await tx.query(`
 			CREATE INDEX IF NOT EXISTS flue_runs_status_started_idx
@@ -1385,14 +1396,17 @@ class PgRunStore implements RunStore {
 		// Idempotent first-writer-wins: a replayed runId must neither raise a
 		// unique violation nor resurrect a terminal record back to 'active'.
 		await this.runner.query(
-			`INSERT INTO flue_runs (run_id, workflow_name, status, started_at, payload)
-			 VALUES ($1, $2, 'active', $3, $4)
+			`INSERT INTO flue_runs
+			 (run_id, workflow_name, status, started_at, payload, traceparent, tracestate)
+			 VALUES ($1, $2, 'active', $3, $4, $5, $6)
 			 ON CONFLICT (run_id) DO NOTHING`,
 			[
 				input.runId,
 				input.workflowName,
 				input.startedAt,
 				input.input !== undefined ? JSON.stringify(input.input) : null,
+				input.traceCarrier?.traceparent ?? null,
+				input.traceCarrier?.tracestate ?? null,
 			],
 		);
 	}
@@ -1417,7 +1431,7 @@ class PgRunStore implements RunStore {
 	async getRun(runId: string): Promise<RunRecord | null> {
 		const rows = await this.runner.query(
 			`SELECT run_id, workflow_name, status, started_at,
-			        payload, ended_at, is_error, duration_ms, result, error
+			        payload, traceparent, tracestate, ended_at, is_error, duration_ms, result, error
 			 FROM flue_runs WHERE run_id = $1 LIMIT 1`,
 			[runId],
 		);
@@ -1429,6 +1443,14 @@ class PgRunStore implements RunStore {
 			status: row.status as RunStatus,
 			startedAt: String(row.started_at),
 			...(row.payload != null ? { input: JSON.parse(String(row.payload)) } : {}),
+			...(typeof row.traceparent === 'string'
+				? {
+						traceCarrier: {
+							traceparent: row.traceparent,
+							...(typeof row.tracestate === 'string' ? { tracestate: row.tracestate } : {}),
+						},
+					}
+				: {}),
 			...(row.ended_at != null ? { endedAt: String(row.ended_at) } : {}),
 			...(row.is_error != null ? { isError: Boolean(row.is_error) } : {}),
 			...(row.duration_ms != null ? { durationMs: Number(row.duration_ms) } : {}),

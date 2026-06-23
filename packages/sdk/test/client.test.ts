@@ -1,6 +1,11 @@
 import { getEventListeners } from 'node:events';
 import { describe, expect, it } from 'vitest';
-import { type AgentPromptOptions, createFlueClient, FlueApiError } from '../src/index.ts';
+import {
+	type AgentPromptOptions,
+	createFlueClient,
+	FlueApiError,
+	UnsupportedFlueEventVersionError,
+} from '../src/index.ts';
 
 describe('createFlueClient', () => {
 	describe('agents.prompt()', () => {
@@ -54,13 +59,28 @@ describe('createFlueClient', () => {
 	});
 
 	describe('agents.stream()', () => {
+		it('rejects every non-v3 event without compatibility normalization', async () => {
+			for (const version of [1, 2, 4, undefined]) {
+				const client = createFlueClient({
+					baseUrl: 'https://flue.test',
+					fetch: async () => dsJsonResponse([{ type: 'idle', v: version }]),
+				});
+				const iterator = client.agents.stream('agent', 'id', { live: false })[Symbol.asyncIterator]();
+
+				const error = await iterator.next().catch((error: unknown) => error);
+
+				expect(error).toBeInstanceOf(UnsupportedFlueEventVersionError);
+				expect(error).toMatchObject({ received: version, supported: 3 });
+			}
+		});
+
 		it('constructs the correct stream URL from agent name and id', async () => {
 			const urls: string[] = [];
 			const client = createFlueClient({
 				baseUrl: 'https://flue.test/api/',
 				fetch: async (input) => {
 					urls.push(typeof input === 'string' ? input : new Request(input).url);
-					return dsJsonResponse([{ type: 'idle' }]);
+					return dsJsonResponse([{ type: 'idle', v: 3 }]);
 				},
 			});
 
@@ -72,7 +92,7 @@ describe('createFlueClient', () => {
 			for await (const event of eventStream) {
 				events.push(event);
 			}
-			expect(events).toEqual([{ type: 'idle' }]);
+			expect(events).toEqual([{ type: 'idle', v: 3 }]);
 			expect(urls.length).toBeGreaterThanOrEqual(1);
 			const [url] = urls;
 			if (!url) throw new Error('Expected a stream request URL.');
@@ -191,7 +211,7 @@ describe('createFlueClient', () => {
 			const client = createFlueClient({
 				baseUrl: 'https://flue.test',
 				fetch: async () =>
-					dsJsonResponse([{ type: 'agent_start' }, { type: 'turn_start' }, { type: 'idle' }]),
+					dsJsonResponse([{ type: 'agent_start' }, { type: 'turn_start' }, { type: 'idle', v: 3 }]),
 			});
 
 			// The async-iterator protocol permits issuing next() before the
@@ -207,9 +227,9 @@ describe('createFlueClient', () => {
 			]);
 
 			expect(results).toEqual([
-				{ value: { type: 'agent_start' }, done: false },
-				{ value: { type: 'turn_start' }, done: false },
-				{ value: { type: 'idle' }, done: false },
+				{ value: { type: 'agent_start', v: 3 }, done: false },
+				{ value: { type: 'turn_start', v: 3 }, done: false },
+				{ value: { type: 'idle', v: 3 }, done: false },
 				{ value: undefined, done: true },
 			]);
 		});
@@ -241,7 +261,7 @@ describe('createFlueClient', () => {
 							nextOffset: '0000000000000000_0000000000000002',
 						});
 					}
-					return dsJsonResponse([{ type: 'idle' }], {
+					return dsJsonResponse([{ type: 'idle', v: 3 }], {
 						closed: true,
 						nextOffset: '0000000000000000_0000000000000003',
 					});
@@ -780,5 +800,12 @@ function dsJsonResponse(
 	if (opts.closed) {
 		headers['stream-closed'] = 'true';
 	}
-	return new Response(JSON.stringify(events), { status: 200, headers });
+	return new Response(
+		JSON.stringify(
+			events.map((event) =>
+				event && typeof event === 'object' && !('v' in event) ? { ...event, v: 3 } : event,
+			),
+		),
+		{ status: 200, headers },
+	);
 }

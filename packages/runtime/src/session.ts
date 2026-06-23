@@ -16,6 +16,7 @@ import type {
 	ImageContent,
 	Message,
 	Model,
+	SimpleStreamOptions,
 	ToolResultMessage,
 	UserMessage,
 } from '@earendil-works/pi-ai';
@@ -60,7 +61,12 @@ import {
 	DelegationDepthExceededError,
 	ToolNameConflictError,
 } from './errors.ts';
-import { IMAGE_DATA_OMITTED, redactEventImages } from './event-redaction.ts';
+import {
+	IMAGE_DATA_OMITTED,
+	redactEventImages,
+	redactObservationDetailImages,
+} from './event-redaction.ts';
+import { interceptExecution, type FlueExecutionContext } from './execution-interceptor.ts';
 import { assertImagesWithinLimit } from './persisted-images.ts';
 import {
 	buildPackagedSkillPrompt,
@@ -73,6 +79,7 @@ import {
 	GIVE_UP_TOOL_NAME,
 	type ResultToolBundle,
 	ResultUnavailableError,
+	prepareResultTool,
 } from './result.ts';
 import type {
 	AgentSubmissionInput,
@@ -85,7 +92,11 @@ import type {
 import { agentSubmissionDispatchInput } from './runtime/agent-submissions.ts';
 import type { DispatchInput } from './runtime/dispatch-queue.ts';
 import { generateOperationId, generateTurnId } from './runtime/ids.ts';
-import { getRegisteredApiKey, getRegisteredStoreResponses } from './runtime/providers.ts';
+import {
+	getProviderTelemetry,
+	getRegisteredApiKey,
+	getRegisteredStoreResponses,
+} from './runtime/providers.ts';
 import { reconstructInterruptedStream, StreamChunkWriter } from './runtime/stream-chunks.ts';
 import { createFlueFs } from './sandbox.ts';
 import { valibotToJsonSchema } from './schema.ts';
@@ -105,7 +116,7 @@ import {
 	isRetryableModelError,
 } from './submission-state.ts';
 import { getPreparedToolAdapter } from './tool-adapter.ts';
-import { assertToolDefinition, validateAndRunTool } from './tool.ts';
+import { assertToolDefinition, parseToolInput, validateToolOutput } from './tool.ts';
 import type {
 	AgentConfig,
 	AgentProfile,
@@ -115,10 +126,12 @@ import type {
 	FlueEvent,
 	FlueEventInput,
 	FlueEventInputCallback,
+	FlueObservationDetail,
 	FlueFs,
 	FlueHarness,
 	FlueSession,
 	MessageEntry,
+	ModelRequestInfo,
 	PackagedSkillDirectory,
 	PromptModel,
 	PromptOptions,
@@ -147,13 +160,39 @@ const MAX_DELEGATION_DEPTH = 4;
 const MAX_TRANSIENT_MODEL_RETRIES = 3;
 const TRANSIENT_MODEL_RETRY_BASE_DELAY_MS = 2_000;
 
-type TurnInputMessage = Extract<FlueEvent, { type: 'turn_request' }>['input']['messages'][number];
+type TurnInputMessage = Extract<FlueEvent, { type: 'turn_request' }>['request']['input']['messages'][number];
 type TurnInputTool = NonNullable<
-	Extract<FlueEvent, { type: 'turn_request' }>['input']['tools']
+	Extract<FlueEvent, { type: 'turn_request' }>['request']['input']['tools']
 >[number];
-type TurnOutput = NonNullable<Extract<FlueEvent, { type: 'turn' }>['output']>;
+type TurnOutput = NonNullable<Extract<FlueEvent, { type: 'turn' }>['response']['output']>;
 type ModelToolSource = 'builtin' | 'adapter' | 'framework' | 'custom' | 'action' | 'result';
 type ModelToolGroup = { source: ModelToolSource; tools: AgentTool<any>[] };
+type ToolTelemetry = {
+	origin: 'model' | 'caller' | 'framework' | 'adapter';
+	toolType: 'function' | 'extension' | 'datastore';
+	description?: string;
+};
+type ActiveToolCall = {
+	startedAt: number;
+	toolName: string;
+	telemetry: ToolTelemetry;
+	startEmitted: boolean;
+	error?: unknown;
+	effectiveResult?: unknown;
+	effectiveResultCaptured?: boolean;
+};
+type PreparedToolExecution = {
+	args: unknown;
+	run: () => Promise<AgentToolResult<any>>;
+	result?(value: AgentToolResult<any>): unknown;
+};
+
+function toolResultText(value: AgentToolResult<any>): unknown {
+	const content = value.content;
+	if (content.length === 1 && content[0]?.type === 'text') return content[0].text;
+	return content;
+}
+
 type ProviderTextOrImageContent = Exclude<UserMessage['content'], string>[number];
 type ProviderContentBlock =
 	| ProviderTextOrImageContent
@@ -241,6 +280,8 @@ interface CreateActionHarnessOptions {
 	invocationId: string;
 	depth: number;
 	signal?: AbortSignal;
+	executionContext: FlueExecutionContext;
+	eventCallback?: FlueEventInputCallback;
 	config: AgentConfig;
 	env: SessionEnv;
 	tools: ToolDefinition[];
@@ -259,6 +300,7 @@ type OperationKind = 'prompt' | 'skill' | 'task' | 'shell' | 'compact';
 interface SessionInitOptions {
 	name: string;
 	storageKey: string;
+	conversationId: string;
 	affinityKey: string;
 	config: AgentConfig;
 	env: SessionEnv;
@@ -274,6 +316,7 @@ interface SessionInitOptions {
 	scopeSignal?: AbortSignal;
 	onDelete?: () => void;
 	submissionStore?: AgentSubmissionStore;
+	executionContext?: FlueExecutionContext;
 }
 
 interface CallOverrides {
@@ -303,6 +346,7 @@ interface InternalTaskResult<T> {
 interface InternalTaskOptions<S extends v.GenericSchema | undefined> extends TaskOptions<S> {
 	inheritedModel?: string;
 	inheritedThinkingLevel?: ThinkingLevel;
+	toolCallId?: string;
 }
 
 function getRegisteredPackagedSkills(
@@ -369,6 +413,63 @@ function sortJsonLike(value: unknown): unknown {
 	return sorted;
 }
 
+function wrapProviderStream<T extends AsyncIterable<unknown> & { result(): Promise<unknown> }>(
+	stream: T,
+	operation: { type: 'model'; turnId: string },
+	executionContext: FlueExecutionContext,
+): T {
+	return {
+		[Symbol.asyncIterator]() {
+			const iterator = stream[Symbol.asyncIterator]();
+			return {
+				next: () => interceptExecution(operation, executionContext, () => iterator.next()),
+				return: iterator.return
+					? () => interceptExecution(operation, executionContext, () => iterator.return!())
+					: undefined,
+				throw: iterator.throw
+					? (error: unknown) => interceptExecution(operation, executionContext, () => iterator.throw!(error))
+					: undefined,
+			};
+		},
+		result() {
+			return interceptExecution(operation, executionContext, () => stream.result());
+		},
+	} as T;
+}
+
+function parseProviderEndpoint(value: string | undefined): { address: string; port?: number } | undefined {
+	if (!value) return undefined;
+	try {
+		const url = new URL(value);
+		return {
+			address: url.hostname,
+			...(url.port ? { port: Number(url.port) } : {}),
+		};
+	} catch {
+		return undefined;
+	}
+}
+
+function classifyError(error: unknown): { type: string; name?: string; code?: string; message?: string } {
+	if (error instanceof DOMException && error.name === 'AbortError') {
+		return { type: 'AbortError', name: error.name, message: error.message };
+	}
+	if (error && typeof error === 'object') {
+		const value = error as { name?: unknown; code?: unknown; type?: unknown; message?: unknown };
+		const name = typeof value.name === 'string' ? value.name : undefined;
+		const code = typeof value.code === 'string' ? value.code : undefined;
+		const type = typeof value.type === 'string' ? value.type : code ?? name ?? '_OTHER';
+		return {
+			type,
+			...(name === undefined ? {} : { name }),
+			...(code === undefined ? {} : { code }),
+			...(typeof value.message === 'string' ? { message: value.message } : {}),
+		};
+	}
+	if (typeof error === 'string') return { type: '_OTHER', message: error };
+	return { type: '_OTHER' };
+}
+
 function modelRetryDelayMs(attempt: number): number {
 	const baseDelay = TRANSIENT_MODEL_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1);
 	return Math.round(baseDelay * (0.75 + Math.random() * 0.25));
@@ -392,6 +493,7 @@ function sleepUntilRetry(delayMs: number, signal: AbortSignal): Promise<void> {
 
 export class Session implements FlueSession, AgentSubmissionSession {
 	readonly name: string;
+	readonly conversationId: string;
 	readonly fs: FlueFs;
 	metadata: Record<string, any>;
 
@@ -413,12 +515,15 @@ export class Session implements FlueSession, AgentSubmissionSession {
 	private deletionPromise: Promise<void> | undefined;
 	private activeOperation: OperationKind | undefined;
 	private activeOperationId: string | undefined;
+	private activeAgentInput: FlueObservationDetail['agentInput'];
 	private activeOperationSettlement: Promise<void> = Promise.resolve();
 	private resolveActiveOperationSettlement: (() => void) | undefined;
 	private closePromise: Promise<void> | undefined;
-	private toolStartTimes = new Map<string, number>();
-	private turnStartTime: number | undefined;
+	private activeToolCalls = new Map<string, ActiveToolCall>();
+	private modelToolTelemetry = new WeakMap<AgentTool<any>, ToolTelemetry>();
 	private activeTurnId: string | undefined;
+	private modelRequests = new Map<string, ModelRequestInfo>();
+	private modelRequestStartTimes = new Map<string, number>();
 	private activeTasks = new Set<Session>();
 	private activeActionHarnesses = new Set<ActionHarness>();
 	private delegationDepth: number;
@@ -442,6 +547,7 @@ export class Session implements FlueSession, AgentSubmissionSession {
 	private staleStreamChunkKeys = new Set<string>();
 	private activeSubmissionId: string | undefined;
 	private activeSubmissionAttemptId: string | undefined;
+	private executionIdentity: FlueExecutionContext;
 
 	private emitTurnRequestAndStream: StreamFn = async (model, context, options) => {
 		if (this.activeTurnId === undefined) this.activeTurnId = generateTurnId();
@@ -465,10 +571,32 @@ export class Session implements FlueSession, AgentSubmissionSession {
 			this.activeStreamChunkWriter?.cancel();
 			this.activeStreamChunkWriter = undefined;
 		}
-		this.emitTurnRequest(turnId, 'agent', model, context, options?.reasoning);
+		this.emitTurnRequest(turnId, 'agent', model, context, options);
 		await this.activeJournalCallbacks?.providerStarted?.(state);
-		return streamSimple(model, context, options);
+		const operation = { type: 'model' as const, turnId };
+		const executionContext = this.executionContext({ operationId: state.operationId, turnId });
+		return interceptExecution(operation, executionContext, async () =>
+			wrapProviderStream(streamSimple(model, context, options), operation, executionContext),
+		);
 	};
+
+	private modelRequestInfo(model: Model<any> | undefined, options?: SimpleStreamOptions): ModelRequestInfo {
+		if (!model) throw new Error('[flue] Missing configured model for turn telemetry.');
+		const providerTelemetry = getProviderTelemetry(model.provider);
+		const parsedEndpoint = parseProviderEndpoint(model.baseUrl);
+		return {
+			providerId: model.provider,
+			providerName: providerTelemetry?.providerName ?? model.provider,
+			requestedModel: model.id,
+			api: model.api,
+			serverAddress: providerTelemetry?.serverAddress ?? parsedEndpoint?.address,
+			serverPort: providerTelemetry?.serverPort ?? parsedEndpoint?.port,
+			reasoningLevel: options?.reasoning,
+			maxTokens: options?.maxTokens,
+			temperature: options?.temperature,
+			...(this.history.getLatestCompaction() ? { contextCompacted: true as const } : {}),
+		};
+	}
 
 	private emitTurnRequest(
 		turnId: string,
@@ -479,7 +607,7 @@ export class Session implements FlueSession, AgentSubmissionSession {
 			messages: Message[];
 			tools?: Array<{ name: string; description: string; parameters: unknown }>;
 		},
-		reasoning: string | undefined,
+		options: SimpleStreamOptions | undefined,
 	): void {
 		const tools = context.tools?.map(
 			(tool): TurnInputTool => ({
@@ -488,24 +616,56 @@ export class Session implements FlueSession, AgentSubmissionSession {
 				parameters: tool.parameters,
 			}),
 		);
+		const request = this.modelRequestInfo(model, options);
+		this.modelRequests.set(turnId, request);
+		this.modelRequestStartTimes.set(turnId, Date.now());
 		this.emit({
 			type: 'turn_request',
 			turnId,
 			purpose,
-			model: model.id,
-			provider: model.provider,
-			api: model.api,
-			input: {
-				systemPrompt: context.systemPrompt,
-				messages: context.messages.map(toTurnMessage),
-				tools,
+			request: {
+				...request,
+				input: {
+					systemPrompt: context.systemPrompt,
+					messages: context.messages.map(toTurnMessage),
+					tools,
+				},
 			},
-			reasoning,
+		});
+	}
+
+	private emitTurn(
+		turnId: string,
+		purpose: 'agent' | 'compaction' | 'compaction_prefix',
+		response: AssistantMessage | undefined,
+		request: ModelRequestInfo,
+		error?: unknown,
+	): void {
+		const output = response ? (toTurnMessage(response) as TurnOutput) : undefined;
+		this.emit({
+			type: 'turn',
+			turnId,
+			purpose,
+			durationMs: durationSince(this.modelRequestStartTimes.get(turnId)),
+			request,
+			response: {
+				responseId: response?.responseId,
+				responseModel: response?.responseModel,
+				output,
+				usage: fromProviderUsage(response?.usage),
+				finishReason: response?.stopReason,
+				...(error !== undefined || response?.errorMessage
+					? { error: classifyError(error ?? response?.errorMessage) }
+					: {}),
+			},
+			isError:
+				error !== undefined || response?.stopReason === 'error' || response?.stopReason === 'aborted',
 		});
 	}
 
 	constructor(options: SessionInitOptions) {
 		this.name = options.name;
+		this.conversationId = options.conversationId;
 		this.storageKey = options.storageKey;
 		this.affinityKey = options.affinityKey;
 		this.config = options.config;
@@ -521,6 +681,7 @@ export class Session implements FlueSession, AgentSubmissionSession {
 		this.scopeSignal = options.scopeSignal;
 		this.onDelete = options.onDelete;
 		this.submissionStore = options.submissionStore;
+		this.executionIdentity = options.executionContext ?? {};
 
 		this.metadata = options.existingData?.metadata ?? {};
 		this.childSessions = options.existingData?.childSessions ?? [];
@@ -561,7 +722,6 @@ export class Session implements FlueSession, AgentSubmissionSession {
 					this.emit({ type: 'agent_start' });
 					break;
 				case 'turn_start':
-					this.turnStartTime = Date.now();
 					this.activeTurnId ??= generateTurnId();
 					this.activeTurnCanCommitJournal = false;
 					this.emit({ type: 'turn_start', turnId: this.activeTurnId, purpose: 'agent' });
@@ -590,6 +750,10 @@ export class Session implements FlueSession, AgentSubmissionSession {
 					const turnId = this.activeTurnId ?? generateTurnId();
 					this.activeTurnId = turnId;
 					if (event.message.role === 'assistant') {
+						const request = this.modelRequests.get(turnId) ?? this.modelRequestInfo(this.agentLoop.state.model);
+						this.emitTurn(turnId, 'agent', event.message, request);
+						this.modelRequests.delete(turnId);
+						this.modelRequestStartTimes.delete(turnId);
 						const toolCalls = event.message.content.filter(
 							(content) => content.type === 'toolCall',
 						);
@@ -607,28 +771,55 @@ export class Session implements FlueSession, AgentSubmissionSession {
 					this.emit({ type: 'message_end', message: event.message, turnId });
 					break;
 				}
-				case 'tool_execution_start':
-					this.toolStartTimes.set(event.toolCallId, Date.now());
-					this.emit({
-						type: 'tool_start',
+				case 'tool_execution_start': {
+					const tool = this.agentLoop.state.tools.find((candidate) => candidate.name === event.toolName);
+					this.activeToolCalls.set(event.toolCallId, {
+						startedAt: Date.now(),
 						toolName: event.toolName,
-						toolCallId: event.toolCallId,
-						args: event.args,
+						telemetry: tool
+							? (this.modelToolTelemetry.get(tool) ?? { origin: 'model', toolType: 'function' })
+							: { origin: 'model', toolType: 'function' },
+						startEmitted: false,
 					});
 					break;
+				}
 				case 'tool_execution_update':
 					break;
-				case 'tool_execution_end':
-					this.emit({
-						type: 'tool',
+				case 'tool_execution_end': {
+					const call = this.activeToolCalls.get(event.toolCallId) ?? {
+						startedAt: Date.now(),
 						toolName: event.toolName,
-						toolCallId: event.toolCallId,
-						isError: event.isError,
-						result: event.result,
-						durationMs: durationSince(this.toolStartTimes.get(event.toolCallId)),
-					});
-					this.toolStartTimes.delete(event.toolCallId);
+						telemetry: { origin: 'model' as const, toolType: 'function' as const },
+						startEmitted: false,
+					};
+					if (!call.startEmitted) {
+						this.emit(
+							{
+								type: 'tool_start',
+								toolName: call.toolName,
+								toolCallId: event.toolCallId,
+							},
+							call.telemetry,
+						);
+					}
+					this.emit(
+						{
+							type: 'tool',
+							toolName: event.toolName,
+							toolCallId: event.toolCallId,
+							isError: event.isError,
+							result: event.result,
+							durationMs: durationSince(call.startedAt),
+						},
+						{
+							...call.telemetry,
+							...(call.effectiveResultCaptured ? { effectiveResult: call.effectiveResult } : {}),
+							...(event.isError ? { errorInfo: classifyError(call.error ?? event.result) } : {}),
+						},
+					);
+					this.activeToolCalls.delete(event.toolCallId);
 					break;
+				}
 				case 'turn_end': {
 					const turnId = this.activeTurnId ?? generateTurnId();
 					await this.activeStreamChunkWriter?.flush();
@@ -656,23 +847,6 @@ export class Session implements FlueSession, AgentSubmissionSession {
 						message: event.message,
 						toolResults: event.toolResults,
 					});
-					const output = assistant ? (toTurnMessage(assistant) as TurnOutput) : undefined;
-					const model = this.agentLoop.state.model;
-					this.emit({
-						type: 'turn',
-						turnId,
-						purpose: 'agent',
-						durationMs: durationSince(this.turnStartTime),
-						model: model?.id,
-						provider: model?.provider,
-						api: model?.api,
-						output,
-						usage: fromProviderUsage(assistant?.usage),
-						stopReason: assistant?.stopReason,
-						isError: assistant?.stopReason === 'error' || assistant?.stopReason === 'aborted',
-						error: assistant?.errorMessage,
-					});
-					this.turnStartTime = undefined;
 					this.activeTurnId = undefined;
 					await this.activeStreamChunkWriter?.close();
 					this.activeStreamChunkWriter = undefined;
@@ -682,7 +856,6 @@ export class Session implements FlueSession, AgentSubmissionSession {
 					await this.activeStreamChunkWriter?.flush();
 					await this.checkpointHarnessMessages();
 					this.emit({ type: 'agent_end', messages: event.messages });
-					this.turnStartTime = undefined;
 					this.activeTurnId = undefined;
 					await this.activeStreamChunkWriter?.close();
 					this.activeStreamChunkWriter = undefined;
@@ -1039,10 +1212,11 @@ export class Session implements FlueSession, AgentSubmissionSession {
 				// envelope without it.
 				execShellWithEvents(
 					this.env,
-					(event) => this.emit(event),
+					(event, detail) => this.emit(event, detail),
 					command,
 					options,
 					this.scopeSignal ? AbortSignal.any([signal, this.scopeSignal]) : signal,
+					this.executionContext({ operationId: this.activeOperationId }),
 					(toolCallId, args, result, isError) =>
 						this.appendShellTriple(toolCallId, args, result, isError),
 				),
@@ -1191,11 +1365,94 @@ export class Session implements FlueSession, AgentSubmissionSession {
 
 	// ─── Custom Tools ───────────────────────────────────────────────────────
 
+	private toolTelemetry(source: ModelToolSource, tool: AgentTool<any>): ToolTelemetry {
+		return {
+			origin:
+				source === 'adapter'
+					? 'adapter'
+					: source === 'framework' || source === 'result'
+						? 'framework'
+						: 'model',
+			toolType: source === 'action' ? 'extension' : 'function',
+			description: tool.description,
+		};
+	}
+
+	private wrapModelTool(
+		tool: AgentTool<any>,
+		source: ModelToolSource,
+		prepare: (
+			toolCallId: string,
+			params: unknown,
+			signal?: AbortSignal,
+		) => PreparedToolExecution = (toolCallId, params, signal) => ({
+			args: params,
+			run: () => tool.execute(toolCallId, params, signal),
+			result: toolResultText,
+		}),
+	): AgentTool<any> {
+		const telemetry = this.toolTelemetry(source, tool);
+		const wrapped: AgentTool<any> = {
+			...tool,
+			execute: async (toolCallId, params, signal) => {
+				let prepared: PreparedToolExecution;
+				try {
+					if (signal?.aborted) throw abortErrorFor(signal);
+					prepared = prepare(toolCallId, params, signal);
+				} catch (error) {
+					const call = this.activeToolCalls.get(toolCallId) ?? {
+						startedAt: Date.now(),
+						toolName: tool.name,
+						telemetry,
+						startEmitted: false,
+					};
+					call.error = error;
+					if (!call.startEmitted) {
+						this.emit({ type: 'tool_start', toolName: tool.name, toolCallId }, telemetry);
+						call.startEmitted = true;
+					}
+					this.activeToolCalls.set(toolCallId, call);
+					throw error;
+				}
+				const call = this.activeToolCalls.get(toolCallId) ?? {
+					startedAt: Date.now(),
+					toolName: tool.name,
+					telemetry,
+					startEmitted: false,
+				};
+				call.telemetry = telemetry;
+				this.activeToolCalls.set(toolCallId, call);
+				if (!call.startEmitted) {
+					this.emit(
+						{ type: 'tool_start', toolName: tool.name, toolCallId },
+						{ ...telemetry, args: prepared.args },
+					);
+					call.startEmitted = true;
+				}
+				try {
+					const result = await interceptExecution(
+						{ type: 'tool', toolCallId, toolName: tool.name },
+						this.executionContext(),
+						prepared.run,
+					);
+					call.effectiveResult = prepared.result ? prepared.result(result) : result;
+					call.effectiveResultCaptured = true;
+					return result;
+				} catch (error) {
+					call.error = error;
+					throw error;
+				}
+			},
+		};
+		this.modelToolTelemetry.set(wrapped, telemetry);
+		return wrapped;
+	}
+
 	private createCustomTools(tools: ToolDefinition[]): AgentTool<any>[] {
 		return tools.map((toolDef): AgentTool<any> => {
 			const preparedToolAdapter = getPreparedToolAdapter(toolDef);
 			if (!preparedToolAdapter) assertToolDefinition(toolDef, `Tool "${toolDef.name}"`);
-			return {
+			const tool: AgentTool<any> = {
 				name: toolDef.name,
 				label: toolDef.name,
 				description: toolDef.description,
@@ -1203,61 +1460,90 @@ export class Session implements FlueSession, AgentSubmissionSession {
 					(toolDef.input
 						? valibotToJsonSchema(toolDef.input)
 						: { type: 'object', properties: {}, additionalProperties: false })) as any,
-				async execute(_toolCallId: string, params: unknown, signal?: AbortSignal) {
-					if (signal?.aborted) throw abortErrorFor(signal);
-					if (preparedToolAdapter) {
-						const text = await preparedToolAdapter.execute(
-							params as Record<string, unknown>,
-							signal,
-						);
-						return {
-							content: [{ type: 'text' as const, text }],
-							details: { customTool: toolDef.name },
-						};
-					}
-					const output = await validateAndRunTool(toolDef, params, signal);
-					return {
-						content: [
-							{ type: 'text' as const, text: output === undefined ? 'null' : JSON.stringify(output) },
-						],
-						details: { customTool: toolDef.name, output },
-					};
+				execute: async () => {
+					throw new Error('unreachable');
 				},
 			};
+			return this.wrapModelTool(tool, 'custom', (_toolCallId, params, signal) => {
+				if (preparedToolAdapter) {
+					return {
+						args: params,
+						run: async () => ({
+							content: [
+								{
+									type: 'text' as const,
+									text: await preparedToolAdapter.execute(params as Record<string, unknown>, signal),
+								},
+							],
+							details: { customTool: toolDef.name },
+						}),
+						result: toolResultText,
+					};
+				}
+				const parsed = parseToolInput(toolDef, params, signal);
+				return {
+					args: parsed.input,
+					run: async () => {
+						const output = validateToolOutput(toolDef, await toolDef.run(parsed.context));
+						return {
+							content: [
+								{
+									type: 'text' as const,
+									text: output === undefined ? 'null' : JSON.stringify(output),
+								},
+							],
+							details: { customTool: toolDef.name, output },
+						};
+					},
+					result: (value) => (value.details as { output?: unknown }).output,
+				};
+			});
 		});
 	}
 
 	private createActionTools(): AgentTool<any>[] {
-		return this.actions.map((action) => ({
-			name: action.name,
-			label: action.name,
-			description: action.description,
-			parameters: (action.input ? valibotToJsonSchema(action.input) : {
-				type: 'object',
-				properties: {},
-				additionalProperties: false,
-			}) as any,
-			execute: (toolCallId: string, params: unknown, signal?: AbortSignal) =>
-				this.executeActionTool(action, toolCallId, params, signal),
-		}));
+		return this.actions.map((action) => {
+			const tool: AgentTool<any> = {
+				name: action.name,
+				label: action.name,
+				description: action.description,
+				parameters: (action.input ? valibotToJsonSchema(action.input) : {
+					type: 'object',
+					properties: {},
+					additionalProperties: false,
+				}) as any,
+				execute: async () => {
+					throw new Error('unreachable');
+				},
+			};
+			return this.wrapModelTool(tool, 'action', (toolCallId, input, signal) => {
+				const parsedInput = parseActionInput(action, action.input ? input : undefined);
+				return {
+					args: parsedInput.declared ? parsedInput.value : undefined,
+					run: () => this.executeActionTool(action, toolCallId, parsedInput, signal),
+					result: (value) => (value.details as { output?: unknown }).output,
+				};
+			});
+		});
 	}
 
 	private async executeActionTool(
 		action: ActionDefinition,
 		toolCallId: string,
-		input: unknown,
+		parsedInput: ReturnType<typeof parseActionInput>,
 		signal?: AbortSignal,
 	): Promise<AgentToolResult<any>> {
 		if (!this.createActionHarness) throw new Error('[flue] This session cannot execute Actions.');
 		if (this.delegationDepth >= MAX_DELEGATION_DEPTH) {
 			throw new DelegationDepthExceededError({ maxDepth: MAX_DELEGATION_DEPTH });
 		}
-		const parsedInput = parseActionInput(action, action.input ? input : undefined);
 		const invocationId = crypto.randomUUID();
 		const harness = this.createActionHarness({
 			invocationId,
 			depth: this.delegationDepth + 1,
 			signal,
+			executionContext: this.executionIdentity,
+			eventCallback: this.eventCallback,
 			config: this.config,
 			env: this.env,
 			tools: this.agentTools,
@@ -1361,7 +1647,22 @@ export class Session implements FlueSession, AgentSubmissionSession {
 				seen.set(tool.name, group.source);
 			}
 		}
-		return groups.flatMap((group) => group.tools);
+		return groups.flatMap((group) =>
+			group.source === 'custom' || group.source === 'action'
+				? group.tools
+				: group.tools.map((tool) =>
+					group.source === 'result'
+						? this.wrapModelTool(tool, group.source, (toolCallId, params, signal) => {
+							if (signal?.aborted) throw abortErrorFor(signal);
+							return prepareResultTool(tool, params) ?? {
+								args: params,
+								run: () => tool.execute(toolCallId, params, signal),
+								result: toolResultText,
+							};
+						})
+						: this.wrapModelTool(tool, group.source),
+				),
+		);
 	}
 
 	/** Build built-in tools from the sandbox adapter or the framework defaults. */
@@ -1372,8 +1673,8 @@ export class Session implements FlueSession, AgentSubmissionSession {
 		thinkingLevel?: ThinkingLevel,
 		activePackagedSkills?: Record<string, PackagedSkillDirectory>,
 	): ModelToolGroup[] {
-		const runTask = (params: TaskToolParams, signal?: AbortSignal) =>
-			this.runTaskForTool(params, tools, model, thinkingLevel, signal);
+		const runTask = (params: TaskToolParams, signal?: AbortSignal, toolCallId?: string) =>
+			this.runTaskForTool(params, tools, model, thinkingLevel, signal, toolCallId);
 		const packagedSkills = {
 			...getRegisteredPackagedSkills(this.config.skills),
 			...activePackagedSkills,
@@ -1486,6 +1787,7 @@ export class Session implements FlueSession, AgentSubmissionSession {
 		inheritedModel: string | undefined,
 		inheritedThinkingLevel: ThinkingLevel | undefined,
 		signal?: AbortSignal,
+		toolCallId?: string,
 	): Promise<AgentToolResult<TaskToolResultDetails>> {
 		const attachmentIds = [
 			...new Set((params.attachments ?? []).map((attachment) => attachment.id)),
@@ -1503,6 +1805,7 @@ export class Session implements FlueSession, AgentSubmissionSession {
 				// tools flow only into agent-less tasks, never into a selected
 				// profile's session.
 				tools: params.agent ? undefined : tools,
+				toolCallId,
 			},
 			signal,
 		);
@@ -1545,14 +1848,6 @@ export class Session implements FlueSession, AgentSubmissionSession {
 		let child: Session | undefined;
 		let abortListener: (() => void) | undefined;
 
-		this.emit({
-			type: 'task_start',
-			taskId,
-			prompt: text,
-			agent: taskAgent?.name,
-			cwd: options?.cwd,
-			parentSession: this.name,
-		});
 		const taskStartMs = Date.now();
 
 		try {
@@ -1567,6 +1862,24 @@ export class Session implements FlueSession, AgentSubmissionSession {
 			await this.recordTaskSession(child.name, taskId);
 			await child.save();
 			this.activeTasks.add(child);
+			this.emit({
+				type: 'task_start',
+				taskId,
+				prompt: text,
+				agent: taskAgent?.name,
+				cwd: options?.cwd,
+				parentSession: this.name,
+				session: child.name,
+				conversationId: child.conversationId,
+			}, {
+				agentInput: {
+					text: buildPromptText(text, options?.result),
+					...(options?.images?.length
+						? { images: options.images.map((image) => ({ mimeType: image.mimeType })) }
+						: {}),
+				},
+				...(options?.toolCallId ? { toolCallId: options.toolCallId } : {}),
+			});
 
 			// Aborts during sandbox bring-up — child.prompt's own
 			// runOperation handles the in-flight case.
@@ -1588,7 +1901,16 @@ export class Session implements FlueSession, AgentSubmissionSession {
 			};
 			if (schema) childOptions.result = schema;
 
-			const output: any = await child.prompt(text, childOptions as any);
+			const taskChild = child;
+			const output: any = await interceptExecution(
+				{ type: 'task', taskId },
+				this.executionContext({
+					conversationId: taskChild.conversationId,
+					session: taskChild.name,
+					taskId,
+				}),
+				async () => taskChild.prompt(text, childOptions as any),
+			);
 			const taskResult: InternalTaskResult<any> = {
 				output,
 				text: typeof output?.text === 'string' ? output.text : child.getAssistantText(),
@@ -1606,7 +1928,9 @@ export class Session implements FlueSession, AgentSubmissionSession {
 				result: taskResult.text,
 				durationMs: durationSince(taskStartMs),
 				parentSession: this.name,
-			});
+				session: child.name,
+				conversationId: child.conversationId,
+			}, { agentOutput: child.agentInvocationOutput(output) });
 			return taskResult;
 		} catch (error) {
 			this.emit({
@@ -1617,7 +1941,8 @@ export class Session implements FlueSession, AgentSubmissionSession {
 				result: getErrorMessage(error),
 				durationMs: durationSince(taskStartMs),
 				parentSession: this.name,
-			});
+				...(child ? { session: child.name, conversationId: child.conversationId } : {}),
+			}, { errorInfo: classifyError(error) });
 			throw error;
 		} finally {
 			if (signal && abortListener) signal.removeEventListener('abort', abortListener);
@@ -1659,7 +1984,15 @@ export class Session implements FlueSession, AgentSubmissionSession {
 			operationSignal?.addEventListener('abort', onAbort, { once: true });
 
 			try {
-				const result = await fn();
+				const execute = () => fn();
+				const result =
+					operation === 'prompt' || operation === 'skill'
+						? await interceptExecution(
+								{ type: 'agent', operationId, operationKind: operation },
+								this.executionContext({ operationId }),
+								execute,
+							)
+						: await execute();
 				this.emit({
 					type: 'operation',
 					operationId,
@@ -1668,7 +2001,9 @@ export class Session implements FlueSession, AgentSubmissionSession {
 					isError: false,
 					result,
 					usage: usageFromResult(result),
-				});
+				}, operation === 'prompt' || operation === 'skill'
+					? { agentInput: this.activeAgentInput, agentOutput: this.agentInvocationOutput(result) }
+					: undefined);
 				return result;
 			} catch (error) {
 				// Normalize post-abort fallout to a single AbortError for callers.
@@ -1680,12 +2015,15 @@ export class Session implements FlueSession, AgentSubmissionSession {
 					durationMs: durationSince(startedAt),
 					isError: true,
 					error: serializeError(surfaced),
-				});
+				}, operation === 'prompt' || operation === 'skill'
+					? { agentInput: this.activeAgentInput, errorInfo: classifyError(surfaced) }
+					: undefined);
 				throw surfaced;
 			} finally {
 				operationSignal?.removeEventListener('abort', onAbort);
 				this.emit({ type: 'idle' });
 				this.activeOperationId = undefined;
+				this.activeAgentInput = undefined;
 			}
 		});
 	}
@@ -1708,16 +2046,28 @@ export class Session implements FlueSession, AgentSubmissionSession {
 		}
 	}
 
-	private emit(event: FlueEventInput): void {
+	private executionContext(overrides: Partial<FlueExecutionContext> = {}): FlueExecutionContext {
+		return {
+			...this.executionIdentity,
+			conversationId: this.conversationId,
+			session: this.name,
+			...(this.activeOperationId ? { operationId: this.activeOperationId } : {}),
+			...(this.activeTurnId ? { turnId: this.activeTurnId } : {}),
+			...overrides,
+		};
+	}
+
+	private emit(event: FlueEventInput, observation?: FlueObservationDetail): void {
 		const decorated = {
 			...redactEventImages(event),
+			conversationId: event.conversationId ?? this.conversationId,
 			session: event.session ?? this.name,
 		};
 		const operationId = event.operationId ?? this.activeOperationId;
 		if (operationId !== undefined) decorated.operationId = operationId;
 		const turnId = event.turnId ?? this.activeTurnId;
 		if (turnId !== undefined) decorated.turnId = turnId;
-		this.eventCallback?.(decorated);
+		this.eventCallback?.(decorated, redactObservationDetailImages(observation));
 	}
 
 	private assertActive(): void {
@@ -1844,6 +2194,7 @@ export class Session implements FlueSession, AgentSubmissionSession {
 		const result = this.pendingSave.then(async () => {
 			const now = new Date().toISOString();
 			const data = this.history.toData(
+				this.conversationId,
 				this.affinityKey,
 				this.childSessions,
 				this.metadata,
@@ -2118,29 +2469,22 @@ export class Session implements FlueSession, AgentSubmissionSession {
 				this.compactionAbortController.signal,
 				{
 					start: (purpose, model, context, options): CompactionTurnHandle => {
-						const handle = { turnId: generateTurnId(), startedAt: Date.now() };
-						this.emitTurnRequest(handle.turnId, purpose, model, context, options.reasoning);
+						const handle = { turnId: generateTurnId() };
+						this.emitTurnRequest(handle.turnId, purpose, model, context, options);
 						return handle;
 					},
-					end: (purpose, handle, model, response, error): void => {
-						const output = response ? (toTurnMessage(response) as TurnOutput) : undefined;
-						this.emit({
-							type: 'turn',
-							turnId: handle.turnId,
-							purpose,
-							durationMs: durationSince(handle.startedAt),
-							model: model.id,
-							provider: model.provider,
-							api: model.api,
-							output,
-							usage: fromProviderUsage(response?.usage),
-							stopReason: response?.stopReason,
-							isError:
-								error !== undefined ||
-								response?.stopReason === 'error' ||
-								response?.stopReason === 'aborted',
-							error: error === undefined ? response?.errorMessage : serializeError(error),
-						});
+					run: (handle, execute) =>
+						interceptExecution(
+							{ type: 'model', turnId: handle.turnId },
+							this.executionContext({ operationId: this.activeOperationId, turnId: handle.turnId }),
+							execute,
+						),
+					end: (purpose, handle, _model, response, error): void => {
+						const request = this.modelRequests.get(handle.turnId);
+						if (!request) throw new Error(`[flue] Missing model request telemetry for turn "${handle.turnId}".`);
+						this.emitTurn(handle.turnId, purpose, response, request, error);
+						this.modelRequests.delete(handle.turnId);
+						this.modelRequestStartTimes.delete(handle.turnId);
 					},
 				},
 			);
@@ -2252,6 +2596,21 @@ export class Session implements FlueSession, AgentSubmissionSession {
 		return totals;
 	}
 
+	private agentInvocationOutput(result: unknown): FlueObservationDetail['agentOutput'] {
+		if (typeof result !== 'object' || result === null) return undefined;
+		if ('data' in result) return { type: 'data', data: result.data };
+		if ('text' in result && typeof result.text === 'string') {
+			const messages = this.agentLoop.state.messages;
+			for (let i = messages.length - 1; i >= 0; i--) {
+				const message = messages[i];
+				if (message?.role === 'assistant') {
+					return { type: 'text', text: result.text, finishReason: message.stopReason };
+				}
+			}
+		}
+		return undefined;
+	}
+
 	private getAssistantText(): string {
 		const messages = this.agentLoop.state.messages;
 		for (let i = messages.length - 1; i >= 0; i--) {
@@ -2314,6 +2673,7 @@ export class Session implements FlueSession, AgentSubmissionSession {
 		signal: AbortSignal,
 		options?: ProcessAgentSubmissionOptions,
 	): Promise<PromptResponse> {
+		this.activeAgentInput = { text: renderSignalMessage(createDispatchInputSignal(input)) };
 		return this.runPersistedContextInput({
 			findInput: () => this.history.findDispatchInput(input.dispatchId),
 			persistInput: () =>
@@ -2336,6 +2696,12 @@ export class Session implements FlueSession, AgentSubmissionSession {
 		signal: AbortSignal,
 		options?: ProcessAgentSubmissionOptions,
 	): Promise<PromptResponse> {
+		this.activeAgentInput = {
+			text: input.payload.message,
+			...(input.payload.images?.length
+				? { images: input.payload.images.map((image) => ({ mimeType: image.mimeType })) }
+				: {}),
+		};
 		return this.runPersistedContextInput({
 			findInput: () => this.history.findDirectSubmissionInput(input.submissionId),
 			persistInput: () =>
@@ -2506,6 +2872,12 @@ export class Session implements FlueSession, AgentSubmissionSession {
 		signal: AbortSignal;
 	}): Promise<PromptResponse | PromptResultResponse<unknown>> {
 		assertImagesWithinLimit(args.images);
+		this.activeAgentInput = {
+			text: args.promptText,
+			...(args.images?.length
+				? { images: args.images.map((image) => ({ mimeType: image.mimeType })) }
+				: {}),
+		};
 		const promptText = this.history.prepareImagePrompt(args.promptText, args.images);
 		const resultBundle = args.schema ? createResultTools(args.schema) : undefined;
 
@@ -2616,6 +2988,7 @@ export function createPublicSession(session: Session): FlueSession {
 	if (existing) return existing;
 	const facade: FlueSession = {
 		name: session.name,
+		conversationId: session.conversationId,
 		fs: session.fs,
 		prompt: session.prompt.bind(session) as FlueSession['prompt'],
 		shell: session.shell.bind(session),

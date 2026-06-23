@@ -417,6 +417,7 @@ export interface AgentDefinition<TEnv = Record<string, any>> {
 export interface FlueEventContext<TEnv = Record<string, any>> {
 	/** Workflow run/instance id, or stable agent instance id during agent processing. */
 	readonly id: string;
+	readonly agentName: string | undefined;
 	/** Platform env bindings (process.env on Node, Cloudflare bindings on Workers). */
 	readonly env: TEnv;
 	/**
@@ -514,6 +515,8 @@ export interface CallHandle<T> extends Promise<T> {
 export interface FlueSession {
 	/** Session name. */
 	readonly name: string;
+	/** Persisted opaque identity for this conversation. */
+	readonly conversationId: string;
 
 	/**
 	 * Run a model operation with a text instruction. Pass `options.result` to
@@ -646,7 +649,9 @@ export interface PromptResultResponse<T> {
 // ─── Session Store ──────────────────────────────────────────────────────────
 
 export interface SessionData {
-	version: 7;
+	version: 8;
+	/** Opaque stable identity for the persisted conversation. */
+	conversationId: string;
 	/** Opaque stable provider-facing identity used for prompt caching and routing affinity. */
 	affinityKey: string;
 	entries: SessionEntry[];
@@ -914,6 +919,69 @@ export type LlmTool = {
 
 export type LlmTurnPurpose = 'agent' | 'compaction' | 'compaction_prefix';
 
+export interface FlueErrorInfo {
+	type: string;
+	name?: string;
+	code?: string;
+	message?: string;
+}
+
+export interface AgentInvocationInput {
+	text: string;
+	images?: Array<{ mimeType: string }>;
+}
+
+export type AgentInvocationOutput =
+	| { type: 'text'; text: string; finishReason: string }
+	| { type: 'data'; data: unknown };
+
+export interface FlueObservationDetail {
+	agentInput?: AgentInvocationInput;
+	agentOutput?: AgentInvocationOutput;
+	origin?: ToolOrigin;
+	toolType?: ToolSemanticType;
+	description?: string;
+	args?: unknown;
+	effectiveResult?: unknown;
+	toolCallId?: string;
+	errorInfo?: FlueErrorInfo;
+}
+
+export interface ModelRequestInput {
+	systemPrompt?: string;
+	messages: LlmMessage[];
+	tools?: LlmTool[];
+}
+
+export interface ModelRequestInfo {
+	providerId: string;
+	providerName: string;
+	requestedModel: string;
+	api: string;
+	serverAddress?: string;
+	serverPort?: number;
+	reasoningLevel?: string;
+	maxTokens?: number;
+	temperature?: number;
+	contextCompacted?: true;
+}
+
+export interface ModelRequest extends ModelRequestInfo {
+	input: ModelRequestInput;
+}
+
+export interface ModelResponse {
+	responseId?: string;
+	responseModel?: string;
+	output?: LlmAssistantMessage;
+	usage?: PromptUsage;
+	finishReason?: string;
+	error?: FlueErrorInfo;
+}
+
+export type ToolOrigin = 'model' | 'caller' | 'framework' | 'adapter';
+export type ToolSemanticType = 'function' | 'extension' | 'datastore';
+
 type FlueEventVariant =
 	| {
 			type: 'run_start';
@@ -935,15 +1003,7 @@ type FlueEventVariant =
 			type: 'turn_request';
 			turnId: string;
 			purpose: LlmTurnPurpose;
-			model: string;
-			provider: string;
-			api: string;
-			input: {
-				systemPrompt?: string;
-				messages: LlmMessage[];
-				tools?: LlmTool[];
-			};
-			reasoning?: string;
+			request: ModelRequest;
 	  }
 	| {
 			type: 'turn_messages';
@@ -958,13 +1018,17 @@ type FlueEventVariant =
 	| { type: 'thinking_start' }
 	| { type: 'thinking_delta'; delta: string }
 	| { type: 'thinking_end'; content: string }
-	| { type: 'tool_start'; toolName: string; toolCallId: string; args?: any }
+	| {
+			type: 'tool_start';
+			toolName: string;
+			toolCallId: string;
+	  }
 	| {
 			type: 'tool';
 			toolName: string;
 			toolCallId: string;
 			isError: boolean;
-			result?: any;
+			result?: unknown;
 			durationMs: number;
 	  }
 	| {
@@ -972,14 +1036,9 @@ type FlueEventVariant =
 			turnId: string;
 			purpose: LlmTurnPurpose;
 			durationMs: number;
-			model?: string;
-			provider?: string;
-			api?: string;
-			output?: LlmAssistantMessage;
-			usage?: PromptUsage;
-			stopReason?: string;
+			request: ModelRequestInfo;
+			response: ModelResponse;
 			isError: boolean;
-			error?: unknown;
 	  }
 	| { type: 'task_start'; taskId: string; prompt: string; agent?: string; cwd?: string }
 	| {
@@ -1063,6 +1122,8 @@ export type FlueEventInput = FlueEventVariant & {
 	instanceId?: string;
 	dispatchId?: string;
 	submissionId?: string;
+	agentName?: string;
+	conversationId?: string;
 	session?: string;
 	parentSession?: string;
 	taskId?: string;
@@ -1094,10 +1155,14 @@ export type FlueEventInput = FlueEventVariant & {
  */
 export type FlueEvent = FlueEventInput & {
 	/** Durable event-format version. Readers branch on this when the format changes. */
-	v: 1;
+	v: 3;
 	eventIndex: number;
 	timestamp: string;
 };
+
+export const FLUE_EVENT_SCHEMA_REVISION = 3;
+
+export type FlueObservation = FlueEvent & FlueObservationDetail;
 
 /**
  * Live activity from a direct attached-agent interaction. Attached-agent events
@@ -1113,7 +1178,10 @@ export type AttachedAgentEvent = Exclude<
 };
 
 /** Internal pre-decoration event callback (Session → Harness → context emit chain). */
-export type FlueEventInputCallback = (event: FlueEventInput) => void | Promise<void>;
+export type FlueEventInputCallback = (
+	event: FlueEventInput,
+	observation?: FlueObservationDetail,
+) => void | Promise<void>;
 
 export type FlueEventCallback = (event: FlueEvent) => void | Promise<void>;
 export type AttachedAgentEventCallback = (event: AttachedAgentEvent) => void | Promise<void>;

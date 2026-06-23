@@ -69,7 +69,7 @@ describe('useFlueAgent()', () => {
 
 		act(() => {
 			stream.push({
-				v: 1,
+				v: 3,
 				type: 'message_end',
 				message: { role: 'user', content: 'hello' },
 				eventIndex: 1,
@@ -87,7 +87,7 @@ describe('useFlueWorkflow()', () => {
 	it('derives completed state and logs from replay', async () => {
 		const events = [
 			{
-				v: 1,
+				v: 3,
 				type: 'run_start',
 				runId: 'run-1',
 				workflowName: 'flow',
@@ -97,7 +97,7 @@ describe('useFlueWorkflow()', () => {
 				timestamp: '2026-06-12T00:00:00.000Z',
 			},
 			{
-				v: 1,
+				v: 3,
 				type: 'log',
 				level: 'info',
 				message: 'working',
@@ -106,7 +106,7 @@ describe('useFlueWorkflow()', () => {
 				runId: 'run-1',
 			},
 			{
-				v: 1,
+				v: 3,
 				type: 'run_end',
 				runId: 'run-1',
 				result: { ok: true },
@@ -136,7 +136,7 @@ describe('useFlueWorkflow()', () => {
 		const { result } = renderHook(() => useFlueWorkflow({ runId: 'run-1', client: flue }));
 		act(() => {
 			stream.push({
-				v: 1,
+				v: 3,
 				type: 'run_resume',
 				runId: 'run-1',
 				workflowName: 'flow',

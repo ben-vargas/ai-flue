@@ -13,6 +13,7 @@ import {
 	SubmissionRetryExhaustedError,
 	SubmissionTimeoutError,
 } from '../errors.ts';
+import { interceptExecution, type FlueTraceCarrier } from '../execution-interceptor.ts';
 import { getInternalSession } from '../session.ts';
 import type {
 	AttachedAgentEvent,
@@ -27,6 +28,7 @@ import { assertAgentDispatchAdmissionInput } from './handle-agent.ts';
 export interface DispatchAgentSubmissionInput extends DispatchInput {
 	readonly kind: 'dispatch';
 	readonly submissionId: string;
+	readonly traceCarrier?: FlueTraceCarrier;
 }
 
 export interface DirectAgentSubmissionInput {
@@ -36,6 +38,7 @@ export interface DirectAgentSubmissionInput {
 	readonly id: string;
 	readonly payload: DirectAgentPayload;
 	readonly acceptedAt: string;
+	readonly traceCarrier?: FlueTraceCarrier;
 }
 
 export type AgentSubmissionInput = DispatchAgentSubmissionInput | DirectAgentSubmissionInput;
@@ -133,6 +136,7 @@ export type AttachedAgentSubmissionAdmission = (
 	payload: DirectAgentPayload,
 	onEvent?: (event: AttachedAgentEvent) => Promise<void> | void,
 	waitForResult?: boolean,
+	traceCarrier?: FlueTraceCarrier,
 ) => Promise<AttachedAgentSubmissionReceipt>;
 
 export function createDispatchAgentSubmissionInput(
@@ -145,6 +149,7 @@ export function createDirectAgentSubmissionInput(options: {
 	agent: string;
 	id: string;
 	payload: DirectAgentPayload;
+	traceCarrier?: FlueTraceCarrier;
 }): DirectAgentSubmissionInput {
 	return {
 		kind: 'direct',
@@ -153,6 +158,7 @@ export function createDirectAgentSubmissionInput(options: {
 		id: options.id,
 		payload: options.payload,
 		acceptedAt: new Date().toISOString(),
+		...(options.traceCarrier ? { traceCarrier: options.traceCarrier } : {}),
 	};
 }
 
@@ -716,7 +722,23 @@ export async function processSubmission(opts: ProcessSubmissionOptions): Promise
 	try {
 		let result: unknown;
 		try {
-			result = opts.wrapExecution ? await opts.wrapExecution(execute) : await execute();
+			const run = () =>
+				interceptExecution(
+					{
+						type: 'agent',
+						operationId: submission.submissionId,
+						operationKind: 'prompt',
+					},
+					{
+						instanceId: input.id,
+						submissionId: submission.submissionId,
+						dispatchId: agentSubmissionDispatchId(input),
+						agentName: input.agent,
+						traceCarrier: input.traceCarrier,
+					},
+					execute,
+				);
+			result = opts.wrapExecution ? await opts.wrapExecution(run) : await run();
 		} catch (error) {
 			if (opts.isShutdownAbort?.(error)) {
 				if (submission.kind === 'direct') observers.fail(submission.submissionId, error);

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { type FlueEvent, observe } from '../src/index.ts';
+import { type FlueObservation, observe } from '../src/index.ts';
 import { createFlueContext, InMemorySessionStore } from '../src/internal.ts';
 
 function createContext(id: string) {
@@ -31,7 +31,7 @@ describe('observe()', () => {
 				{
 					type: 'idle',
 					instanceId: 'observe-decorated-event',
-					v: 1,
+					v: 3,
 					eventIndex: 0,
 					timestamp: expect.any(String),
 				},
@@ -57,7 +57,7 @@ describe('observe()', () => {
 		}
 	});
 
-	it('delivers the same event object to every subscriber when an event is emitted', () => {
+	it('delivers one detached immutable observation to every subscriber when an event is emitted', () => {
 		const events: unknown[] = [];
 		const stopFirst = observe((event, ctx) => {
 			if (ctx.id === 'observe-shared-event') events.push(event);
@@ -71,8 +71,13 @@ describe('observe()', () => {
 			const event = ctx.emitEvent({ type: 'log', level: 'info', message: 'original' });
 
 			expect(events).toHaveLength(2);
-			expect(events[0]).toBe(event);
-			expect(events[1]).toBe(event);
+			expect(events[0]).not.toBe(event);
+			expect(events[0]).toBe(events[1]);
+			expect(events[0]).toMatchObject({
+				type: event.type,
+				v: event.v,
+			});
+			expect(Object.isFrozen(events[0])).toBe(true);
 		} finally {
 			stopFirst();
 			stopSecond();
@@ -147,7 +152,7 @@ describe('observe()', () => {
 	});
 
 	it('delivers events with circular values when an event is emitted', () => {
-		const events: FlueEvent[] = [];
+		const events: FlueObservation[] = [];
 		const stopObserving = observe((event, ctx) => {
 			if (ctx.id === 'observe-circular-values') events.push(event);
 		});
@@ -163,8 +168,41 @@ describe('observe()', () => {
 				attributes: { circular },
 			});
 
-			expect(events).toEqual([event]);
+			expect(events).toHaveLength(1);
+			expect(events[0]).toMatchObject({
+				type: event.type,
+				v: event.v,
+			});
+			const observedCircular = (
+				events[0] as Extract<FlueObservation, { type: 'log' }>
+			).attributes?.circular as { self?: unknown };
+			expect(observedCircular.self).toBe(observedCircular);
 		} finally {
+			stopObserving();
+		}
+	});
+
+	it('adds observation-only detail without changing product events', () => {
+		const observations: FlueObservation[] = [];
+		const productEvents: unknown[] = [];
+		const stopObserving = observe((event, ctx) => {
+			if (ctx.id === 'observe-detail') observations.push(event);
+		});
+		const ctx = createContext('observe-detail');
+		const stopProduct = ctx.subscribeEvent((event) => {
+			productEvents.push(event);
+		});
+
+		try {
+			ctx.emitEvent(
+				{ type: 'operation_start', operationId: 'op-1', operationKind: 'prompt' },
+				{ agentInput: { text: 'private prompt' } },
+			);
+
+			expect(observations[0]).toMatchObject({ agentInput: { text: 'private prompt' } });
+			expect(productEvents[0]).not.toHaveProperty('agentInput');
+		} finally {
+			stopProduct();
 			stopObserving();
 		}
 	});

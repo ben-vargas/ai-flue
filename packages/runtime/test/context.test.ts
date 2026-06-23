@@ -118,7 +118,7 @@ describe('FlueContext', () => {
 			{
 				type: 'idle',
 				runId: 'run-123',
-				v: 1,
+				v: 3,
 				eventIndex: 0,
 				timestamp: expect.any(String),
 			},
@@ -138,7 +138,7 @@ describe('FlueContext', () => {
 			{
 				type: 'idle',
 				instanceId: 'agent-instance',
-				v: 1,
+				v: 3,
 				eventIndex: 0,
 				timestamp: expect.any(String),
 			},
@@ -159,7 +159,7 @@ describe('FlueContext', () => {
 				type: 'idle',
 				instanceId: 'agent-instance',
 				dispatchId: 'dispatch-123',
-				v: 1,
+				v: 3,
 				eventIndex: 0,
 				timestamp: expect.any(String),
 			},
@@ -181,21 +181,21 @@ describe('FlueContext', () => {
 			{
 				type: 'idle',
 				instanceId: 'agent-indexed',
-				v: 1,
+				v: 3,
 				eventIndex: 0,
 				timestamp: expect.any(String),
 			},
 			{
 				type: 'idle',
 				instanceId: 'agent-indexed',
-				v: 1,
+				v: 3,
 				eventIndex: 1,
 				timestamp: expect.any(String),
 			},
 			{
 				type: 'idle',
 				instanceId: 'agent-indexed',
-				v: 1,
+				v: 3,
 				eventIndex: 2,
 				timestamp: expect.any(String),
 			},
@@ -220,7 +220,7 @@ describe('FlueContext', () => {
 				message: 'Started review.',
 				attributes: { phase: 'start' },
 				instanceId: 'agent-logger',
-				v: 1,
+				v: 3,
 				eventIndex: 0,
 				timestamp: expect.any(String),
 			},
@@ -230,7 +230,7 @@ describe('FlueContext', () => {
 				message: 'Waiting for input.',
 				attributes: { phase: 'wait' },
 				instanceId: 'agent-logger',
-				v: 1,
+				v: 3,
 				eventIndex: 1,
 				timestamp: expect.any(String),
 			},
@@ -240,7 +240,7 @@ describe('FlueContext', () => {
 				message: 'Review failed.',
 				attributes: { phase: 'stop' },
 				instanceId: 'agent-logger',
-				v: 1,
+				v: 3,
 				eventIndex: 2,
 				timestamp: expect.any(String),
 			},
@@ -271,7 +271,7 @@ describe('FlueContext', () => {
 					attempt: 2,
 				},
 				instanceId: 'agent-error-logger',
-				v: 1,
+				v: 3,
 				eventIndex: 0,
 				timestamp: expect.any(String),
 			},
@@ -328,7 +328,31 @@ describe('session context discovery', () => {
 			(event): event is Extract<FlueEvent, { type: 'turn_request' }> =>
 				event.type === 'turn_request',
 		);
-		const systemPrompt = request?.input.systemPrompt ?? '';
+		const terminal = events.find(
+			(event): event is Extract<FlueEvent, { type: 'turn' }> => event.type === 'turn',
+		);
+		expect(request).toMatchObject({
+			request: {
+				providerId: provider.getModel().provider,
+				providerName: provider.getModel().provider,
+				requestedModel: provider.getModel().id,
+				api: provider.getModel().api,
+				input: { messages: expect.any(Array) },
+			},
+		});
+		expect(request).not.toHaveProperty('model');
+		expect(request).not.toHaveProperty('input');
+		expect(terminal).toMatchObject({
+			request: {
+				providerId: provider.getModel().provider,
+				providerName: provider.getModel().provider,
+				requestedModel: provider.getModel().id,
+			},
+			response: { output: expect.any(Object), usage: expect.any(Object) },
+		});
+		expect(terminal).not.toHaveProperty('output');
+		expect(terminal).not.toHaveProperty('usage');
+		const systemPrompt = request?.request.input.systemPrompt ?? '';
 		expect(systemPrompt).toContain('Agent-specific review instructions.');
 		expect(systemPrompt).toContain('Workspace review guidance.');
 		expect(systemPrompt.indexOf('Agent-specific review instructions.')).toBeLessThan(
@@ -368,7 +392,7 @@ describe('session context discovery', () => {
 			(event): event is Extract<FlueEvent, { type: 'turn_request' }> =>
 				event.type === 'turn_request',
 		);
-		const systemPrompt = request?.input.systemPrompt ?? '';
+		const systemPrompt = request?.request.input.systemPrompt ?? '';
 		expect(systemPrompt).toContain('Workspace review guidance.');
 		expect(systemPrompt).toContain('Claude-specific workspace guidance.');
 		expect(systemPrompt.indexOf('Workspace review guidance.')).toBeLessThan(
@@ -410,7 +434,7 @@ describe('session context discovery', () => {
 			(event): event is Extract<FlueEvent, { type: 'turn_request' }> =>
 				event.type === 'turn_request',
 		);
-		const systemPrompt = request?.input.systemPrompt ?? '';
+		const systemPrompt = request?.request.input.systemPrompt ?? '';
 		expect(systemPrompt).toContain('Nested workspace guidance.');
 		expect(systemPrompt).toContain('Working directory: /repo/workspace');
 		expect(systemPrompt).not.toContain('Root workspace guidance.');
@@ -455,7 +479,7 @@ describe('session context discovery', () => {
 			(event): event is Extract<FlueEvent, { type: 'turn_request' }> =>
 				event.type === 'turn_request',
 		);
-		const systemPrompt = request?.input.systemPrompt ?? '';
+		const systemPrompt = request?.request.input.systemPrompt ?? '';
 		expect(factoryOptions).toEqual([{ id: 'context-instance' }]);
 		expect(systemPrompt).toContain('Sandbox workspace guidance.');
 		expect(systemPrompt).toContain('Working directory: /sandbox/workspace');

@@ -2,8 +2,9 @@ import { abortErrorFor, createCallHandle } from './abort.ts';
 import type { ActionDefinition } from './action.ts';
 import type { AgentSubmissionStore } from './agent-execution-store.ts';
 import { discoverSessionContext } from './context.ts';
+import type { FlueExecutionContext } from './execution-interceptor.ts';
 import { SessionAlreadyExistsError, SessionNotFoundError } from './errors.ts';
-import { generateSessionAffinityKey } from './runtime/ids.ts';
+import { generateConversationId, generateSessionAffinityKey } from './runtime/ids.ts';
 import { createCwdSessionEnv, createFlueFs } from './sandbox.ts';
 import {
 	type CreateTaskSessionOptions,
@@ -24,6 +25,7 @@ import type {
 	CallHandle,
 	FlueEventInput,
 	FlueEventInputCallback,
+	FlueObservationDetail,
 	FlueFs,
 	FlueHarness,
 	FlueSession,
@@ -67,6 +69,7 @@ export class Harness implements FlueHarness {
 		private toolFactory?: SessionToolFactory,
 		private submissionStore?: AgentSubmissionStore,
 		private actions: ActionDefinition[] = config.actions ?? [],
+		private executionContext: FlueExecutionContext = {},
 		private scopeName?: string,
 		private scopeDepth = 0,
 		private retainSession?: (session: string) => Promise<void>,
@@ -93,7 +96,14 @@ export class Harness implements FlueHarness {
 			? AbortSignal.any([options.signal, this.scopeAbortController.signal])
 			: this.scopeAbortController.signal;
 		const call = createCallHandle(externalSignal, (signal) =>
-			execShellWithEvents(this.env, (event) => this.emit(event), command, options, signal),
+			execShellWithEvents(
+				this.env,
+				(event, detail) => this.emit(event, detail),
+				command,
+				options,
+				signal,
+				this.executionContext,
+			),
 		);
 		this.activeShellCalls.add(call);
 		void call.then(
@@ -165,6 +175,7 @@ export class Harness implements FlueHarness {
 		const session = new Session({
 			name: sessionName,
 			storageKey,
+			conversationId: data.conversationId,
 			affinityKey: data.affinityKey,
 			config: this.config,
 			env: this.env,
@@ -180,6 +191,7 @@ export class Harness implements FlueHarness {
 			scopeSignal: this.scopeAbortController.signal,
 			onDelete: () => this.openSessions.delete(sessionName),
 			submissionStore: this.submissionStore,
+			executionContext: { ...this.executionContext, harness: this.name },
 		});
 		this.openSessions.set(sessionName, session);
 		return session;
@@ -249,19 +261,20 @@ export class Harness implements FlueHarness {
 		// correlation flows through event decoration below.
 		const data = createEmptySessionData();
 		const eventCallback: FlueEventInputCallback | undefined = this.eventCallback
-			? (event) => {
+			? (event, observation) => {
 					this.eventCallback?.({
 						...event,
 						harness: event.harness ?? this.name,
 						parentSession: event.parentSession ?? options.parentSession,
 						taskId: event.taskId ?? options.taskId,
-					});
+					}, observation);
 				}
 			: undefined;
 
 		return new Session({
 			name: sessionName,
 			storageKey,
+			conversationId: data.conversationId,
 			affinityKey: data.affinityKey,
 			config: taskConfig,
 			env: taskEnv,
@@ -275,6 +288,7 @@ export class Harness implements FlueHarness {
 			actions: taskConfig.actions ?? [],
 			createActionHarness: (actionOptions) => this.createActionHarness(actionOptions),
 			scopeSignal: this.scopeAbortController.signal,
+			executionContext: { ...this.executionContext, harness: this.name, taskId: options.taskId },
 		});
 	}
 
@@ -287,11 +301,12 @@ export class Harness implements FlueHarness {
 			options.config,
 			options.env,
 			this.store,
-			this.eventCallback,
+			options.eventCallback ?? this.eventCallback,
 			options.tools,
 			this.toolFactory,
 			this.submissionStore,
 			options.actions,
+			options.executionContext,
 			nestedScope,
 			options.depth,
 			(session) => options.retainSession(session),
@@ -318,16 +333,16 @@ export class Harness implements FlueHarness {
 		return this.closePromise;
 	}
 
-	private emit(event: FlueEventInput): void {
-		this.eventCallback?.({ ...event, harness: event.harness ?? this.name });
+	private emit(event: FlueEventInput, observation?: FlueObservationDetail): void {
+		this.eventCallback?.({ ...event, harness: event.harness ?? this.name }, observation);
 	}
 
 	private decorateEventCallback(
 		callback: FlueEventInputCallback | undefined,
 	): FlueEventInputCallback | undefined {
 		return callback
-			? (event) => {
-					callback({ ...event, harness: event.harness ?? this.name });
+			? (event, observation) => {
+					callback({ ...event, harness: event.harness ?? this.name }, observation);
 				}
 			: undefined;
 	}
@@ -340,7 +355,8 @@ function normalizeSessionName(name: string | undefined): string {
 function createEmptySessionData(): SessionData {
 	const now = new Date().toISOString();
 	return {
-		version: 7,
+		version: 8,
+		conversationId: generateConversationId(),
 		affinityKey: generateSessionAffinityKey(),
 		entries: [],
 		leafId: null,

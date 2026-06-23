@@ -1,3 +1,4 @@
+import type { FlueTraceCarrier } from '../execution-interceptor.ts';
 import type { FlueEvent } from '../types.ts';
 
 export type RunStatus = 'active' | 'completed' | 'errored';
@@ -8,6 +9,7 @@ export interface RunRecord {
 	status: RunStatus;
 	startedAt: string;
 	input?: unknown;
+	traceCarrier?: FlueTraceCarrier;
 	endedAt?: string;
 	isError?: boolean;
 	durationMs?: number;
@@ -38,6 +40,7 @@ export interface CreateRunInput {
 	workflowName: string;
 	startedAt: string;
 	input: unknown;
+	traceCarrier?: FlueTraceCarrier;
 }
 
 export interface EndRunInput {

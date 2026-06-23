@@ -24,14 +24,17 @@ export {
 	WorkflowInvocationNotConfiguredError,
 	WorkflowNotDiscoveredError,
 	FlueError,
+	InstrumentationAlreadyInstalledError,
 	ModelNotConfiguredError,
 	OperationFailedError,
 	ProviderRegistrationError,
+	ProductEventVersionError,
 	SandboxOperationUnsupportedError,
 	SessionAlreadyExistsError,
 	SessionBusyError,
 	SessionDeletedError,
 	SessionNotFoundError,
+	SessionDataVersionError,
 	SkillDefinitionValidationError,
 	SkillNotRegisteredError,
 	SubagentNotDeclaredError,
@@ -48,6 +51,13 @@ export {
 	type ValidationIssue,
 } from './errors.ts';
 export { IMAGE_DATA_OMITTED } from './event-redaction.ts';
+export { instrument, type FlueInstrumentation } from './instrumentation.ts';
+export type {
+	FlueExecutionContext,
+	FlueExecutionInterceptor,
+	FlueExecutionOperation,
+} from './execution-interceptor.ts';
+export type { FlueObservationSubscriber } from './observation.ts';
 export type { McpServerConnection, McpServerOptions, McpTransport } from './mcp.ts';
 export { connectMcpServer } from './mcp.ts';
 export { ResultUnavailableError } from './result.ts';
@@ -93,6 +103,7 @@ export type {
 	FileStat,
 	FlueEvent,
 	FlueEventContext,
+	FlueObservation,
 	FlueFs,
 	FlueHarness,
 	FlueLogger,
@@ -110,6 +121,10 @@ export type {
 	LlmUserMessage,
 	MessageEntry,
 	ModelConfig,
+	ModelRequest,
+	ModelRequestInfo,
+	ModelRequestInput,
+	ModelResponse,
 	NamedAgentDispatchRequest,
 	PackagedSkillDirectory,
 	PackagedSkillFile,
@@ -140,6 +155,7 @@ export type {
 	WorkflowRouteHandler,
 	WorkflowRunsHandler,
 } from './types.ts';
+export { FLUE_EVENT_SCHEMA_REVISION } from './types.ts';
 
 // Note: the persistence storage contract (`PersistenceAdapter`, `SessionStore`,
 // `SessionData`, and friends) lives at `@flue/runtime/adapter`, the canonical

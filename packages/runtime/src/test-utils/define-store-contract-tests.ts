@@ -63,7 +63,8 @@ function claim(submissionId: string, attemptId: string, ownerId = 'test-owner') 
 
 function sessionData(): SessionData {
 	return {
-		version: 7,
+		version: 8,
+		conversationId: 'conv_01KT3P3GZGFBCKHKMQ11A7H2HW',
 		affinityKey: 'affinity-1',
 		entries: [
 			{
@@ -430,7 +431,14 @@ export function defineStoreContractTests(label: string, backend: StoreContractTe
 				const store = await create();
 				await store.submissions.admitDirect(directInput());
 				await store.submissions.claimSubmission(claim('direct-1', 'attempt-1'));
-				const terminal = { type: 'submission_settled', submissionId: 'direct-1', v: 1 };
+				const terminal = {
+					type: 'submission_settled',
+					submissionId: 'direct-1',
+					outcome: 'completed',
+					v: 3,
+					eventIndex: 0,
+					timestamp: '2026-06-22T00:00:00.000Z',
+				};
 
 				expect(
 					await store.submissions.reserveSubmissionTerminal(attempt('direct-1', 'stale'), {

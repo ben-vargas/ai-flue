@@ -485,7 +485,6 @@ export interface CompactionResult {
 
 export interface CompactionTurnHandle {
 	turnId: string;
-	startedAt: number;
 }
 
 export interface CompactionTurnObserver {
@@ -495,6 +494,7 @@ export interface CompactionTurnObserver {
 		context: Context,
 		options: SimpleStreamOptions,
 	): CompactionTurnHandle;
+	run<T>(handle: CompactionTurnHandle, execute: () => Promise<T>): Promise<T>;
 	end(
 		purpose: 'compaction' | 'compaction_prefix',
 		handle: CompactionTurnHandle,
@@ -588,7 +588,9 @@ async function generateSummary(
 	const handle = observer?.start('compaction', model, context, completionOptions);
 	let response: AssistantMessage | undefined;
 	try {
-		response = await completeSimple(model, context, completionOptions);
+		response = handle
+			? await observer!.run(handle, () => completeSimple(model, context, completionOptions))
+			: await completeSimple(model, context, completionOptions);
 		if (handle) observer?.end('compaction', handle, model, response, undefined);
 	} catch (error) {
 		if (handle) observer?.end('compaction', handle, model, undefined, error);
@@ -630,7 +632,9 @@ async function generateTurnPrefixSummary(
 	const handle = observer?.start('compaction_prefix', model, context, completionOptions);
 	let response: AssistantMessage | undefined;
 	try {
-		response = await completeSimple(model, context, completionOptions);
+		response = handle
+			? await observer!.run(handle, () => completeSimple(model, context, completionOptions))
+			: await completeSimple(model, context, completionOptions);
 		if (handle) observer?.end('compaction_prefix', handle, model, response, undefined);
 	} catch (error) {
 		if (handle) observer?.end('compaction_prefix', handle, model, undefined, error);

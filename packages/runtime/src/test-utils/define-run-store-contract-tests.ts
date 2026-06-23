@@ -27,6 +27,10 @@ export function defineRunStoreContractTests(label: string, backend: RunStoreCont
 				workflowName: 'daily-report',
 				startedAt: '2026-06-01T10:00:00.000Z',
 				input: { report: 'weekly' },
+				traceCarrier: {
+					traceparent: '00-11111111111111111111111111111111-2222222222222222-01',
+					tracestate: 'vendor=value',
+				},
 			});
 
 			expect(await store.getRun('run_01DAILYREPORT')).toMatchObject({
@@ -35,6 +39,10 @@ export function defineRunStoreContractTests(label: string, backend: RunStoreCont
 				status: 'active',
 				startedAt: '2026-06-01T10:00:00.000Z',
 				input: { report: 'weekly' },
+				traceCarrier: {
+					traceparent: '00-11111111111111111111111111111111-2222222222222222-01',
+					tracestate: 'vendor=value',
+				},
 			});
 		});
 
@@ -45,6 +53,9 @@ export function defineRunStoreContractTests(label: string, backend: RunStoreCont
 				workflowName: 'daily-report',
 				startedAt: '2026-06-01T10:00:00.000Z',
 				input: { report: 'weekly' },
+				traceCarrier: {
+					traceparent: '00-11111111111111111111111111111111-2222222222222222-01',
+				},
 			});
 			await store.endRun({
 				runId: 'run_01DAILYREPORT',
@@ -61,6 +72,9 @@ export function defineRunStoreContractTests(label: string, backend: RunStoreCont
 				workflowName: 'daily-report',
 				startedAt: '2026-06-01T11:00:00.000Z',
 				input: { report: 'replayed' },
+				traceCarrier: {
+					traceparent: '00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01',
+				},
 			});
 
 			expect(await store.getRun('run_01DAILYREPORT')).toMatchObject({
@@ -69,6 +83,9 @@ export function defineRunStoreContractTests(label: string, backend: RunStoreCont
 				input: { report: 'weekly' },
 				endedAt: '2026-06-01T10:05:00.000Z',
 				result: { delivered: true },
+				traceCarrier: {
+					traceparent: '00-11111111111111111111111111111111-2222222222222222-01',
+				},
 			});
 			expect(await store.lookupRun('run_01DAILYREPORT')).toEqual({
 				runId: 'run_01DAILYREPORT',
@@ -202,7 +219,10 @@ export function defineRunStoreContractTests(label: string, backend: RunStoreCont
 				runId: 'run_01DAILYREPORT',
 				workflowName: 'daily-report',
 				startedAt: '2026-06-01T10:00:00.000Z',
-				input: {},
+				input: { report: 'weekly' },
+				traceCarrier: {
+					traceparent: '00-11111111111111111111111111111111-2222222222222222-01',
+				},
 			});
 			await store.endRun({
 				runId: 'run_01DAILYREPORT',

@@ -23,7 +23,7 @@ import {
 function registerProvider(providerId: string, registration: ProviderRegistration): void;
 ```
 
-Registers a model provider keyed by the provider ID used in model specifiers. The provider ID is the prefix used in model specifiers, such as `anthropic` in `anthropic/claude-sonnet-4-6`.
+Registers a model provider keyed by the provider ID used in model specifiers. The provider ID is the prefix used in model specifiers, such as `anthropic` in `anthropic/claude-sonnet-4-6`. Model telemetry preserves this registration identity as `request.providerId` separately from the semantic `request.providerName` used by observability integrations.
 
 When the provider ID is a catalog provider, models resolve from the catalog — preserving metadata such as cost, context window, and wire protocol — with this call's options layered on top. That makes routing a built-in provider through a gateway one call:
 

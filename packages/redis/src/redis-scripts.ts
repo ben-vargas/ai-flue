@@ -265,6 +265,7 @@ redis.call('ZADD', KEYS[4], ARGV[5], ARGV[1])
 redis.call('SADD', KEYS[5], 'active')
 redis.call('HSET', KEYS[1], 'runId', ARGV[1], 'workflowName', ARGV[2], 'status', 'active', 'startedAt', ARGV[3], 'orderKey', ARGV[6])
 if ARGV[4] ~= '' then redis.call('HSET', KEYS[1], 'payload', ARGV[4]) end
+if ARGV[7] ~= '' then redis.call('HSET', KEYS[1], 'traceCarrier', ARGV[7]) end
 return 1
 `;
 

@@ -13,6 +13,7 @@ import {
 	defineAgentProfile,
 	defineTool,
 	ModelNotConfiguredError,
+	observe,
 	SessionBusyError,
 	SubagentNotDeclaredError,
 } from '../src/index.ts';
@@ -491,7 +492,8 @@ describe('session.prompt()', () => {
 		const store = new RecordingSessionStore();
 		const timestamp = '2026-06-01T00:00:00.000Z';
 		await store.save('agent-session:["session-operations-instance","default","default"]', {
-			version: 7,
+			version: 8,
+			conversationId: 'conv_01KT3P3GZGFBCKHKMQ11A7H2HW',
 			affinityKey: 'aff_01KT3P3GZGFBCKHKMQ11A7H2HW',
 			childSessions: [],
 			entries: [
@@ -688,6 +690,37 @@ describe('session.task()', () => {
 
 		expect(response.text).toBe('Delegated response.');
 		expect(taskRequests).toEqual([['Review only the delegated input.']]);
+	});
+
+	it('correlates a model task tool call with its task start observation', async () => {
+		const provider = createProvider([{ id: 'reviewer' }]);
+		const toolCallId = `tool:${crypto.randomUUID()}`;
+		provider.setResponses([
+			fauxAssistantMessage(
+				fauxToolCall('task', { prompt: 'Review the runtime package.' }, { id: toolCallId }),
+				{ stopReason: 'toolUse' },
+			),
+			fauxAssistantMessage('Runtime review complete.'),
+			fauxAssistantMessage('Delegation complete.'),
+		]);
+		const ctx = createContext(provider);
+		const observations: Array<{ type: string; toolCallId?: string }> = [];
+		const stopObserving = observe((event, observedContext) => {
+			if (observedContext === ctx && event.type === 'task_start') observations.push(event);
+		});
+		try {
+			const harness = await ctx.initializeRootHarness(
+				defineAgent(() => ({ model: `${provider.getModel().provider}/reviewer` })),
+			);
+
+			await (await harness.session()).prompt('Delegate the review.');
+
+			expect(observations).toEqual([
+				expect.objectContaining({ type: 'task_start', toolCallId }),
+			]);
+		} finally {
+			stopObserving();
+		}
 	});
 
 	it('passes a visible parent image to the child when the task tool receives its attachment ID', async () => {
@@ -1179,7 +1212,8 @@ describe('session.task()', () => {
 			taskId: string;
 		};
 		await store.save(unrelatedKey, {
-			version: 7,
+			version: 8,
+			conversationId: 'conv_01J00000000000000000000000',
 			affinityKey: 'aff_01J00000000000000000000000',
 			entries: [],
 			leafId: null,

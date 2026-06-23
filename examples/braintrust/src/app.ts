@@ -1,4 +1,4 @@
-import { type FlueEvent, observe } from '@flue/runtime';
+import { type FlueObservation, observe } from '@flue/runtime';
 import { flue } from '@flue/runtime/routing';
 import { braintrustFlueObserver, initLogger } from 'braintrust';
 import { Hono } from 'hono';
@@ -18,7 +18,7 @@ if (apiKey) {
 	});
 }
 
-function compatibleEvent(event: FlueEvent): unknown {
+function compatibleEvent(event: FlueObservation): unknown {
 	if (event.type === 'run_start') {
 		observedRuns.add(event.runId);
 		return event;

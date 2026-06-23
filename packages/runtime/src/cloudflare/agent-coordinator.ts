@@ -4,6 +4,7 @@ import type {
 	AgentSubmissionStore,
 } from '../agent-execution-store.ts';
 import type { FlueContextInternal } from '../client.ts';
+import type { FlueTraceCarrier } from '../execution-interceptor.ts';
 import {
 	createAgentSubmissionObserverRegistry,
 	type createAgentSubmissionSessionHandler,
@@ -17,6 +18,7 @@ import { agentStreamPath } from '../runtime/event-stream-store.ts';
 import { assertAgentDispatchAdmissionInput, handleAgentRequest } from '../runtime/handle-agent.ts';
 import { handleStreamHead, handleStreamRead } from '../runtime/handle-stream-routes.ts';
 import { isStreamExcludedEvent } from '../runtime/run-store.ts';
+import { assertProductEventV3 } from '../product-event.ts';
 import { deleteSessionTree } from '../session.ts';
 import type { AttachedAgentEvent, DirectAgentPayload } from '../types.ts';
 import { createSqlAgentExecutionStore } from './agent-execution-store.ts';
@@ -73,6 +75,7 @@ interface CloudflareAgentRuntimeOptions {
 	readonly createContext: (options: {
 		readonly executionStore: AgentExecutionStore;
 		readonly instance: CloudflareAgentInstance;
+		readonly agentName: string;
 		readonly request: Request;
 		readonly initialEventIndex?: number;
 		readonly dispatchId?: string;
@@ -228,8 +231,8 @@ class CloudflareAgentCoordinator {
 				id: this.instance.name,
 				agentName: this.agentName,
 				eventStreamStore: this.eventStreamStore,
-				admitAttachedSubmission: (payload, onEvent, waitForResult) =>
-					this.admitAttachedSubmission(payload, onEvent, waitForResult),
+				admitAttachedSubmission: (payload, onEvent, waitForResult, traceCarrier) =>
+					this.admitAttachedSubmission(payload, onEvent, waitForResult, traceCarrier),
 			}),
 		);
 	}
@@ -271,6 +274,7 @@ class CloudflareAgentCoordinator {
 		return this.options.createContext({
 			executionStore: this.executionStore,
 			instance: this.instance,
+			agentName: this.agentName,
 			request,
 			initialEventIndex,
 			dispatchId,
@@ -329,6 +333,7 @@ class CloudflareAgentCoordinator {
 		if (!options.driverAlreadyArmed) await this.restoreSubmissionWake();
 		try {
 			for (const terminal of await this.submissions.listPendingTerminalOutboxes()) {
+				assertProductEventV3(terminal.event);
 				const offset =
 					terminal.offset ??
 					(await this.eventStreamStore.appendEventOnce(
@@ -612,12 +617,15 @@ class CloudflareAgentCoordinator {
 	private async admitAttachedSubmission(
 		payload: DirectAgentPayload,
 		onEvent?: (event: AttachedAgentEvent) => Promise<void> | void,
-		waitForResult = true,
+		waitForResult?: boolean,
+		traceCarrier?: FlueTraceCarrier,
 	) {
+		waitForResult ??= true;
 		const input = createDirectAgentSubmissionInput({
 			agent: this.agentName,
 			id: this.instance.name,
 			payload,
+			traceCarrier,
 		});
 		const attachment = this.observers.attach(input.submissionId, { onEvent });
 		try {

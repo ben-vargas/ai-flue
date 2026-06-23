@@ -47,6 +47,17 @@ describe('NodePlugin', () => {
 		expect(withoutApp).not.toContain('/fixture/app.ts');
 	});
 
+	it('loads user app.ts inside instrumentation ownership and disposes it during shutdown', () => {
+		const entry = new NodePlugin().generateRuntimeEntryPoint(
+			testBuildContext({ appEntry: '/fixture/app.ts' }),
+		);
+
+		expect(entry).not.toContain('import userApp from');
+		expect(entry).toContain('runWithInstrumentationOwner(instrumentationOwner, async () => {');
+		expect(entry).toContain('const { default: userApp } = await import("/fixture/app.ts");');
+		expect(entry).toContain('await instrumentationOwner.dispose();');
+	});
+
 	it('closes the persistence adapter on shutdown signals', () => {
 		const entry = new NodePlugin().generateEntryPoint(
 			testBuildContext({

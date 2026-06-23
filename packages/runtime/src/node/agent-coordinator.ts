@@ -19,6 +19,8 @@ import { agentStreamPath } from '../runtime/event-stream-store.ts';
 import type { CreateAgentContextFn } from '../runtime/handle-agent.ts';
 import type { RuntimeActivityGate, RuntimeActivityLease } from '../runtime/runtime-activity-gate.ts';
 import { isStreamExcludedEvent } from '../runtime/run-store.ts';
+import { extractTraceCarrier } from '../execution-interceptor.ts';
+import { assertProductEventV3 } from '../product-event.ts';
 import { deleteSessionTree } from '../session.ts';
 import type {
 	AttachedAgentEvent,
@@ -168,6 +170,7 @@ export function createNodeAgentCoordinator(options: {
 		return (dispatchId: string | undefined) => {
 			const ctx = createContext({
 				id: input.id,
+				agentName: input.agent,
 				request: submissionSyntheticRequest(input),
 				dispatchId,
 			});
@@ -409,6 +412,7 @@ export function createNodeAgentCoordinator(options: {
 
 	async function runReconciliationPass(): Promise<void> {
 		for (const terminal of await submissions.listPendingTerminalOutboxes()) {
+			assertProductEventV3(terminal.event);
 			const submission = await submissions.getSubmission(terminal.submissionId);
 			if (!submission || submission.kind !== 'direct') continue;
 			const streamPath = agentStreamPath(submission.input.agent, submission.input.id);
@@ -563,8 +567,10 @@ export function createNodeAgentCoordinator(options: {
 			return async (
 				payload: DirectAgentPayload,
 				onEvent?: (event: AttachedAgentEvent) => Promise<void> | void,
-				waitForResult = true,
+				waitForResult?: boolean,
+				traceCarrier?: import('../execution-interceptor.ts').FlueTraceCarrier,
 			) => {
+				waitForResult ??= true;
 				if (stopping) throw new Error('[flue] Coordinator is shutting down.');
 				const activityLease = activityGate?.enter();
 				const agent = agents.find((record) => record.name === agentName)?.definition;
@@ -577,6 +583,7 @@ export function createNodeAgentCoordinator(options: {
 					agent: agentName,
 					id: instanceId,
 					payload,
+					traceCarrier,
 				});
 
 				const attachment = observers.attach(input.submissionId, { onEvent });

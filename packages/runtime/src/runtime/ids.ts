@@ -13,6 +13,10 @@ export function generateSessionAffinityKey(): string {
 	return `aff_${ulid()}`;
 }
 
+export function generateConversationId(): string {
+	return `conv_${ulid()}`;
+}
+
 export function generateOperationId(): string {
 	return `op_${ulid()}`;
 }

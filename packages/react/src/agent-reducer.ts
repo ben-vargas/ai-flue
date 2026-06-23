@@ -341,9 +341,8 @@ function reduceTurn(
 	state: AgentState,
 	event: StreamAgentEvent & {
 		turnId: string;
-		usage?: PromptUsage;
-		model?: string;
-		provider?: string;
+		response: { usage?: PromptUsage };
+		request: { providerId: string; requestedModel: string };
 	},
 ): AgentState {
 	let index = state.messages.findIndex((message) => message.id === `turn:${event.turnId}`);
@@ -353,10 +352,8 @@ function reduceTurn(
 	if (!current) return state;
 	const metadata = {
 		...current.metadata,
-		...(event.usage ? { usage: event.usage } : {}),
-		...(event.model && event.provider
-			? { model: { provider: event.provider, id: event.model } }
-			: {}),
+		...(event.response.usage ? { usage: event.response.usage } : {}),
+		model: { provider: event.request.providerId, id: event.request.requestedModel },
 	};
 	return replaceMessageAt(state, index, { ...current, metadata });
 }

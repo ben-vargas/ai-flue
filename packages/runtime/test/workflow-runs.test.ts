@@ -5,7 +5,9 @@ import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import {
 	defineAgent,
 	defineWorkflow,
+	instrument,
 	invoke,
+	observe,
 	WorkflowAdmissionError,
 	WorkflowInputSerializationError,
 	WorkflowInputUnexpectedError,
@@ -808,7 +810,7 @@ describe('workflow run lifecycle', () => {
 		}
 	});
 
-	it('normalizes legacy persisted run_start payloads during recovery', async () => {
+	it('rejects unsupported persisted event versions during recovery', async () => {
 		const eventStreamStore = createTestEventStreamStore();
 		const runStore = new InMemoryRunStore();
 		const runId = 'run_legacy_recovery';
@@ -816,14 +818,14 @@ describe('workflow run lifecycle', () => {
 		await eventStreamStore.createStream(streamPath);
 		await eventStreamStore.appendEvent(streamPath, {
 			type: 'run_start',
-			v: 1,
+			v: 2,
 			runId,
 			workflowName: 'report',
 			startedAt: '2026-06-19T00:00:00.000Z',
 			payload: { report: 'weekly' },
 		});
 
-		await failRecoveredRun({
+		await expect(failRecoveredRun({
 			workflowName: 'report',
 			runId,
 			request: new Request('http://localhost/recovery'),
@@ -831,12 +833,77 @@ describe('workflow run lifecycle', () => {
 			error: new Error('interrupted'),
 			runStore,
 			eventStreamStore,
+		})).rejects.toMatchObject({
+			meta: { storedVersion: 2, supportedVersion: 3 },
 		});
+		expect(await runStore.getRun(runId)).toBeNull();
+	});
 
-		expect(await runStore.getRun(runId)).toMatchObject({
-			status: 'errored',
-			input: { report: 'weekly' },
+	it('uses persisted trace context for a recovered workflow segment', async () => {
+		const eventStreamStore = createTestEventStreamStore();
+		const runStore = new InMemoryRunStore();
+		const runId = 'run_trace_recovery';
+		await runStore.createRun({
+			runId,
+			workflowName: 'report',
+			startedAt: '2026-06-19T00:00:00.000Z',
+			input: {},
+			traceCarrier: {
+				traceparent: '00-11111111111111111111111111111111-2222222222222222-01',
+				tracestate: 'vendor=value',
+			},
 		});
+		const recoveryRequest = new Request('http://localhost/recovery', {
+			method: 'POST',
+			headers: { traceparent: '00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01' },
+			body: 'recovery-body',
+		});
+		const contexts: Array<{ type: string; traceparent: string | null; tracestate: string | null }> = [];
+		const stopObserving = observe((event, context) => {
+			if (event.runId !== runId) return;
+			contexts.push({
+				type: event.type,
+				traceparent: context.req?.headers.get('traceparent') ?? null,
+				tracestate: context.req?.headers.get('tracestate') ?? null,
+			});
+		});
+		const intercepted: unknown[] = [];
+		const disposeInstrumentation = instrument({
+			observe() {},
+			async interceptor(operation, context, next) {
+				if (operation.type === 'workflow' && operation.runId === runId) {
+					intercepted.push(context.traceCarrier);
+				}
+				return next();
+			},
+			dispose() {},
+		});
+		try {
+			await failRecoveredRun({
+				workflowName: 'report',
+				runId,
+				request: recoveryRequest,
+				createContext,
+				error: new Error('interrupted'),
+				runStore,
+				eventStreamStore,
+			});
+		} finally {
+			stopObserving();
+			await disposeInstrumentation();
+		}
+
+		expect(await recoveryRequest.text()).toBe('recovery-body');
+		expect(intercepted).toEqual([
+			{
+				traceparent: '00-11111111111111111111111111111111-2222222222222222-01',
+				tracestate: 'vendor=value',
+			},
+		]);
+		expect(contexts).toEqual([
+			{ type: 'run_resume', traceparent: '00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01', tracestate: null },
+			{ type: 'run_end', traceparent: '00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01', tracestate: null },
+		]);
 	});
 
 	it('continues recovery event indexes after the highest persisted event', async () => {
@@ -850,6 +917,8 @@ describe('workflow run lifecycle', () => {
 				type: 'log',
 				level: 'info',
 				message: `m${eventIndex}`,
+				v: 3,
+				timestamp: '2026-06-22T00:00:00.000Z',
 				runId,
 				eventIndex,
 			});

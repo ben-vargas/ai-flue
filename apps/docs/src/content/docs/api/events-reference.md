@@ -11,8 +11,9 @@ import {
   type AttachedAgentEvent,
   type FlueEvent,
   type FlueEventContext,
+  type FlueObservation,
   observe,
-  type FlueEventSubscriber,
+  type FlueObservationSubscriber,
 } from '@flue/runtime';
 ```
 
@@ -20,9 +21,9 @@ import {
 
 `FlueEvent` is the observable runtime activity union. Workflow invocations emit workflow-run events with `runId`. Direct prompts and asynchronously dispatched agent inputs emit agent activity with `instanceId`; dispatched activity may also carry `dispatchId`. Those interactions are not workflow runs.
 
-Every delivered event carries the durable event-format version `v: 1`, a per-context `eventIndex`, and a `timestamp`. Applicable events may also carry harness and session names, generated operation and turn ids, task correlation, and parent-session correlation. Events are durably stored in an event stream and can be replayed from any offset via the Durable Streams protocol — except `turn_request`, which is delivered to in-process subscribers only (see below).
+Every delivered event carries the durable event-format version `v: 3`, a per-context `eventIndex`, and a `timestamp`. Runtime and SDK readers reject every non-v3 event with upgrade guidance rather than applying compatibility fallbacks. Applicable events may also carry harness and session names, generated operation and turn ids, task correlation, and parent-session correlation. Events are durably stored in an event stream and can be replayed from any offset via the Durable Streams protocol — except `turn_request`, which is delivered to in-process subscribers only (see below).
 
-Runtime events can contain workflow inputs, provider or transport payloads, prompts, system instructions, reasoning-bearing messages, logs, tool arguments, tool results, and terminal errors. Apply an exporter-local sanitization policy before forwarding events to an external service.
+Runtime events can contain workflow inputs, provider or transport payloads, prompts, system instructions, reasoning-bearing messages, logs, tool results, and terminal errors. Live observations additionally contain normalized tool arguments and telemetry detail. Apply an exporter-local sanitization policy before forwarding either surface to an external service.
 
 Events never carry raw image bytes. Image content blocks in event payloads keep their `mimeType` but have `data` replaced with the sentinel string `'[image data omitted from event]'`, exported as the `IMAGE_DATA_OMITTED` constant from both `@flue/runtime` and `@flue/sdk`. Session history retains the real bytes for model context.
 
@@ -54,8 +55,8 @@ Operations, turns, task ids, and tool-call ids are generated correlation boundar
 | Event                                              | Meaning                                                                                                                                                                                                                       |
 | -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `turn_start`                                       | Model turn started.                                                                                                                                                                                                           |
-| `turn_request`                                     | Model-visible request. Includes provider, model, input, tools, and optional reasoning level. **In-process only**: delivered to `observe()` subscribers and exporters, never persisted to durable streams or served over HTTP. |
-| `turn`                                             | Model turn ended. Normalized terminal telemetry: duration, error state, and optional output or usage.                                                                                                                         |
+| `turn_request`                                     | Model-visible request. Its required `request` contains provider identity, requested model, API and request settings, plus the full `input`. **In-process only**: delivered to `observe()` subscribers and exporters, never persisted to durable streams or served over HTTP. |
+| `turn`                                             | Model turn ended. Keeps `turnId`, `purpose`, `durationMs`, and `isError` at top level; required `request` summarizes the request and required `response` contains output, usage, finish reason, and normalized error data. |
 | `turn_messages`                                    | Detailed turn payload. Includes the raw assistant message and tool-result messages.                                                                                                                                           |
 | `message_start`, `message_end`                     | General message boundaries for user and assistant messages. For completed assistant messages, `message_end` contains the authoritative message.                                                                               |
 | `text_delta`                                       | Best-effort live text progress.                                                                                                                                                                                               |
@@ -63,16 +64,16 @@ Operations, turns, task ids, and tool-call ids are generated correlation boundar
 
 Streaming deltas are live progress signals, not authoritative message state. A reader that attaches after generation starts may miss earlier partial output until the assistant `message_end` supplies the complete message. Internal interrupted-turn recovery uses separate durable state and is unaffected by the public event contract.
 
-`turn_request` and `turn` use purpose `agent`, `compaction`, or `compaction_prefix`. Count model activity from either the normalized `turn` events or the detailed `turn_messages`/`message_*` family, not both.
+`turn_request` and `turn` use purpose `agent`, `compaction`, or `compaction_prefix`. `request.providerId` is the Flue provider-registration key; `request.providerName` is the semantic provider name used by observability projections and may differ when a gateway or custom registration is involved. Count model activity from either the normalized `turn` events or the detailed `turn_messages`/`message_*` family, not both.
 
 ### Tool calls
 
 | Event        | Meaning                                                           |
 | ------------ | ----------------------------------------------------------------- |
-| `tool_start` | Tool execution started. Includes tool name and arguments.         |
+| `tool_start` | Tool execution started. Includes tool name and call id.            |
 | `tool`       | Tool execution ended. Includes duration, error state, and result. |
 
-Both model-driven and programmatic (`shell()`) tool activity emit `tool_start` and `tool`. Use `toolCallId` to correlate related events.
+Both model-driven and programmatic (`shell()`) tool activity emit `tool_start` and `tool`. Use `toolCallId` to correlate related events. Live `FlueObservation` values additionally carry applicable origin, semantic type, description, effective arguments/result, and normalized error detail; these exporter-oriented fields are not persisted or replayed.
 
 ### Compaction
 
@@ -97,7 +98,7 @@ The detailed message payloads are **not yet stable**: `message` on `message_star
 
 ```ts
 type FlueEvent = RuntimeEventVariant & {
-  v: 1;
+  v: 3;
   eventIndex: number;
   timestamp: string;
   runId?: string;
@@ -133,22 +134,25 @@ type AttachedAgentEvent = Exclude<
 ### `observe(...)`
 
 ```ts
-function observe(subscriber: FlueEventSubscriber): () => void;
+function observe(subscriber: FlueObservationSubscriber): () => void;
 ```
 
-Subscribes to live workflow-run and agent-interaction activity emitted in the current isolate. The returned function unsubscribes the listener. Subscribers run synchronously from the event emission path and receive the emitted event object directly. Treat events as read-only, branch on `event.type`, and return immediately for activity the subscriber does not consume. Keep callbacks lightweight and queue substantial asynchronous work instead of blocking emission. Returned promises are observed for rejection but are not awaited.
+Subscribes to live workflow-run and agent-interaction activity emitted in the current isolate. The returned function unsubscribes the listener. Subscribers run synchronously from the event emission path and receive one detached, frozen `FlueObservation`: the product event plus applicable live-only detail, using the same `v` field. Branch on `observation.type` and return immediately for activity the subscriber does not consume. Keep callbacks lightweight and queue substantial asynchronous work instead of blocking emission. Returned promises are observed for rejection but are not awaited.
 
 `observe()` receives every emitted event, including `turn_request` — the full model-visible request is available to in-process observability without being persisted to the primary database.
 
 See [Observability](/docs/guide/observability/) for application setup and exporter guidance.
 
-#### `FlueEventSubscriber`
+#### `FlueObservationSubscriber`
 
 ```ts
-type FlueEventSubscriber = (event: FlueEvent, ctx: FlueEventContext) => void | Promise<void>;
+type FlueObservationSubscriber = (
+  observation: FlueObservation,
+  ctx: FlueEventContext,
+) => void | Promise<void>;
 ```
 
-Receives the emitted decorated event object and its originating context. Treat the event as read-only. Subscriber failures are logged and do not halt event dispatch or the originating execution.
+Receives a detached immutable observation and its originating context. Subscriber failures are logged and do not halt event dispatch or the originating execution.
 
 ## Public errors
 

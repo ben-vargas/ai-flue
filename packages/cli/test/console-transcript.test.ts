@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { createConsoleTranscript, reduceConsoleTranscript, sanitize, TRANSCRIPT_LIMIT } from '../src/lib/console-transcript.ts';
 
 function event<T extends object>(value: T): T & Pick<FlueEvent, 'v' | 'eventIndex' | 'timestamp'> {
-	return { ...value, v: 1, eventIndex: 1, timestamp: '2026-06-22T00:00:00.000Z' };
+	return { ...value, v: 3, eventIndex: 1, timestamp: '2026-06-22T00:00:00.000Z' };
 }
 
 describe('reduceConsoleTranscript()', () => {

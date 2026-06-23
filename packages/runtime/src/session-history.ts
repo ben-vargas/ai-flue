@@ -2,7 +2,7 @@
 
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { AssistantMessage, UserMessage } from '@earendil-works/pi-ai';
-import { AttachmentNotAvailableError } from './errors.ts';
+import { AttachmentNotAvailableError, SessionDataVersionError } from './errors.ts';
 import type {
 	ChildSessionRef,
 	CompactionEntry,
@@ -53,10 +53,14 @@ export class SessionHistory {
 
 	static fromData(data: SessionData | null): SessionHistory {
 		if (!data) return SessionHistory.empty();
-		if (data.version !== 7) {
-			throw new Error(
-				`[flue] Session data version ${String(data.version)} is unsupported. Clear persisted session state created by an earlier Flue beta.`,
-			);
+		if (data.version !== 8) {
+			throw new SessionDataVersionError({ storedVersion: String(data.version) });
+		}
+		if (
+			typeof data.conversationId !== 'string' ||
+			!/^conv_[0-7][0-9A-HJKMNP-TV-Z]{25}$/.test(data.conversationId)
+		) {
+			throw new SessionDataVersionError({ storedVersion: 'malformed' });
 		}
 		if (
 			typeof data.affinityKey !== 'string' ||
@@ -237,6 +241,7 @@ export class SessionHistory {
 	}
 
 	toData(
+		conversationId: string,
 		affinityKey: string,
 		childSessions: ChildSessionRef[],
 		metadata: Record<string, any>,
@@ -244,7 +249,8 @@ export class SessionHistory {
 		updatedAt: string,
 	): SessionData {
 		return {
-			version: 7,
+			version: 8,
+			conversationId,
 			affinityKey,
 			entries: [...this.entries],
 			leafId: this.leafId,

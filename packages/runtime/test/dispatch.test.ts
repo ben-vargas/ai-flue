@@ -56,7 +56,7 @@ describe('createAgentSubmissionObserverRegistry()', () => {
 			registry.publish('direct:observer-failure', {
 				type: 'idle',
 				instanceId: 'agent-1',
-				v: 1,
+				v: 3,
 				eventIndex: 0,
 				timestamp: '2026-06-01T00:00:00.000Z',
 			}),
@@ -581,7 +581,8 @@ describe('dispatched session processing', () => {
 		};
 		const timestamp = '2026-06-01T00:00:00.000Z';
 		await store.save(`agent-session:${JSON.stringify([input.id, 'default', 'default'])}`, {
-			version: 7,
+			version: 8,
+			conversationId: 'conv_01KT3P3GZGFBCKHKMQ11A7H2HW',
 			affinityKey: 'aff_01KT3P3GZGFBCKHKMQ11A7H2HW',
 			childSessions: [],
 			entries: [
@@ -644,7 +645,8 @@ describe('dispatched session processing', () => {
 		};
 		const timestamp = '2026-06-01T00:00:00.000Z';
 		await store.save(`agent-session:${JSON.stringify([input.id, 'default', 'default'])}`, {
-			version: 7,
+			version: 8,
+			conversationId: 'conv_01KT3P3GZGFBCKHKMQ11A7H2HW',
 			affinityKey: 'aff_01KT3P3GZGFBCKHKMQ11A7H2HW',
 			childSessions: [],
 			entries: [
@@ -706,7 +708,8 @@ describe('dispatched session processing', () => {
 		};
 		const timestamp = '2026-06-01T00:00:00.000Z';
 		await store.save(`agent-session:${JSON.stringify([input.id, 'default', 'default'])}`, {
-			version: 7,
+			version: 8,
+			conversationId: 'conv_01KT3P3GZGFBCKHKMQ11A7H2HW',
 			affinityKey: 'aff_01KT3P3GZGFBCKHKMQ11A7H2HW',
 			childSessions: [],
 			entries: [
@@ -765,7 +768,8 @@ describe('dispatched session processing', () => {
 		const retryableError = () =>
 			fauxAssistantMessage('', { stopReason: 'error', errorMessage: '429 Too Many Requests' });
 		await store.save(`agent-session:${JSON.stringify([input.id, 'default', 'default'])}`, {
-			version: 7,
+			version: 8,
+			conversationId: 'conv_01KT3P3GZGFBCKHKMQ11A7H2HW',
 			affinityKey: 'aff_01KT3P3GZGFBCKHKMQ11A7H2HW',
 			childSessions: [],
 			entries: [
@@ -853,7 +857,8 @@ describe('dispatched session processing', () => {
 		};
 		const timestamp = '2026-06-01T00:00:00.000Z';
 		await store.save(`agent-session:${JSON.stringify([input.id, 'default', 'default'])}`, {
-			version: 7,
+			version: 8,
+			conversationId: 'conv_01KT3P3GZGFBCKHKMQ11A7H2HW',
 			affinityKey: 'aff_01KT3P3GZGFBCKHKMQ11A7H2HW',
 			childSessions: [],
 			entries: [
@@ -1002,7 +1007,8 @@ describe('repairInterruptedToolCalls()', () => {
 
 		return {
 			data: {
-				version: 7,
+				version: 8,
+				conversationId: 'conv_01KT3P3GZGFBCKHKMQ11A7H2HW',
 				affinityKey: generateSessionAffinityKey(),
 				entries,
 				leafId,

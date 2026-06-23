@@ -2,6 +2,7 @@ import {
 	IMAGE_DATA_OMITTED as RUNTIME_IMAGE_DATA_OMITTED,
 	type FlueEvent as RuntimeFlueEvent,
 	type LlmMessage as RuntimeLlmMessage,
+	type ModelRequestInfo as RuntimeModelRequestInfo,
 	type PromptResponse as RuntimePromptResponse,
 	type PromptUsage as RuntimePromptUsage,
 	type RunRecord as RuntimeRunRecord,
@@ -11,6 +12,7 @@ import {
 	IMAGE_DATA_OMITTED as SDK_IMAGE_DATA_OMITTED,
 	type FlueEvent as SdkFlueEvent,
 	type LlmMessage as SdkLlmMessage,
+	type ModelRequestInfo as SdkModelRequestInfo,
 	type PromptUsage as SdkPromptUsage,
 	type RunRecord as SdkRunRecord,
 } from '../src/index.ts';
@@ -68,6 +70,11 @@ const _message: SdkLlmMessage = {} as RuntimeLlmMessage;
 const _messageBack: RuntimeLlmMessage = {} as SdkLlmMessage;
 void _message;
 void _messageBack;
+
+const _modelRequestInfo: SdkModelRequestInfo = {} as RuntimeModelRequestInfo;
+const _modelRequestInfoBack: RuntimeModelRequestInfo = {} as SdkModelRequestInfo;
+void _modelRequestInfo;
+void _modelRequestInfoBack;
 
 // `GET /runs/:id?meta` serves the runtime `RunRecord`; the SDK duplicates the
 // shape with no intentional widening, so it must stay mutually assignable.

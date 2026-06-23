@@ -409,6 +409,30 @@ export class InvalidRequestError extends FlueHttpError {
  * Not an HTTP error — this fires when a store is opened (startup, adapter
  * `migrate()`, Durable Object initialization), before any request is served.
  */
+export class ProductEventVersionError extends FlueError {
+	constructor({ storedVersion }: { storedVersion: unknown }) {
+		super({
+			type: 'product_event_version_unsupported',
+			message: `Persisted product event version ${String(storedVersion)} is unsupported.`,
+			details: 'The persisted event cannot be read or replayed safely by this runtime.',
+			dev: 'Clear historical event and terminal-outbox data created by an earlier Flue beta.',
+			meta: { storedVersion, supportedVersion: 3 },
+		});
+	}
+}
+
+export class SessionDataVersionError extends FlueError {
+	constructor({ storedVersion }: { storedVersion: string }) {
+		super({
+			type: 'session_data_version_unsupported',
+			message: `Persisted session data version ${storedVersion} is unsupported.`,
+			details: 'The persisted session cannot be read safely by this runtime.',
+			dev: 'Clear session state created by an earlier Flue beta before reopening this session.',
+			meta: { storedVersion, supportedVersion: 8 },
+		});
+	}
+}
+
 export class PersistedSchemaVersionError extends FlueError {
 	constructor({
 		storedVersion,
@@ -435,6 +459,18 @@ export class PersistedSchemaVersionError extends FlueError {
 }
 
 // ─── Sandbox error vocabulary ───────────────────────────────────────────────
+
+export class InstrumentationAlreadyInstalledError extends FlueError {
+	constructor() {
+		super({
+			type: 'instrumentation_already_installed',
+			message: 'An instrumentation owner of this kind is already installed.',
+			details: 'Dispose the active instrumentation before installing its replacement.',
+			dev: '',
+		});
+		this.name = 'InstrumentationAlreadyInstalledError';
+	}
+}
 
 export class SandboxOperationUnsupportedError extends FlueError {
 	constructor({

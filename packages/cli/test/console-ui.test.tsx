@@ -26,7 +26,7 @@ describe('ConsoleUi', () => {
 		transcript = reduceConsoleTranscript(transcript, {
 			type: 'event',
 			event: {
-				v: 1,
+				v: 3,
 				eventIndex: 1,
 				timestamp: '2026-06-22T00:00:00.000Z',
 				type: 'message_end',

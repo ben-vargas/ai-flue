@@ -15,7 +15,7 @@
  */
 
 import { clampLimit } from '../adapter-helpers.ts';
-import { ensureFlueSchemaVersion } from '../schema-version.ts';
+import { migrateFlueSqlSchema } from '../schema-version.ts';
 import type { SqlStorage } from '../sql-storage.ts';
 
 // ─── Offset utilities ───────────────────────────────────────────────────────
@@ -181,11 +181,12 @@ export class SqliteEventStreamStore implements EventStreamStore {
 	private listeners = new Map<string, Set<() => void>>();
 
 	constructor(private sql: SqlStorage) {
-		ensureFlueSchemaVersion(sql);
-		sql.exec(CREATE_STREAMS_TABLE);
-		sql.exec(CREATE_ENTRIES_TABLE);
-		sql.exec(CREATE_EVENT_KEYS_TABLE);
-		sql.exec(CREATE_EVENT_KEY_TRIGGER);
+		migrateFlueSqlSchema(sql, () => {
+			sql.exec(CREATE_STREAMS_TABLE);
+			sql.exec(CREATE_ENTRIES_TABLE);
+			sql.exec(CREATE_EVENT_KEYS_TABLE);
+			sql.exec(CREATE_EVENT_KEY_TRIGGER);
+		});
 	}
 
 	async createStream(path: string): Promise<void> {

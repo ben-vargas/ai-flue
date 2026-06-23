@@ -300,6 +300,7 @@ export function createTaskTool(
 	runTask: (
 		params: TaskToolParams,
 		signal?: AbortSignal,
+		toolCallId?: string,
 	) => Promise<AgentToolResult<TaskToolResultDetails>>,
 	subagents: Record<string, AgentProfile>,
 ): AgentTool<typeof TaskParams> {
@@ -323,9 +324,9 @@ export function createTaskTool(
 			'The task returns only its final answer to this conversation.' +
 			agentDescription,
 		parameters: TaskParams,
-		async execute(_toolCallId: string, params: Static<typeof TaskParams>, signal?: AbortSignal) {
+		async execute(toolCallId: string, params: Static<typeof TaskParams>, signal?: AbortSignal) {
 			throwIfAborted(signal);
-			return runTask(params, signal);
+			return runTask(params, signal, toolCallId);
 		},
 	};
 }

@@ -108,7 +108,8 @@ describeMysql('MySQL contracts', defineContracts);
 
 function sessionData(): SessionData {
 	return {
-		version: 7,
+		version: 8,
+		conversationId: 'conv_01KT3P3GZGFBCKHKMQ11A7H2HW',
 		affinityKey: 'affinity-1',
 		entries: [],
 		leafId: null,
@@ -141,6 +142,38 @@ describeMysql('mysql()', () => {
 			`SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'flue_event_stream_entries'`,
 		);
 		expect(rows).toEqual([]);
+		await adapter.close?.();
+	});
+
+	it('migrates schema v2 run tracing columns to v3 when a backend is available', async () => {
+		const { runner } = await createMysqlRunner();
+		const adapter = mysql(runner);
+		await adapter.migrate?.();
+		await runner.query('ALTER TABLE flue_runs DROP COLUMN traceparent, DROP COLUMN tracestate');
+		await runner.query(`UPDATE flue_meta SET value = '2' WHERE \`key\` = 'schema_version'`);
+		await adapter.migrate?.();
+		const columns = await runner.query(
+			`SELECT COLUMN_NAME AS column_name FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'flue_runs' AND COLUMN_NAME IN ('traceparent', 'tracestate') ORDER BY COLUMN_NAME`,
+		);
+		expect(columns).toEqual([{ column_name: 'traceparent' }, { column_name: 'tracestate' }]);
+		const versions = await runner.query(`SELECT value FROM flue_meta WHERE \`key\` = 'schema_version'`);
+		expect(versions).toEqual([{ value: '3' }]);
+		await adapter.close?.();
+	});
+
+	it('repairs schema v3 run tracing columns when a backend is available', async () => {
+		const { runner } = await createMysqlRunner();
+		const adapter = mysql(runner);
+		await adapter.migrate?.();
+		await runner.query('ALTER TABLE flue_runs DROP COLUMN traceparent, DROP COLUMN tracestate');
+		await adapter.migrate?.();
+		const columns = await runner.query(
+			`SELECT COLUMN_NAME AS column_name, COLUMN_TYPE AS column_type, COLLATION_NAME AS collation_name FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'flue_runs' AND COLUMN_NAME IN ('traceparent', 'tracestate') ORDER BY COLUMN_NAME`,
+		);
+		expect(columns).toEqual([
+			{ column_name: 'traceparent', column_type: 'varchar(255)', collation_name: 'ascii_bin' },
+			{ column_name: 'tracestate', column_type: 'longtext', collation_name: 'utf8mb4_bin' },
+		]);
 		await adapter.close?.();
 	});
 

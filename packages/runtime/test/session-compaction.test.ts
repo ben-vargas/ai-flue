@@ -529,7 +529,7 @@ describe('automatic compaction', () => {
 					(event): event is Extract<FlueEvent, { type: 'turn_request' }> =>
 						event.type === 'turn_request' && event.purpose === 'agent',
 				)
-				.map((event) => event.model),
+				.map((event) => event.request.requestedModel),
 		).toEqual(['agent', 'agent']);
 		expect(
 			events
@@ -537,7 +537,7 @@ describe('automatic compaction', () => {
 					(event): event is Extract<FlueEvent, { type: 'turn_request' }> =>
 						event.type === 'turn_request' && event.purpose === 'compaction',
 				)
-				.map((event) => event.model),
+				.map((event) => event.request.requestedModel),
 		).toEqual(['summarizer']);
 	});
 });

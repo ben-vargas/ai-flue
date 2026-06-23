@@ -284,9 +284,10 @@ const dispatchQueue = {
   },
 };
 
-function createAgentContextForRequest({ executionStore, instance, request, initialEventIndex, dispatchId }) {
+function createAgentContextForRequest({ executionStore, instance, agentName, request, initialEventIndex, dispatchId }) {
   return createFlueContext({
     id: instance.name,
+    agentName,
     env: instance?.env ?? {},
     req: request,
     initialEventIndex,

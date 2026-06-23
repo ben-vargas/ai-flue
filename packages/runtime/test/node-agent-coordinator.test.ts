@@ -338,7 +338,8 @@ describe('NodeAgentCoordinator', () => {
 			const storageKey = createSessionStorageKey('instance-1', 'default', 'default');
 			const now = new Date().toISOString();
 			await store.sessions.save(storageKey, {
-				version: 7,
+				version: 8,
+				conversationId: 'conv_01KT3P3GZGFBCKHKMQ11A7H2HW',
 				affinityKey: generateSessionAffinityKey(),
 				childSessions: [],
 				entries: [
@@ -421,7 +422,8 @@ describe('NodeAgentCoordinator', () => {
 			const storageKey = createSessionStorageKey('instance-1', 'default', 'default');
 			const now = new Date().toISOString();
 			await store.sessions.save(storageKey, {
-				version: 7,
+				version: 8,
+				conversationId: 'conv_01KT3P3GZGFBCKHKMQ11A7H2HW',
 				affinityKey: generateSessionAffinityKey(),
 				childSessions: [],
 				entries: [
@@ -1128,7 +1130,8 @@ describe('NodeAgentCoordinator', () => {
 			const storageKey = createSessionStorageKey('instance-1', 'default', 'default');
 			const now = new Date().toISOString();
 			await store.sessions.save(storageKey, {
-				version: 7,
+				version: 8,
+				conversationId: 'conv_01KT3P3GZGFBCKHKMQ11A7H2HW',
 				affinityKey: generateSessionAffinityKey(),
 				childSessions: [],
 				entries: [
@@ -1264,7 +1267,8 @@ describe('NodeAgentCoordinator', () => {
 			const storageKey = createSessionStorageKey('instance-1', 'default', 'default');
 			const now = new Date().toISOString();
 			await store.sessions.save(storageKey, {
-				version: 7,
+				version: 8,
+				conversationId: 'conv_01KT3P3GZGFBCKHKMQ11A7H2HW',
 				affinityKey: generateSessionAffinityKey(),
 				childSessions: [],
 				entries: [
@@ -1365,7 +1369,8 @@ describe('NodeAgentCoordinator', () => {
 			const storageKey = createSessionStorageKey('instance-1', 'default', 'default');
 			const now = new Date().toISOString();
 			await store.sessions.save(storageKey, {
-				version: 7,
+				version: 8,
+				conversationId: 'conv_01KT3P3GZGFBCKHKMQ11A7H2HW',
 				affinityKey: generateSessionAffinityKey(),
 				childSessions: [],
 				entries: [
@@ -1478,7 +1483,8 @@ describe('NodeAgentCoordinator', () => {
 			const storageKey = createSessionStorageKey('instance-1', 'default', 'default');
 			const now = new Date().toISOString();
 			await store.sessions.save(storageKey, {
-				version: 7,
+				version: 8,
+				conversationId: 'conv_01KT3P3GZGFBCKHKMQ11A7H2HW',
 				affinityKey: generateSessionAffinityKey(),
 				childSessions: [],
 				entries: [
@@ -1796,7 +1802,8 @@ describe('NodeAgentCoordinator', () => {
 			const store = await openExecutionStore(dbPath);
 			const sessionKey = createSessionStorageKey('instance-1', 'default', 'default');
 			await store.sessions.save(sessionKey, {
-				version: 7,
+				version: 8,
+				conversationId: 'conv_01KT3P3GZGFBCKHKMQ11A7H2HW',
 				affinityKey: generateSessionAffinityKey(),
 				childSessions: [],
 				entries: [],
@@ -2090,8 +2097,9 @@ describe('NodeAgentCoordinator', () => {
 				const storageKey = createSessionStorageKey('instance-1', 'default', 'default');
 				const now = new Date().toISOString();
 				await executionStore.sessions.save(storageKey, {
-					version: 7,
-					affinityKey: generateSessionAffinityKey(),
+					version: 8,
+					conversationId: 'conv_01KT3P3GZGFBCKHKMQ11A7H2HW',
+				affinityKey: generateSessionAffinityKey(),
 					childSessions: [],
 					entries: [
 						{
