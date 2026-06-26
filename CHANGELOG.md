@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### New Features
+
+- Added durable structured data parts. Workflows, custom tools, and model-invoked Actions can emit validated JSON activity with `emitData()`, while `@flue/react` exposes AI SDK-compatible `data-*` message parts and reconciles lifecycle updates by name and id.
+
 ## @flue/runtime, @flue/cli, @flue/sdk, and @flue/react 1.0.0-beta.6 - 2026-06-25
 
 ### Fixes & Other Changes

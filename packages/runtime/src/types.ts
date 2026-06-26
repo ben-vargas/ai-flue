@@ -19,6 +19,7 @@ declare module '@earendil-works/pi-agent-core' {
 import type { MiddlewareHandler } from 'hono';
 import type * as v from 'valibot';
 import type { ActionDefinition } from './action.ts';
+import type { EmitData } from './data.ts';
 import type { ToolDefinition } from './tool-types.ts';
 
 export type {
@@ -445,6 +446,8 @@ export interface FlueEventContext<TEnv = Record<string, any>> {
 	readonly req: Request | undefined;
 	/** Emit observable structured log events, persisted in a run stream only during a workflow run. */
 	readonly log: FlueLogger;
+	/** Emit trusted structured UI state that is persisted verbatim for authorized stream readers. */
+	readonly emitData: EmitData;
 }
 
 export interface FlueLogger {
@@ -1080,6 +1083,13 @@ type FlueEventVariant =
 			message: string;
 			attributes?: Record<string, unknown>;
 	  }
+	| {
+			type: 'data';
+			name: string;
+			id?: string;
+			/** Persisted verbatim. Do not include raw image bytes, secrets, or unsanitized PII. */
+			data: unknown;
+	  }
 	| { type: 'idle' }
 	| {
 			type: 'submission_settled';
@@ -1144,10 +1154,11 @@ export type FlueEventInput = FlueEventVariant & {
  * streams and `observe()` from `@flue/runtime` deliver live activity; their
  * indexes are per-context ordering, not durable identity.
  *
- * Events never carry raw image bytes. Image content blocks in event payloads
- * keep their `mimeType` but have `data` replaced with the exported
- * `IMAGE_DATA_OMITTED` sentinel. Session history retains the real bytes for
- * model context.
+ * Recognized image content blocks in framework event payloads never carry raw
+ * image bytes: their `data` is replaced with the exported
+ * `IMAGE_DATA_OMITTED` sentinel. Application-authored `data` event payloads
+ * are persisted verbatim and must not include raw image bytes, secrets, or
+ * unsanitized PII. Session history retains real image bytes for model context.
  */
 export type FlueEvent = FlueEventInput & {
 	/** Durable event-format version. Readers branch on this when the format changes. */

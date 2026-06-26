@@ -5,6 +5,7 @@ import {
 } from './agent-definition.ts';
 import type { AgentSubmissionStore } from './agent-execution-store.ts';
 import { discoverSessionContext } from './context.ts';
+import { createDataEmitter } from './data.ts';
 import { Harness } from './harness.ts';
 import { dispatchGlobalEvent } from './runtime/events.ts';
 import { createCwdSessionEnv } from './sandbox.ts';
@@ -135,6 +136,8 @@ export function createFlueContext(config: FlueContextConfig): FlueContextInterna
 		initializeRootHarness(agent: AgentDefinition): Promise<Harness> {
 			return initializeRootHarness(agent, config, emitEvent);
 		},
+
+		emitData: createDataEmitter(emitEvent),
 
 		log: {
 			info(message, attributes) {

@@ -146,8 +146,11 @@ type UIMessagePart =
       input: unknown;
       errorText: string;
     }
-  | { type: 'file'; mediaType: string; url: string };
+  | { type: 'file'; mediaType: string; url: string }
+  | { type: `data-${string}`; id?: string; data: unknown };
 ```
+
+Runtime `data` events become standalone `data-*` message parts. Repeated events with the same `(name, id)` replace their first timeline entry in place; events without ids remain distinct. Use `history: 'all'` when full lifecycle reconstruction is required.
 
 Streaming deltas provide best-effort live text and reasoning progress; `message_end` is the authoritative completed assistant message. A hook that attaches after generation starts may miss earlier partial output until `message_end` arrives. This does not affect the runtime's internal interrupted-turn recovery. Tool calls progress from input to output or error; tool input arrives complete, so there is no `input-streaming` state.
 

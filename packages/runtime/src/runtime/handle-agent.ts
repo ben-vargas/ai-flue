@@ -631,7 +631,11 @@ async function executeWorkflowDefinition(
 	const parsedInput = parseActionInput(workflow.action, input);
 	const harness = await ctx.initializeRootHarness(workflow.agent);
 	try {
-		return await runActionWithParsedInput(workflow.action, { harness, log: ctx.log }, parsedInput);
+		return await runActionWithParsedInput(
+			workflow.action,
+			{ harness, log: ctx.log, emitData: ctx.emitData },
+			parsedInput,
+		);
 	} finally {
 		await harness.close();
 	}

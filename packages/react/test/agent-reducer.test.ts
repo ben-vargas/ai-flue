@@ -19,6 +19,75 @@ function message(
 }
 
 describe('reduceAgentEvent()', () => {
+	it('appends distinct standalone messages when data events omit ids', () => {
+		let state = reduceAgentEvent(emptyAgentState, {
+			...base,
+			type: 'data',
+			name: 'notice',
+			data: { status: 'ready' },
+			eventIndex: 1,
+		});
+		state = reduceAgentEvent(state, {
+			...base,
+			type: 'data',
+			name: 'notice',
+			data: { status: 'ready' },
+			eventIndex: 2,
+		});
+
+		expect(state.messages).toHaveLength(2);
+		expect(state.messages.map((item) => item.parts)).toEqual([
+			[{ type: 'data-notice', data: { status: 'ready' } }],
+			[{ type: 'data-notice', data: { status: 'ready' } }],
+		]);
+	});
+
+	it('reconciles data by name and id without changing first-emission order', () => {
+		let state = reduceAgentEvent(emptyAgentState, {
+			...base,
+			type: 'data',
+			name: 'commit',
+			id: 'same:id',
+			data: { status: 'running' },
+			eventIndex: 1,
+		});
+		state = reduceAgentEvent(state, {
+			...base,
+			type: 'data',
+			name: 'validation',
+			id: 'same:id',
+			data: { status: 'done' },
+			eventIndex: 2,
+		});
+		state = reduceAgentEvent(state, {
+			...base,
+			type: 'data',
+			name: 'commit',
+			id: 'same:id',
+			data: { status: 'done' },
+			eventIndex: 3,
+		});
+
+		expect(state.messages).toHaveLength(2);
+		expect(state.messages.map((item) => item.parts[0])).toEqual([
+			{ type: 'data-commit', id: 'same:id', data: { status: 'done' } },
+			{ type: 'data-validation', id: 'same:id', data: { status: 'done' } },
+		]);
+	});
+
+	it('does not duplicate an unidentified data part when its stream event is replayed', () => {
+		const event = {
+			...base,
+			type: 'data' as const,
+			name: 'notice',
+			data: { status: 'ready' },
+			eventIndex: 1,
+		};
+		const state = reduceAgentEvent(reduceAgentEvent(emptyAgentState, event), event);
+
+		expect(state.messages).toHaveLength(1);
+	});
+
 	it('builds text and thinking parts from ordered deltas when a message has started', () => {
 		let state = reduceAgentEvent(
 			emptyAgentState,

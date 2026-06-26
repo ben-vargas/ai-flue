@@ -117,16 +117,19 @@ function MessagePart({ part }: { part: UIMessagePart }) {
 			</details>
 		);
 	if (part.type === 'file') return <a href={part.url}>Attachment</a>;
-	return (
-		<pre>
-			{part.toolName}: {part.state}
-		</pre>
-	);
+	if (part.type === 'dynamic-tool')
+		return (
+			<pre>
+				{part.toolName}: {part.state}
+			</pre>
+		);
+	return <pre>{JSON.stringify(part.data, null, 2)}</pre>;
 }
 
 function partKey(part: UIMessagePart): string {
 	if (part.type === 'dynamic-tool') return `tool:${part.toolCallId}`;
 	if (part.type === 'file') return `file:${part.mediaType}:${part.url}`;
+	if ('data' in part) return `${part.type}:${part.id ?? JSON.stringify(part.data)}`;
 	return `${part.type}:${part.text}`;
 }
 

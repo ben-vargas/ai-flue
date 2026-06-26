@@ -51,6 +51,7 @@ import {
 	shouldCompact,
 } from './compaction.ts';
 import { isWorkspaceSkill, skillsDirIn } from './context.ts';
+import { createDataEmitter } from './data.ts';
 import {
 	DelegationDepthExceededError,
 	ModelNotConfiguredError,
@@ -551,6 +552,7 @@ export class Session implements FlueSession, AgentSubmissionSession {
 	private activeSubmissionId: string | undefined;
 	private activeSubmissionAttemptId: string | undefined;
 	private executionIdentity: FlueExecutionContext;
+	private readonly emitData = createDataEmitter((event) => this.emit(event));
 
 	private emitTurnRequestAndStream: StreamFn = async (model, context, options) => {
 		if (this.activeTurnId === undefined) this.activeTurnId = generateTurnId();
@@ -1483,7 +1485,7 @@ export class Session implements FlueSession, AgentSubmissionSession {
 						result: toolResultText,
 					};
 				}
-				const parsed = parseToolInput(toolDef, params, signal);
+				const parsed = parseToolInput(toolDef, params, signal, this.emitData);
 				return {
 					args: parsed.input,
 					run: async () => {
@@ -1575,7 +1577,11 @@ export class Session implements FlueSession, AgentSubmissionSession {
 		try {
 			const output = await runActionWithParsedInput(
 				action,
-				{ harness, log: this.createActionLogger(action.name, toolCallId) },
+				{
+					harness,
+					log: this.createActionLogger(action.name, toolCallId),
+					emitData: this.emitData,
+				},
 				parsedInput,
 			);
 			return {

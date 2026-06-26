@@ -25,7 +25,7 @@ Every delivered event carries the durable event-format version `v: 3`, a per-con
 
 Runtime events can contain workflow inputs, provider or transport payloads, prompts, system instructions, reasoning-bearing messages, logs, tool results, and terminal errors. Live observations additionally contain normalized tool arguments and telemetry detail. Apply an exporter-local sanitization policy before forwarding either surface to an external service.
 
-Events never carry raw image bytes. Image content blocks in event payloads keep their `mimeType` but have `data` replaced with the sentinel string `'[image data omitted from event]'`, exported as the `IMAGE_DATA_OMITTED` constant from both `@flue/runtime` and `@flue/sdk`. Session history retains the real bytes for model context.
+Recognized image content blocks in framework event payloads never carry raw image bytes. They keep their `mimeType` but have `data` replaced with the sentinel string `'[image data omitted from event]'`, exported as the `IMAGE_DATA_OMITTED` constant from both `@flue/runtime` and `@flue/sdk`. Application-authored `data` event payloads are persisted verbatim and are not automatically sanitized; producers must not include raw image bytes, secrets, or unsanitized PII. Session history retains real image bytes for model context.
 
 ### Lifecycle events
 
@@ -82,15 +82,18 @@ Both model-driven and programmatic (`shell()`) tool activity emit `tool_start` a
 | `compaction_start` | Conversation compaction started. Includes `threshold`, `overflow`, or `manual` reason.             |
 | `compaction`       | Conversation compaction ended. Includes message counts, duration, error state, and optional usage. |
 
-### Logs
+### Application events
 
-| Event | Meaning                                                                                   |
-| ----- | ----------------------------------------------------------------------------------------- |
-| `log` | Structured application log with `info`, `warn`, or `error` level and optional attributes. |
+| Event  | Meaning                                                                                                    |
+| ------ | ---------------------------------------------------------------------------------------------------------- |
+| `log`  | Structured application log with `info`, `warn`, or `error` level and optional attributes.                 |
+| `data` | Trusted, JSON-compatible UI activity with a template-safe `name`, optional stable `id`, and `data` payload. |
+
+Data events are durable and append-only. Consumers may reconcile repeated events by `(name, id)` using last-writer-wins while preserving the first event's timeline position. Events without an `id` remain distinct occurrences.
 
 ### Stable contract vs. provider-shaped fields
 
-Event type names, the envelope fields (`v`, `eventIndex`, `timestamp`, identity and correlation fields), and the normalized payloads — `turn_request`/`turn` (the `Llm*` mirror types), `tool_start`/`tool`, `task`, `operation`, `compaction`, `run_*`, `log`, `submission_settled`, `text_delta`, and `thinking_*` — are the stable event contract.
+Event type names, the envelope fields (`v`, `eventIndex`, `timestamp`, identity and correlation fields), and the normalized payloads — `turn_request`/`turn` (the `Llm*` mirror types), `tool_start`/`tool`, `task`, `operation`, `compaction`, `run_*`, `log`, `data`, `submission_settled`, `text_delta`, and `thinking_*` — are the stable event contract.
 
 The detailed message payloads are **not yet stable**: `message` on `message_start`/`message_end`, `message` and `toolResults` on `turn_messages`, and `messages` on `agent_end` mirror the message shape of the underlying agent library (pi-agent-core's `AgentMessage`) and may change shape before 1.0, when they will be replaced with a Flue-owned message type. Readers of persisted streams can branch on the envelope's `v` field when the format changes.
 

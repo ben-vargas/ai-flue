@@ -146,6 +146,8 @@ function reduceAgentEventOnce(state: AgentState, event: AgentReducerEvent): Agen
 			return reduceToolStart(state, event);
 		case 'tool':
 			return reduceToolResult(state, event);
+		case 'data':
+			return reduceDataPart(state, event);
 		case 'turn':
 			return reduceTurn(state, event);
 		case 'submission_settled':
@@ -380,6 +382,29 @@ function reduceToolResult(
 			: { ...part, state: 'output-available' as const, output: event.result, errorText: undefined };
 	});
 	return replaceMessageAt(state, index, { ...current, parts });
+}
+
+function reduceDataPart(
+	state: AgentState,
+	event: StreamAgentEvent & { name: string; id?: string; data: unknown },
+): AgentState {
+	const id =
+		event.id === undefined
+			? `data-event:${streamEventId(event)}`
+			: `data:${JSON.stringify([event.name, event.id])}`;
+	const part: UIMessagePart = {
+		type: `data-${event.name}`,
+		...(event.id === undefined ? {} : { id: event.id }),
+		data: event.data,
+	};
+	return {
+		...state,
+		messages: replaceById(state.messages, id, {
+			id,
+			role: 'assistant',
+			parts: [part],
+		}),
+	};
 }
 
 function reduceTurn(

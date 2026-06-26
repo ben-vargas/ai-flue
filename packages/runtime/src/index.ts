@@ -17,6 +17,7 @@ export {
 	ActionOutputSerializationError,
 	ActionOutputValidationError,
 	AttachmentNotAvailableError,
+	DataPartValidationError,
 	WorkflowAdmissionError,
 	WorkflowAdmissionUnavailableError,
 	WorkflowInputSerializationError,
@@ -51,6 +52,7 @@ export {
 	type ToolValidationIssue,
 	type ValidationIssue,
 } from './errors.ts';
+export type { EmitData, EmitDataOptions } from './data.ts';
 export { IMAGE_DATA_OMITTED } from './event-redaction.ts';
 export { instrument, type FlueInstrumentation } from './instrumentation.ts';
 export type {

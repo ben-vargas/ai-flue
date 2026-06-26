@@ -15,7 +15,7 @@ import {
 	ToolNameConflictError,
 } from '../src/index.ts';
 import { createFlueContext } from '../src/internal.ts';
-import type { SessionData, SessionEnv, SessionStore } from '../src/types.ts';
+import type { FlueEvent, SessionData, SessionEnv, SessionStore } from '../src/types.ts';
 import { createNoopSessionEnv } from './fixtures/session-env.ts';
 
 const providers: FauxProviderRegistration[] = [];
@@ -111,6 +111,51 @@ describe('model-called Actions', () => {
 			},
 			required: ['repository'],
 		});
+	});
+
+	it('emits parent-session data when a model-called Action reports progress', async () => {
+		const provider = createProvider();
+		const store = new RecordingSessionStore();
+		const events: FlueEvent[] = [];
+		const action = defineAction({
+			name: 'review_repository',
+			description: 'Review a repository.',
+			async run({ emitData }) {
+				emitData('review', { status: 'done' }, { id: 'review-1' });
+				return undefined;
+			},
+		});
+		provider.setResponses([
+			fauxAssistantMessage(fauxToolCall('review_repository', {}, { id: 'call-action-1' }), {
+				stopReason: 'toolUse',
+			}),
+			fauxAssistantMessage('Reviewed.'),
+		]);
+		const context = createContext(provider, store);
+		context.subscribeEvent((event) => {
+			events.push(event);
+		});
+		const harness = await context.initializeRootHarness(
+			defineAgent(() => ({
+				model: `${provider.getModel().provider}/${provider.getModel().id}`,
+				actions: [action],
+			})),
+		);
+
+		await (await harness.session()).prompt('Review the repository.');
+
+		expect(events).toContainEqual(
+			expect.objectContaining({
+				type: 'data',
+				name: 'review',
+				id: 'review-1',
+				data: { status: 'done' },
+				conversationId: expect.any(String),
+				session: 'default',
+				operationId: expect.any(String),
+				turnId: expect.any(String),
+			}),
+		);
 	});
 
 	it('returns validated JSON-cloned output while isolating and retaining Action sessions', async () => {
