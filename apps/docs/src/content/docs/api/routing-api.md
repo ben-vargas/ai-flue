@@ -44,6 +44,7 @@ Creates a mountable Hono sub-app for Flue's public HTTP API. Routes are relative
 | Route                    | Purpose                                                                                  |
 | ------------------------ | ---------------------------------------------------------------------------------------- |
 | `POST /agents/:name/:id` | Start a prompt on an HTTP-exposed agent instance; returns `202` with stream coordinates. |
+| `POST /agents/:name/:id/abort` | Abort the instance's in-flight and queued durable work; returns `200 { aborted }`. |
 | `GET /agents/:name/:id`  | Read materialized history or projected updates.                                          |
 | `HEAD /agents/:name/:id` | Return canonical conversation-stream metadata.                                           |
 | `POST /workflows/:name`  | Start an HTTP-exposed workflow run.                                                      |
@@ -72,6 +73,8 @@ curl -X POST 'http://localhost:3583/agents/assistant/main?wait=result' \
 ```
 
 `POST /agents/:name/:id` returns `202 { streamUrl, offset, submissionId }` after admission, or `200 { result, streamUrl, offset, submissionId }` with `?wait=result`; agent response headers and stream-coordinate behavior are unchanged. `POST /workflows/:name` returns `202 { runId }`, or `200 { runId, result }` with `?wait=result`. Workflow invocation responses do not include `Location` or `Stream-Next-Offset` headers. Any `?wait` value other than `result` is rejected with `400 invalid_request` on both routes.
+
+`POST /agents/:name/:id/abort` stops all in-flight and queued durable work for the instance and returns `200 { aborted }` — `aborted` is `true` when there was unsettled work, `false` when the instance was idle. Abort records a durable intent and returns before settlement; the aborted work settles to a distinct **aborted** outcome (a `submission_aborted` conversation entry, and a `submission_settled` record with `outcome: 'aborted'` for direct prompts), and a pending `?wait=result` caller's connection fails with `submission_aborted`. Work that already completed is unaffected.
 
 For agent prompts, waiting with `?wait=result` is best-effort and scoped to the process that admitted the prompt. The prompt itself is a durable submission either way: if the admitting process is interrupted before settlement, the waiting connection is lost while recovery settles the submission in the background — the outcome then appears in canonical conversation history and as a `submission_settled` record on the agent's stream instead of answering the original request. A caller that must observe the outcome across interruptions should read the agent stream from the returned coordinates rather than relying on the synchronous response.
 

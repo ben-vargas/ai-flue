@@ -92,6 +92,26 @@ interface AgentSendResult {
 
 Both `prompt()` and `send()` return the required `submissionId`, which identifies the durable direct submission.
 
+## `client.agents.abort(...)`
+
+```ts
+abort(name: string, id: string, options?: { signal?: AbortSignal }): Promise<AgentAbortResult>;
+```
+
+Aborts all in-flight and queued durable work for an agent instance — the submission it is currently running and anything queued behind it. This uses `POST /agents/:name/:id/abort`.
+
+Abort records a durable intent and returns once it is recorded; settlement happens asynchronously. The aborted work settles to a distinct **aborted** terminal outcome rather than a failure: a `submission_aborted` entry is written to the conversation (visible via `observe()`/`history()`), and a pending `wait()`/`prompt()` rejects with `SubmissionAbortedError` (`type: 'submission_aborted'`). Work that has already completed is not affected — an abort that loses the race to a finished response settles as completed.
+
+### `AgentAbortResult`
+
+```ts
+interface AgentAbortResult {
+  aborted: boolean;
+}
+```
+
+`aborted` is `true` when there was in-flight or queued work that is now being aborted, and `false` when the instance was idle.
+
 ## `client.agents.observe(...)`
 
 ```ts

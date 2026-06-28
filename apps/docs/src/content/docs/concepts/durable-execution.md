@@ -50,6 +50,8 @@ Node requires **one live process to own a given agent instance**. A shared datab
 
 On graceful shutdown, active submissions stop at a turn boundary and remain reclaimable. On restart, durable partial output and completed tool results are reused. A tool call that may have started without producing a durable result is not repeated automatically.
 
+To deliberately stop an instance's work, `client.agents.abort(name, id)` (HTTP `POST /agents/:name/:id/abort`) aborts the running submission and everything queued behind it. Abort is a distinct terminal outcome, not a failure: it signals the in-flight attempt to stop at the next halt point, settles queued work before its provider runs, and on recovery settles a crash-interrupted aborted submission as aborted rather than retrying it. Work that already completed is unaffected — an abort that loses the race to a finished response settles as completed.
+
 Waiting for `?wait=result` is best-effort and process-scoped. If that process disappears, observe the canonical conversation with `client.agents.observe()` to receive durable settlement. `history()` and `updates()` remain lower-level primitives for applications that manage their own materialized state.
 
 A file-backed SQLite adapter protects against restart on the same host. Surviving host loss requires external durable storage such as Postgres, while still preserving the single-live-owner rule. See [Database](/docs/guide/database/) and [Deploy Agents on Node.js](/docs/ecosystem/deploy/node/).

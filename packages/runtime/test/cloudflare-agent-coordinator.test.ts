@@ -599,4 +599,44 @@ describe('createCloudflareAgentRuntime()', () => {
 			status: 'settled',
 		});
 	});
+
+	it('routes POST /abort to the coordinator and records the abort intent', async () => {
+		const { storage } = makeFakeSql();
+		const runtime = makeRuntime();
+		const instance = makeInstance(storage);
+		const executionStore = prepare(runtime, instance);
+		await executionStore.submissions.admitDispatch(dispatchInput());
+		// Agent processing is intentionally unavailable here; reconciliation logs
+		// and leaves the queued submission stamped. We assert the routing + the
+		// durable abort intent; the settle-to-aborted behavior is covered by the
+		// store contract and the Node integration test.
+		const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+		const response = await runtime.onRequest(
+			instance,
+			new Request('https://flue.invalid/agents/assistant/agent-1/abort', { method: 'POST' }),
+		);
+
+		expect(response).not.toBeNull();
+		expect(await response?.json()).toEqual({ aborted: true });
+		expect(await executionStore.submissions.getSubmission('dispatch-1')).toMatchObject({
+			status: 'queued',
+			abortRequestedAt: expect.any(Number),
+		});
+		consoleError.mockRestore();
+	});
+
+	it('reports nothing to abort for an instance with no unsettled work', async () => {
+		const { storage } = makeFakeSql();
+		const runtime = makeRuntime();
+		const instance = makeInstance(storage);
+		prepare(runtime, instance);
+
+		const response = await runtime.onRequest(
+			instance,
+			new Request('https://flue.invalid/agents/assistant/agent-1/abort', { method: 'POST' }),
+		);
+
+		expect(await response?.json()).toEqual({ aborted: false });
+	});
 });
