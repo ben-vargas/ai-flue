@@ -614,7 +614,7 @@ export function createNodeAgentCoordinator(options: {
 			}
 		},
 
-		async abortInstance(agentName: string, instanceId: string): Promise<boolean> {
+		async abortInstance(_agentName: string, instanceId: string): Promise<boolean> {
 			// External submissions for an instance share one durable session, so
 			// one session-scoped stamp covers the running head and every queued
 			// submission behind it.

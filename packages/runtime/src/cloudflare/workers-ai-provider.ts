@@ -602,7 +602,7 @@ function streamCloudflareAnthropicAi(
 		...options,
 		client,
 		cacheRetention: 'none',
-		thinkingEnabled: options?.reasoning ? true : false,
+		thinkingEnabled: Boolean(options?.reasoning),
 		onPayload: async (payload, payloadModel) => {
 			const normalized = normalizeAnthropicGatewayPayload(payload as Record<string, unknown>);
 			const overridden = await options?.onPayload?.(normalized, payloadModel);

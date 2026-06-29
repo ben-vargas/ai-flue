@@ -1,7 +1,7 @@
-import {
-	type AgentPromptImage,
-	type FlueConversationMessage,
-	type FlueConversationState,
+import type {
+	AgentPromptImage,
+	FlueConversationMessage,
+	FlueConversationState,
 } from '@flue/sdk';
 
 export type AgentStatus = 'idle' | 'connecting' | 'submitted' | 'streaming' | 'error';

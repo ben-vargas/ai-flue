@@ -1,7 +1,7 @@
 import type { AssistantMessage, ToolResultMessage } from '@earendil-works/pi-ai';
 import type { PromptUsage } from './types.ts';
 
-export interface ConversationRecordEnvelope {
+interface ConversationRecordEnvelope {
 	v: 1;
 	id: string;
 	type: string;

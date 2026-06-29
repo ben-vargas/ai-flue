@@ -1,8 +1,8 @@
-import {
-	type AgentConversationObservation,
-	type AgentPromptImage,
-	type ConversationLiveMode,
-	type FlueClient,
+import type {
+	AgentConversationObservation,
+	AgentPromptImage,
+	ConversationLiveMode,
+	FlueClient,
 } from '@flue/sdk';
 import {
 	type AgentReducerEvent,

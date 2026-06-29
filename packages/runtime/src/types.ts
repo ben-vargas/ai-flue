@@ -66,7 +66,7 @@ export interface DispatchReceipt {
  * with an optional uploader-provided `filename` (carried on the wire and the
  * canonical record, but not part of pi-ai's model image shape).
  */
-export type DirectAgentImage = PromptImage & { filename?: string };
+type DirectAgentImage = PromptImage & { filename?: string };
 
 export interface DirectAgentPayload {
 	message: string;

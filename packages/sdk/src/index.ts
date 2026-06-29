@@ -9,6 +9,7 @@ export {
 	StreamClosedError,
 } from '@durable-streams/client';
 export type {
+	AgentAbortResult,
 	CreateFlueClientOptions,
 	FlueClient,
 	HttpClientOptions,

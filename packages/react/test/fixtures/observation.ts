@@ -1,9 +1,9 @@
-import {
-	type AgentConversationObservation,
-	type AgentConversationObservationSnapshot,
-	type FlueConversationMessage,
-	type FlueConversationSettlement,
-	type FlueConversationState,
+import type {
+	AgentConversationObservation,
+	AgentConversationObservationSnapshot,
+	FlueConversationMessage,
+	FlueConversationSettlement,
+	FlueConversationState,
 } from '@flue/sdk';
 import { type Mock, vi } from 'vitest';
 
