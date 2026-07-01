@@ -23,6 +23,13 @@ interface ReducedEntryBase {
 	parentId: string | null;
 	timestamp: string;
 	submissionId?: string;
+	/**
+	 * Turn this entry was recorded under, when one was active. Carried from the
+	 * canonical record envelope so the public projection can expose a stable
+	 * per-turn grouping identity. Absent on entries recorded outside a turn
+	 * (e.g. a user message queued before the first model round-trip).
+	 */
+	turnId?: string;
 }
 
 export interface ReducedMessageEntry extends ReducedEntryBase {
@@ -86,6 +93,7 @@ export interface InProgressAssistantMessage {
 	parentId: string | null;
 	timestamp: string;
 	submissionId?: string;
+	turnId?: string;
 	modelInfo: AssistantMessageStartedRecord['modelInfo'];
 	blocks: Map<string, ReducedAssistantBlock>;
 	blockIndexes: Set<number>;
@@ -277,6 +285,7 @@ export function applyConversationRecord(
 				parentId: record.parentId,
 				timestamp: record.timestamp,
 				submissionId: record.submissionId,
+				turnId: record.turnId,
 				message: userMessage(record.content, record.timestamp),
 				attachmentRefs: attachmentRefs(record.content),
 			});
@@ -288,6 +297,7 @@ export function applyConversationRecord(
 				parentId: record.parentId,
 				timestamp: record.timestamp,
 				submissionId: record.submissionId,
+				turnId: record.turnId,
 				message: {
 					role: 'signal',
 					type: record.signalType,
@@ -311,6 +321,7 @@ export function applyConversationRecord(
 				parentId: record.parentId,
 				timestamp: record.timestamp,
 				submissionId: record.submissionId,
+				turnId: record.turnId,
 				modelInfo: record.modelInfo,
 				blocks: new Map(),
 				blockIndexes: new Set(),
@@ -395,6 +406,7 @@ export function applyConversationRecord(
 				parentId: inProgress.parentId,
 				timestamp: inProgress.timestamp,
 				submissionId: inProgress.submissionId,
+				turnId: inProgress.turnId,
 				message,
 			});
 			break;

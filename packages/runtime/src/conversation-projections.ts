@@ -36,10 +36,60 @@ type ConversationUiPart =
 			| { state: 'output-error'; input: unknown; errorText: string }
 	  ));
 
+/**
+ * Coarse render lane for a materialized message. `system` covers every
+ * non-chat, non-answer message (internal control input and runtime advisories),
+ * mirroring the standard chat convention so a generic renderer can lay a
+ * transcript out without understanding Flue's finer {@link ConversationMessagePurpose}.
+ */
+export type ConversationMessageRole = 'user' | 'assistant' | 'system';
+
+/**
+ * Stable semantic classification of a message, independent of its rendered
+ * text. Lets clients distinguish public chat, assistant answers, internal
+ * dispatch/control input, and runtime advisories without parsing content,
+ * ordering, or timestamps.
+ *
+ * The union is intentionally open to future widening (`activity`, `notification`,
+ * `state`) as the runtime grows typed agent-activity and attached-agent signals;
+ * only the currently-emitted values are listed here.
+ */
+export type ConversationMessagePurpose = 'user' | 'assistant' | 'dispatch' | 'advisory';
+
+/**
+ * How a transcript UI should treat a message: `visible` for primary chat,
+ * `diagnostic` for content a client may surface in an activity/diagnostics
+ * panel, `hidden` for runtime plumbing that should not normally be shown.
+ */
+export type ConversationMessageDisplay = 'visible' | 'hidden' | 'diagnostic';
+
+/**
+ * Typed detail for a message projected from an internal signal record. Present
+ * only on `system`-role messages. `tagName` is the signal's stable label and
+ * `attributes` its structured metadata; both carry across history snapshots and
+ * live updates so clients can subtype or correlate signals without parsing text.
+ */
+export interface ConversationSignalDescriptor {
+	tagName?: string;
+	attributes?: Record<string, string>;
+}
+
 export interface ConversationUiMessage {
 	id: string;
-	role: 'user' | 'assistant';
+	role: ConversationMessageRole;
+	/** Stable semantic classification; see {@link ConversationMessagePurpose}. */
+	purpose: ConversationMessagePurpose;
+	/** Render/visibility hint; see {@link ConversationMessageDisplay}. */
+	display: ConversationMessageDisplay;
+	/** Present on messages produced by a tracked submission. */
 	submissionId?: string;
+	/**
+	 * Stable per-turn grouping identity. Shared by every message recorded within
+	 * one model round-trip; absent on messages recorded outside a turn.
+	 */
+	turnId?: string;
+	/** Typed signal detail; present only on `system`-role messages. */
+	signal?: ConversationSignalDescriptor;
 	parts: ConversationUiPart[];
 	metadata?: {
 		/** Server-authored message creation time as an ISO 8601 string. */
@@ -47,6 +97,28 @@ export interface ConversationUiMessage {
 		usage?: PromptUsage;
 		model?: { provider: string; id: string };
 	};
+}
+
+/**
+ * Map an internal signal type to its stable public classification. Keeps the
+ * canonical signal vocabulary off the wire: only the derived `purpose`/`display`
+ * cross the contract, so internal signal types can evolve without changing it.
+ * Unknown/future signal types default to a diagnostic advisory rather than
+ * leaking as visible chat.
+ */
+export function classifySignal(signalType: string): {
+	purpose: ConversationMessagePurpose;
+	display: ConversationMessageDisplay;
+} {
+	switch (signalType) {
+		case 'dispatch_input':
+			return { purpose: 'dispatch', display: 'diagnostic' };
+		case 'stream_interrupted':
+		case 'stream_continued':
+			return { purpose: 'advisory', display: 'hidden' };
+		default:
+			return { purpose: 'advisory', display: 'diagnostic' };
+	}
 }
 
 function fileFromAttachment(attachment: AttachmentRef): ConversationUiPart {
@@ -212,15 +284,28 @@ function projectCompletedMessage(entry: ReducedMessageEntry): ConversationUiMess
 		return {
 			id: entry.id,
 			role: 'user',
+			purpose: 'user',
+			display: 'visible',
 			...(entry.submissionId ? { submissionId: entry.submissionId } : {}),
+			...(entry.turnId ? { turnId: entry.turnId } : {}),
 			parts,
 			metadata: { timestamp: entry.timestamp },
 		};
 	}
 	if (message.role === 'signal') {
+		const { purpose, display } = classifySignal(message.type);
+		const signal: ConversationSignalDescriptor = {
+			...(message.tagName ? { tagName: message.tagName } : {}),
+			...(message.attributes ? { attributes: message.attributes } : {}),
+		};
 		return {
 			id: entry.id,
-			role: 'user',
+			role: 'system',
+			purpose,
+			display,
+			...(entry.submissionId ? { submissionId: entry.submissionId } : {}),
+			...(entry.turnId ? { turnId: entry.turnId } : {}),
+			...(Object.keys(signal).length > 0 ? { signal } : {}),
 			parts: [{ type: 'text', text: message.content, state: 'done' }],
 			metadata: { timestamp: entry.timestamp },
 		};
@@ -229,7 +314,10 @@ function projectCompletedMessage(entry: ReducedMessageEntry): ConversationUiMess
 	return {
 		id: entry.id,
 		role: 'assistant',
+		purpose: 'assistant',
+		display: 'visible',
 		submissionId: entry.submissionId,
+		...(entry.turnId ? { turnId: entry.turnId } : {}),
 		parts: message.content.map((block): ConversationUiPart => {
 			if (block.type === 'text') return { type: 'text', text: block.text, state: 'done' };
 			if (block.type === 'thinking') {
@@ -323,6 +411,13 @@ function projectInProgressMessage(
 	return {
 		id: message.messageId,
 		role: 'assistant',
+		purpose: 'assistant',
+		display: 'visible',
+		// Carry submissionId/turnId so a mid-stream snapshot (e.g. a reset forced
+		// by compaction) reprojects the same grouping identity the live
+		// `message-started` chunk and the completed projection already emit.
+		...(message.submissionId ? { submissionId: message.submissionId } : {}),
+		...(message.turnId ? { turnId: message.turnId } : {}),
 		parts,
 		metadata: { timestamp: message.timestamp },
 	};

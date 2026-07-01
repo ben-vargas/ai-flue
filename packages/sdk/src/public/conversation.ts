@@ -39,12 +39,57 @@ export type FlueConversationPart =
 			| { state: 'output-error'; input: unknown; output?: never; errorText: string }
 	  ));
 
+/**
+ * Coarse render lane for a materialized message. `system` covers every
+ * non-chat, non-answer message (internal control input and runtime advisories),
+ * following the standard chat convention so a generic renderer can lay out a
+ * transcript without understanding the finer {@link FlueConversationMessagePurpose}.
+ */
+export type FlueConversationMessageRole = 'user' | 'assistant' | 'system';
+
+/**
+ * Stable semantic classification of a message, independent of its rendered
+ * text. Lets clients distinguish public chat (`user`), assistant answers
+ * (`assistant`), internal dispatch/control input (`dispatch`), and runtime
+ * advisories (`advisory`) without parsing content, ordering, or timestamps.
+ * The union may widen as the runtime grows typed agent-activity signals.
+ */
+export type FlueConversationMessagePurpose = 'user' | 'assistant' | 'dispatch' | 'advisory';
+
+/**
+ * How a transcript UI should treat a message: `visible` for primary chat,
+ * `diagnostic` for content suited to an activity/diagnostics panel, `hidden`
+ * for runtime plumbing that should not normally be shown.
+ */
+export type FlueConversationMessageDisplay = 'visible' | 'hidden' | 'diagnostic';
+
+/**
+ * Typed detail for a message projected from an internal runtime signal. Present
+ * only on `system`-role messages. Carries across history snapshots and live
+ * updates so clients can subtype or correlate signals without parsing text.
+ */
+export interface FlueConversationSignalDescriptor {
+	tagName?: string;
+	attributes?: Record<string, string>;
+}
+
 /** One message in a materialized conversation. */
 export interface FlueConversationMessage {
 	id: string;
-	role: 'user' | 'assistant';
+	role: FlueConversationMessageRole;
+	/** Stable semantic classification; see {@link FlueConversationMessagePurpose}. */
+	purpose: FlueConversationMessagePurpose;
+	/** Render/visibility hint; see {@link FlueConversationMessageDisplay}. */
+	display: FlueConversationMessageDisplay;
 	/** Present on messages produced by a tracked submission. */
 	submissionId?: string;
+	/**
+	 * Stable per-turn grouping identity. Shared by every message recorded within
+	 * one model round-trip; absent on messages recorded outside a turn.
+	 */
+	turnId?: string;
+	/** Typed signal detail; present only on `system`-role messages. */
+	signal?: FlueConversationSignalDescriptor;
 	parts: FlueConversationPart[];
 	metadata?: {
 		/**

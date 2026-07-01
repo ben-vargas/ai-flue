@@ -588,12 +588,17 @@ describe('reduceConversationRecords()', () => {
 			{
 				id: 'entry_user',
 				role: 'user',
+				purpose: 'user',
+				display: 'visible',
 				parts: [{ type: 'text', text: 'Hello', state: 'done' }],
 				metadata: { timestamp: '2026-06-25T00:00:01.000Z' },
 			},
 			{
 				id: 'entry_assistant',
 				role: 'assistant',
+				purpose: 'assistant',
+				display: 'visible',
+				turnId: 'turn_01',
 				parts: [],
 				metadata: { timestamp: '2026-06-25T00:00:02.000Z' },
 			},
@@ -608,6 +613,9 @@ describe('reduceConversationRecords()', () => {
 		expect(projectConversationUi(conversation, '5').messages[1]).toEqual({
 			id: 'entry_assistant',
 			role: 'assistant',
+			purpose: 'assistant',
+			display: 'visible',
+			turnId: 'turn_01',
 			parts: [{
 				type: 'text',
 				text: 'Hi ',
@@ -620,6 +628,82 @@ describe('reduceConversationRecords()', () => {
 			kind: 'interrupted_partial',
 			messageId: 'entry_assistant',
 			assistant: { content: [{ type: 'text', text: 'Hi ' }], stopReason: 'aborted' },
+		});
+	});
+
+	it('projects an internal signal as a typed system message instead of visible user chat', () => {
+		const records: ConversationRecord[] = [
+			{
+				...scope,
+				id: 'record_created',
+				type: 'conversation_created',
+				kind: 'root',
+				timestamp: '2026-06-25T00:00:00.000Z',
+				affinityKey: 'aff_01',
+				createdAt: '2026-06-25T00:00:00.000Z',
+			},
+			{
+				...scope,
+				id: 'record_dispatch',
+				type: 'signal',
+				timestamp: '2026-06-25T00:00:01.000Z',
+				messageId: 'entry_dispatch',
+				parentId: null,
+				submissionId: 'submission_01',
+				turnId: 'turn_07',
+				signalType: 'dispatch_input',
+				tagName: 'dispatch',
+				content: '{"input":"go"}',
+				attributes: { agent: 'planner', dispatchId: 'dispatch_01' },
+			},
+		];
+		const state = reduceConversationRecords(createReducedInstanceState(), records, '1');
+		const conversation = required(state.conversations.get('conv_01'));
+
+		expect(projectConversationUi(conversation, '1').messages).toEqual([
+			{
+				id: 'entry_dispatch',
+				role: 'system',
+				purpose: 'dispatch',
+				display: 'diagnostic',
+				submissionId: 'submission_01',
+				turnId: 'turn_07',
+				signal: { tagName: 'dispatch', attributes: { agent: 'planner', dispatchId: 'dispatch_01' } },
+				parts: [{ type: 'text', text: '{"input":"go"}', state: 'done' }],
+				metadata: { timestamp: '2026-06-25T00:00:01.000Z' },
+			},
+		]);
+	});
+
+	it('classifies a stream-recovery signal as a hidden advisory', () => {
+		const records: ConversationRecord[] = [
+			{
+				...scope,
+				id: 'record_created',
+				type: 'conversation_created',
+				kind: 'root',
+				timestamp: '2026-06-25T00:00:00.000Z',
+				affinityKey: 'aff_01',
+				createdAt: '2026-06-25T00:00:00.000Z',
+			},
+			{
+				...scope,
+				id: 'record_recovery',
+				type: 'signal',
+				timestamp: '2026-06-25T00:00:01.000Z',
+				messageId: 'entry_recovery',
+				parentId: null,
+				signalType: 'stream_interrupted',
+				content: 'The previous response was interrupted.',
+			},
+		];
+		const state = reduceConversationRecords(createReducedInstanceState(), records, '1');
+		const conversation = required(state.conversations.get('conv_01'));
+
+		expect(projectConversationUi(conversation, '1').messages[0]).toMatchObject({
+			role: 'system',
+			purpose: 'advisory',
+			display: 'hidden',
 		});
 	});
 

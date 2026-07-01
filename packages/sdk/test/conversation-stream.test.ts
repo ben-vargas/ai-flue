@@ -37,6 +37,53 @@ describe('applyConversationChunk()', () => {
 		]);
 	});
 
+	it('stamps assistant purpose, display, and turnId onto a message synthesized from message-started', () => {
+		const conversation = reduce([
+			{ type: 'message-started', conversationId: 'c1', messageId: 'a1', submissionId: 's1', turnId: 'turn_07' },
+		]);
+		// The live synthesis must reproduce the same classification the snapshot
+		// projection emits for a completed assistant message, so a later
+		// conversation-reset does not change purpose/display/turnId mid-stream.
+		expect(conversation.messages[0]).toEqual({
+			id: 'a1',
+			role: 'assistant',
+			purpose: 'assistant',
+			display: 'visible',
+			submissionId: 's1',
+			turnId: 'turn_07',
+			parts: [],
+		});
+	});
+
+	it('preserves a system signal message purpose, display, and typed signal detail through message-appended', () => {
+		const conversation = reduce([
+			{
+				type: 'message-appended',
+				conversationId: 'c1',
+				message: {
+					id: 'sig1',
+					role: 'system',
+					purpose: 'dispatch',
+					display: 'diagnostic',
+					submissionId: 's1',
+					turnId: 'turn_07',
+					signal: { tagName: 'dispatch', attributes: { agent: 'planner' } },
+					parts: [{ type: 'text', text: '{"input":"go"}', state: 'done' }],
+				},
+			},
+		]);
+		expect(conversation.messages[0]).toEqual({
+			id: 'sig1',
+			role: 'system',
+			purpose: 'dispatch',
+			display: 'diagnostic',
+			submissionId: 's1',
+			turnId: 'turn_07',
+			signal: { tagName: 'dispatch', attributes: { agent: 'planner' } },
+			parts: [{ type: 'text', text: '{"input":"go"}', state: 'done' }],
+		});
+	});
+
 	it('assembles a streaming assistant text part from started, deltas, and completed', () => {
 		const conversation = reduce([
 			{ type: 'message-started', conversationId: 'c1', messageId: 'a1' },

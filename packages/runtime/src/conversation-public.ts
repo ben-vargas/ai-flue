@@ -1,4 +1,5 @@
 import {
+	classifySignal,
 	type ConversationUiMessage,
 	type ConversationUiSnapshot,
 	projectConversationUi,
@@ -44,6 +45,9 @@ type ConversationStreamChunkBody =
 			conversationId: string;
 			messageId: string;
 			submissionId?: string;
+			/** Turn this assistant message belongs to; the SDK stamps it onto the
+			 *  synthesized message so live grouping matches the snapshot projection. */
+			turnId?: string;
 			/** Server-authored generation-start time as an ISO 8601 string. */
 			timestamp?: string;
 			model?: { provider: string; id: string };
@@ -185,7 +189,10 @@ function encodeRecord(
 					message: {
 						id: record.messageId,
 						role: 'user',
+						purpose: 'user',
+						display: 'visible',
 						...(record.submissionId ? { submissionId: record.submissionId } : {}),
+						...(record.turnId ? { turnId: record.turnId } : {}),
 						metadata: { timestamp: record.timestamp },
 						parts: record.content.map((content) =>
 							content.type === 'text'
@@ -203,19 +210,30 @@ function encodeRecord(
 					},
 				},
 			];
-		case 'signal':
+		case 'signal': {
+			const { purpose, display } = classifySignal(record.signalType);
+			const signal = {
+				...(record.tagName ? { tagName: record.tagName } : {}),
+				...(record.attributes ? { attributes: record.attributes } : {}),
+			};
 			return [
 				{
 					type: 'message-appended',
 					conversationId,
 					message: {
 						id: record.messageId,
-						role: 'user',
+						role: 'system',
+						purpose,
+						display,
+						...(record.submissionId ? { submissionId: record.submissionId } : {}),
+						...(record.turnId ? { turnId: record.turnId } : {}),
+						...(Object.keys(signal).length > 0 ? { signal } : {}),
 						metadata: { timestamp: record.timestamp },
 						parts: [{ type: 'text', text: record.content, state: 'done' }],
 					},
 				},
 			];
+		}
 		case 'assistant_message_started':
 			return [
 				{
@@ -224,6 +242,7 @@ function encodeRecord(
 					messageId: record.messageId,
 					timestamp: record.timestamp,
 					...(record.submissionId ? { submissionId: record.submissionId } : {}),
+					...(record.turnId ? { turnId: record.turnId } : {}),
 					...(typeof record.modelInfo.provider === 'string' && typeof record.modelInfo.model === 'string'
 						? { model: { provider: record.modelInfo.provider, id: record.modelInfo.model } }
 						: {}),

@@ -41,6 +41,9 @@ export type ConversationStreamChunk =
 			conversationId: string;
 			messageId: string;
 			submissionId?: string;
+			/** Turn this assistant message belongs to; stamped onto the synthesized
+			 *  message so live grouping matches the snapshot projection. */
+			turnId?: string;
 			/** Server-authored generation-start time as an ISO 8601 string. */
 			timestamp?: string;
 			model?: { provider: string; id: string };
@@ -158,7 +161,10 @@ export function applyConversationChunk(
 					{
 						id: chunk.messageId,
 						role: 'assistant',
+						purpose: 'assistant',
+						display: 'visible',
 						...(chunk.submissionId ? { submissionId: chunk.submissionId } : {}),
+						...(chunk.turnId ? { turnId: chunk.turnId } : {}),
 						parts: [],
 						...(chunk.timestamp || chunk.model
 							? {
