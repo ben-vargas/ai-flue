@@ -47,6 +47,9 @@ function groupMessages(
   }
 
   for (const message of messages) {
+    // This chat surface renders only the user/assistant exchange; system
+    // messages have no visual block here.
+    if (message.role === 'system') continue
     if (
       message.role === 'assistant' &&
       !message.parts.some((part) => isVisiblePart(part, showThinking))
