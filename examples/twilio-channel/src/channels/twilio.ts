@@ -1,6 +1,6 @@
 import { defineTool, dispatch } from '@flue/runtime';
-import * as v from 'valibot';
 import { createTwilioChannel, type TwilioConversationRef } from '@flue/twilio';
+import * as v from 'valibot';
 import assistant from '../agents/assistant.ts';
 import { TwilioClient } from '../twilio-client.ts';
 
@@ -21,13 +21,27 @@ export const channel = createTwilioChannel({
 	// Path: /channels/twilio/webhook
 	async webhook({ payload, conversation }) {
 		if (payload.OptOutType === 'STOP') return;
+		const attributes: Record<string, string> = {
+			messageSid: payload.MessageSid,
+			from: payload.From,
+		};
+		const numMedia = Number(payload.NumMedia ?? '0');
+		if (numMedia > 0) {
+			attributes.numMedia = String(numMedia);
+			for (let index = 0; index < numMedia; index += 1) {
+				const contentType = payload[`MediaContentType${index}`];
+				if (typeof contentType === 'string') {
+					attributes[`mediaContentType${index}`] = contentType;
+				}
+			}
+		}
 		await dispatch(assistant, {
 			id: channel.conversationKey(conversation),
 			message: {
 				kind: 'signal',
 				type: 'twilio.message',
 				body: payload.Body,
-				attributes: { messageSid: payload.MessageSid, from: payload.From },
+				attributes,
 			},
 		});
 	},

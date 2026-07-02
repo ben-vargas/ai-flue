@@ -34,7 +34,7 @@ export const channel = createGitHubChannel({
   webhookSecret: process.env.GITHUB_WEBHOOK_SECRET!,
   async webhook({ delivery }) {
     if (delivery.name !== 'issue_comment' || delivery.payload.action !== 'created') return;
-    const { repository, issue, comment } = delivery.payload;
+    const { repository, issue, comment, sender, installation } = delivery.payload;
     const issueRef = {
       owner: repository.owner.login,
       repo: repository.name,
@@ -47,7 +47,16 @@ export const channel = createGitHubChannel({
         kind: 'signal',
         type: 'github.issue_comment.created',
         body: comment.body,
-        attributes: { deliveryId: delivery.deliveryId },
+        attributes: {
+          deliveryId: delivery.deliveryId,
+          ...(installation === undefined ? {} : { installationId: String(installation.id) }),
+          owner: issueRef.owner,
+          repo: issueRef.repo,
+          issueNumber: String(issueRef.issueNumber),
+          sender: sender.login,
+          title: issue.title,
+          commentId: String(comment.id),
+        },
       },
     });
   },
@@ -107,7 +116,7 @@ export const channel = createGitHubChannel({
     // to the native @octokit/webhooks-types event. Filtering is application
     // policy: subscribe to the events you want in GitHub and branch here.
     if (delivery.name === 'issue_comment' && delivery.payload.action === 'created') {
-      const { repository, issue, comment } = delivery.payload;
+      const { repository, issue, comment, sender, installation } = delivery.payload;
       const issueRef = {
         owner: repository.owner.login,
         repo: repository.name,
@@ -119,14 +128,23 @@ export const channel = createGitHubChannel({
           kind: 'signal',
           type: 'github.issue_comment.created',
           body: comment.body,
-          attributes: { deliveryId: delivery.deliveryId },
+          attributes: {
+            deliveryId: delivery.deliveryId,
+            ...(installation === undefined ? {} : { installationId: String(installation.id) }),
+            owner: issueRef.owner,
+            repo: issueRef.repo,
+            issueNumber: String(issueRef.issueNumber),
+            sender: sender.login,
+            title: issue.title,
+            commentId: String(comment.id),
+          },
         },
       });
       return;
     }
 
     if (delivery.name === 'pull_request_review_comment' && delivery.payload.action === 'created') {
-      const { repository, pull_request, comment } = delivery.payload;
+      const { repository, pull_request, comment, sender, installation } = delivery.payload;
       const issueRef = {
         owner: repository.owner.login,
         repo: repository.name,
@@ -137,18 +155,23 @@ export const channel = createGitHubChannel({
         message: {
           kind: 'signal',
           type: 'github.pull_request_review_comment.created',
-          body: JSON.stringify({
-            installationId: delivery.payload.installation?.id,
-            issue: issueRef,
-            sender: delivery.payload.sender,
-            comment: {
-              id: comment.id,
-              // Replies attach to the top-level review comment in a thread.
-              threadId: comment.in_reply_to_id ?? comment.id,
-              body: comment.body,
-            },
-          }),
-          attributes: { deliveryId: delivery.deliveryId },
+          body: comment.body,
+          attributes: {
+            deliveryId: delivery.deliveryId,
+            ...(installation === undefined ? {} : { installationId: String(installation.id) }),
+            owner: issueRef.owner,
+            repo: issueRef.repo,
+            issueNumber: String(issueRef.issueNumber),
+            sender: sender.login,
+            title: pull_request.title,
+            commentId: String(comment.id),
+            // Replies attach to the top-level review comment in a thread.
+            threadId: String(comment.in_reply_to_id ?? comment.id),
+            path: comment.path,
+            ...(comment.line === null || comment.line === undefined
+              ? {}
+              : { line: String(comment.line) }),
+          },
         },
       });
       return;

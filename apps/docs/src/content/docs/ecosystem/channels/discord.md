@@ -49,13 +49,18 @@ export const channel = createDiscordChannel({
       } satisfies APIInteractionResponse;
     }
 
+    // The first string option of the `/ask` chat-input command is the prompt.
+    const question =
+      interaction.data.type === 1
+        ? interaction.data.options?.find((option) => option.type === 3)?.value
+        : undefined;
     await dispatch(assistant, {
       id: channel.conversationKey(destination),
       message: {
         kind: 'signal',
         type: 'discord.command.ask',
-        body: JSON.stringify({ data: interaction.data }),
-        attributes: { interactionId: interaction.id },
+        body: question ?? JSON.stringify(interaction.data),
+        attributes: { interactionId: interaction.id, commandName: interaction.data.name },
       },
     });
     return {

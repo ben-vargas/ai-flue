@@ -86,22 +86,19 @@ export const channel = createShopifyChannel({
           return c.json({ error: 'Unsupported orders/create payload.' }, 400);
         }
 
-        const deliveryId = c.req.header('x-shopify-webhook-id');
+        const webhookId = c.req.header('x-shopify-webhook-id');
         const eventId = c.req.header('x-shopify-event-id');
         await dispatch(orders, {
           id: orderInstanceId(shopDomain, order.id),
           message: {
             kind: 'signal',
-            type: 'shopify.orders.create',
-            body: JSON.stringify({
-              shopDomain,
-              apiVersion: c.req.header('x-shopify-api-version'),
-              orderName: order.name,
-              triggeredAt: c.req.header('x-shopify-triggered-at'),
-            }),
+            type: 'shopify.orders/create',
+            body: `Shopify order ${order.name} created.`,
             attributes: {
+              shopDomain,
               orderId: order.id,
-              ...(deliveryId === undefined ? {} : { deliveryId }),
+              orderName: order.name,
+              ...(webhookId === undefined ? {} : { webhookId }),
               ...(eventId === undefined ? {} : { eventId }),
             },
           },

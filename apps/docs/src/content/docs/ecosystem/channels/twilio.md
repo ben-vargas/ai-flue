@@ -129,20 +129,27 @@ export const channel = createTwilioChannel({
   // Path: /channels/twilio/webhook
   async webhook({ payload, conversation }) {
     if (payload.OptOutType === 'STOP') return;
+    const attributes: Record<string, string> = {
+      messageSid: payload.MessageSid,
+      from: payload.From,
+    };
     const numMedia = Number(payload.NumMedia ?? '0');
+    if (numMedia > 0) {
+      attributes.numMedia = String(numMedia);
+      for (let index = 0; index < numMedia; index += 1) {
+        const contentType = payload[`MediaContentType${index}`];
+        if (typeof contentType === 'string') {
+          attributes[`mediaContentType${index}`] = contentType;
+        }
+      }
+    }
     await dispatch(assistant, {
       id: channel.conversationKey(conversation),
       message: {
         kind: 'signal',
         type: 'twilio.message',
-        body: JSON.stringify({
-          text: payload.Body,
-          media: Array.from({ length: numMedia }, (_, index) => ({
-            index,
-            contentType: payload[`MediaContentType${index}`],
-          })),
-        }),
-        attributes: { messageSid: payload.MessageSid, from: payload.From },
+        body: payload.Body,
+        attributes,
       },
     });
   },

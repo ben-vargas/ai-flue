@@ -20,7 +20,7 @@ export const channel = createTelegramChannel({
 				message: {
 					kind: 'signal',
 					type: 'telegram.message',
-					body: incoming.text ?? incoming.caption ?? '',
+					body: messageBody(incoming),
 					attributes: { updateId: String(update.update_id) },
 				},
 			});
@@ -37,13 +37,29 @@ export const channel = createTelegramChannel({
 					kind: 'signal',
 					type: 'telegram.callback_query',
 					body: query.data ?? '',
-					attributes: { updateId: String(update.update_id) },
+					attributes: {
+						updateId: String(update.update_id),
+						fromId: String(query.from.id),
+						...(query.from.username === undefined ? {} : { fromUsername: query.from.username }),
+					},
 				},
 			});
 			return;
 		}
 	},
 });
+
+/** Message text, or a short placeholder describing a media-only message. */
+function messageBody(message: Message): string {
+	if (message.text !== undefined) return message.text;
+	if (message.caption !== undefined) return message.caption;
+	if (message.photo) return '[photo message]';
+	if (message.video) return '[video message]';
+	if (message.voice) return '[voice message]';
+	if (message.document) return '[document message]';
+	if (message.sticker) return '[sticker message]';
+	return '[non-text message]';
+}
 
 /** Derives the canonical destination identity from a native Telegram Message. */
 function conversationFromMessage(message: Message): TelegramConversationRef {

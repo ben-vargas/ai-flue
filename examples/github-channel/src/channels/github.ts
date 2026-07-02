@@ -14,7 +14,7 @@ export const channel = createGitHubChannel({
 	// Path: /channels/github/webhook
 	async webhook({ delivery }) {
 		if (delivery.name === 'issue_comment' && delivery.payload.action === 'created') {
-			const { repository, issue, comment } = delivery.payload;
+			const { repository, issue, comment, sender, installation } = delivery.payload;
 			const issueRef = {
 				owner: repository.owner.login,
 				repo: repository.name,
@@ -26,14 +26,23 @@ export const channel = createGitHubChannel({
 					kind: 'signal',
 					type: 'github.issue_comment.created',
 					body: comment.body,
-					attributes: { deliveryId: delivery.deliveryId },
+					attributes: {
+						deliveryId: delivery.deliveryId,
+						...(installation === undefined ? {} : { installationId: String(installation.id) }),
+						owner: issueRef.owner,
+						repo: issueRef.repo,
+						issueNumber: String(issueRef.issueNumber),
+						sender: sender.login,
+						title: issue.title,
+						commentId: String(comment.id),
+					},
 				},
 			});
 			return;
 		}
 
 		if (delivery.name === 'pull_request_review_comment' && delivery.payload.action === 'created') {
-			const { repository, pull_request, comment } = delivery.payload;
+			const { repository, pull_request, comment, sender, installation } = delivery.payload;
 			const issueRef = {
 				owner: repository.owner.login,
 				repo: repository.name,
@@ -44,21 +53,23 @@ export const channel = createGitHubChannel({
 				message: {
 					kind: 'signal',
 					type: 'github.pull_request_review_comment.created',
-					body: JSON.stringify({
-						installationId: delivery.payload.installation?.id,
-						issue: issueRef,
-						sender: delivery.payload.sender,
+					body: comment.body,
+					attributes: {
+						deliveryId: delivery.deliveryId,
+						...(installation === undefined ? {} : { installationId: String(installation.id) }),
+						owner: issueRef.owner,
+						repo: issueRef.repo,
+						issueNumber: String(issueRef.issueNumber),
+						sender: sender.login,
 						title: pull_request.title,
-						comment: {
-							id: comment.id,
-							// GitHub replies attach to the top-level review comment in a thread.
-							threadId: comment.in_reply_to_id ?? comment.id,
-							body: comment.body,
-							path: comment.path,
-							line: comment.line ?? null,
-						},
-					}),
-					attributes: { deliveryId: delivery.deliveryId },
+						commentId: String(comment.id),
+						// GitHub replies attach to the top-level review comment in a thread.
+						threadId: String(comment.in_reply_to_id ?? comment.id),
+						path: comment.path,
+						...(comment.line === null || comment.line === undefined
+							? {}
+							: { line: String(comment.line) }),
+					},
 				},
 			});
 			return;

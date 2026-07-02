@@ -38,7 +38,7 @@ export const channel = createTelegramChannel({
       message: {
         kind: 'signal',
         type: 'telegram.message',
-        body: incoming.text ?? incoming.caption ?? '',
+        body: messageBody(incoming),
         attributes: { updateId: String(update.update_id) },
       },
     });
@@ -46,8 +46,8 @@ export const channel = createTelegramChannel({
 });
 ```
 
-The abridged example omits the generated `conversationFromMessage` helper,
-callback-query branch, and message tool. Once configured, an incoming message
+The abridged example omits the generated `conversationFromMessage` and
+`messageBody` helpers, callback-query branch, and message tool. Once configured, an incoming message
 continues the agent instance for its chat, business chat, or topic, and the
 bound grammY tool replies to that same destination. grammY's Fetch export runs
 on Node and Cloudflare Workers with Flue's `nodejs_compat` setting.
@@ -122,7 +122,7 @@ export const channel = createTelegramChannel({
         message: {
           kind: 'signal',
           type: 'telegram.message',
-          body: incoming.text ?? incoming.caption ?? '',
+          body: messageBody(incoming),
           attributes: { updateId: String(update.update_id) },
         },
       });
@@ -139,13 +139,29 @@ export const channel = createTelegramChannel({
           kind: 'signal',
           type: 'telegram.callback_query',
           body: query.data ?? '',
-          attributes: { updateId: String(update.update_id) },
+          attributes: {
+            updateId: String(update.update_id),
+            fromId: String(query.from.id),
+            ...(query.from.username === undefined ? {} : { fromUsername: query.from.username }),
+          },
         },
       });
       return;
     }
   },
 });
+
+// Message text, or a short placeholder describing a media-only message.
+function messageBody(message: Message): string {
+  if (message.text !== undefined) return message.text;
+  if (message.caption !== undefined) return message.caption;
+  if (message.photo) return '[photo message]';
+  if (message.video) return '[video message]';
+  if (message.voice) return '[voice message]';
+  if (message.document) return '[document message]';
+  if (message.sticker) return '[sticker message]';
+  return '[non-text message]';
+}
 
 // Build the canonical destination identity from a native Telegram Message.
 function conversationFromMessage(message: Message): TelegramConversationRef {

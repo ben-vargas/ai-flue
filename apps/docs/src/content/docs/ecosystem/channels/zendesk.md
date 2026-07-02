@@ -48,12 +48,15 @@ export const channel = createZendeskChannel({
       message: {
         kind: 'signal',
         type: `zendesk.${payload.type}`,
-        body: JSON.stringify({
-          invocationId: delivery.invocationId,
+        // `event` is Zendesk's provider-native change object; its
+        // properties vary by event type.
+        body: JSON.stringify(payload.event),
+        attributes: {
+          eventId: payload.id,
+          ticketId,
           occurredAt: payload.time,
-          change: payload.event,
-        }),
-        attributes: { eventId: payload.id, ticketId },
+          invocationId: delivery.invocationId,
+        },
       },
     });
   },
@@ -134,12 +137,15 @@ export const channel = createZendeskChannel({
           message: {
             kind: 'signal',
             type: `zendesk.${payload.type}`,
-            body: JSON.stringify({
-              invocationId: delivery.invocationId,
+            // `event` is Zendesk's provider-native change object; its
+            // properties vary by event type.
+            body: JSON.stringify(payload.event),
+            attributes: {
+              eventId: payload.id,
+              ticketId,
               occurredAt: payload.time,
-              change: payload.event,
-            }),
-            attributes: { eventId: payload.id, ticketId },
+              invocationId: delivery.invocationId,
+            },
           },
         });
         return;

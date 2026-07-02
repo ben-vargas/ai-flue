@@ -84,7 +84,11 @@ export const channel = createTeamsChannel({
         kind: 'signal',
         type: 'teams.message',
         body: activity.text,
-        ...(activity.id === undefined ? {} : { attributes: { activityId: activity.id } }),
+        attributes: {
+          ...(activity.id === undefined ? {} : { activityId: activity.id }),
+          senderId: activity.from.id,
+          senderName: activity.from.name,
+        },
       },
     });
   },

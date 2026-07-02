@@ -28,6 +28,8 @@ import {
   type CallHandle,
   type CompactionConfig,
   type AgentDefinition,
+  type DeliveredAttachment,
+  type DeliveredMessage,
   type DispatchReceipt,
   type FileStat,
   type FlueFs,
@@ -297,9 +299,9 @@ type DeliveredMessage =
 
 The single unified message shape delivered into an agent's session, whether it arrives through `dispatch(...)` or a direct HTTP prompt.
 
-`kind: 'user'` is a real, user-attributed chat turn. It produces a canonical `user_message` record and projects into the model conversation like any other user message. Use it for human-authored messages, optionally carrying image attachments.
+`kind: 'user'` is a real, user-attributed chat turn. It produces a canonical `user_message` record and projects into the model conversation like any other user message. Use it when one person is talking directly to the assistant — a direct 1:1 chat surface such as an SDK-driven chat UI — optionally carrying image attachments.
 
-`kind: 'signal'` is a structured, non-conversational event — a webhook payload, a scheduled trigger, an internal system notification. It produces a canonical `signal` record and renders into the model conversation as an XML-tagged block rather than a chat turn.
+`kind: 'signal'` is a structured, non-conversational event — a webhook payload, a scheduled trigger, an internal system notification. It produces a canonical `signal` record and renders into the model conversation as an XML-tagged block rather than a chat turn. This is the right shape for more advanced scenarios, including most channels: a Slack thread or GitHub issue is a multi-user conversation the agent participates in as one member, and signals model each participant's activity — with sender identity in `attributes` — where a `user` message would confuse other participants with the assistant's own user.
 
 | Field         | Applies to | Description                                                                                          |
 | ------------- | ---------- | ------------------------------------------------------------------------------------------------------ |

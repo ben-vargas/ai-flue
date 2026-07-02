@@ -123,12 +123,14 @@ export const channel = createIntercomChannel({
           message: {
             kind: 'signal',
             type: `intercom.${notification.topic}`,
-            body: JSON.stringify({
-              createdAt: notification.created_at,
-              deliveryAttempts: notification.delivery_attempts,
-              conversation: notification.data.item,
-            }),
-            ...(notification.id === null ? {} : { attributes: { notificationId: notification.id } }),
+            // The conversation item is Intercom's own message payload; it has no
+            // single flat text field, so it travels as the body verbatim.
+            body: JSON.stringify(notification.data.item),
+            attributes: {
+              ...(notification.id === null ? {} : { notificationId: notification.id }),
+              createdAt: String(notification.created_at),
+              deliveryAttempts: String(notification.delivery_attempts),
+            },
           },
         });
         return;

@@ -54,19 +54,21 @@ export const channel = createSalesforceMarketingCloudChannel({
         message: {
           kind: 'signal',
           type: `salesforce-marketing-cloud.${event.eventCategoryType}`,
-          body: JSON.stringify({
-            occurredAt: event.timestampUTC,
+          // `info` carries the family-specific event fields; there is no
+          // natural message text for an engagement event.
+          body: JSON.stringify(event.info ?? {}),
+          attributes: {
+            ...(typeof event.timestampUTC === 'string'
+              ? { occurredAt: event.timestampUTC }
+              : {}),
             callbackId: ref.callbackId,
             mid: ref.mid,
             eid: ref.eid,
-            tracking: {
-              jobId: ref.jobId,
-              batchId: ref.batchId,
-              listId: ref.listId,
-              subscriberId: ref.subscriberId,
-            },
-            details: event.info ?? {},
-          }),
+            jobId: ref.jobId,
+            batchId: ref.batchId,
+            listId: ref.listId,
+            subscriberId: ref.subscriberId,
+          },
         },
       });
     }
@@ -165,19 +167,21 @@ export const channel = createSalesforceMarketingCloudChannel({
         message: {
           kind: 'signal',
           type: `salesforce-marketing-cloud.${event.eventCategoryType}`,
-          body: JSON.stringify({
-            occurredAt: event.timestampUTC,
+          // `info` carries the family-specific event fields; there is no
+          // natural message text for an engagement event.
+          body: JSON.stringify(event.info ?? {}),
+          attributes: {
+            ...(typeof event.timestampUTC === 'string'
+              ? { occurredAt: event.timestampUTC }
+              : {}),
             callbackId: ref.callbackId,
             mid: ref.mid,
             eid: ref.eid,
-            tracking: {
-              jobId: ref.jobId,
-              batchId: ref.batchId,
-              listId: ref.listId,
-              subscriberId: ref.subscriberId,
-            },
-            details: event.info ?? {},
-          }),
+            jobId: ref.jobId,
+            batchId: ref.batchId,
+            listId: ref.listId,
+            subscriberId: ref.subscriberId,
+          },
         },
       });
     }

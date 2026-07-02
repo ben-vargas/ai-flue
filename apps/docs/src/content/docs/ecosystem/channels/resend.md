@@ -36,14 +36,14 @@ export const channel = createResendChannel({
       message: {
         kind: 'signal',
         type: 'resend.email.received',
-        body: JSON.stringify({
-          from: event.data.from,
-          to: event.data.to,
-          subject: event.data.subject,
-        }),
+        // The webhook carries envelope data only; the agent retrieves the
+        // full email text through the retrieve_resend_email tool.
+        body: event.data.subject,
         attributes: {
           deliveryId: delivery.id,
           emailId: event.data.email_id,
+          from: event.data.from,
+          to: event.data.to.join(', '),
         },
       },
     });
@@ -102,17 +102,19 @@ export const channel = createResendChannel({
           message: {
             kind: 'signal',
             type: 'resend.email.received',
-            body: JSON.stringify({
-              from: event.data.from,
-              to: event.data.to,
-              cc: event.data.cc,
-              subject: event.data.subject,
-              attachments: event.data.attachments,
-            }),
+            // The webhook carries envelope data only; the agent retrieves the
+            // full email text through the retrieve_resend_email tool.
+            body: event.data.subject,
             attributes: {
               deliveryId: delivery.id,
               emailId: event.data.email_id,
               messageId: event.data.message_id,
+              from: event.data.from,
+              to: event.data.to.join(', '),
+              ...(event.data.cc.length === 0 ? {} : { cc: event.data.cc.join(', ') }),
+              ...(event.data.attachments.length === 0
+                ? {}
+                : { attachmentCount: String(event.data.attachments.length) }),
             },
           },
         });

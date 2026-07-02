@@ -213,6 +213,18 @@ if (payload.type === 'event_callback' && payload.event.type === 'app_mention') {
 }
 ```
 
+Channel deliveries use `kind: 'signal'` rather than `kind: 'user'`. A `user`
+message models one person talking directly to the assistant, which fits a
+direct 1:1 chat surface such as an SDK-driven chat UI. Most channels are more
+advanced than that: a Slack thread, GitHub issue, or group chat is a
+multi-user conversation that the agent participates in as one member, and
+signals model that activity — with sender identity carried in `attributes` —
+without conflating other participants with the assistant's own user.
+
+Keep `body` as the message itself — the comment, chat message, or email text —
+and put structured metadata such as sender identity, provider ids, and
+deduplication keys in `attributes` as flat string values.
+
 Your application chooses the agent and instance id before dispatch. A provider
 thread, issue, ticket, or conversation is often a useful instance boundary
 because later events continue the same agent session.

@@ -20,19 +20,31 @@ export const channel = createMessengerChannel({
 		for (const entry of payload.entry) {
 			for (const event of entry.messaging ?? []) {
 				// Echoes of the Page's own sends and other non-message events are
-				// left to application policy.
+				// left to application policy. Attachment-only messages are skipped;
+				// attachments alongside text surface through `attachmentTypes`.
 				if (event.message === undefined || event.message.is_echo) continue;
 				const conversation = channel.conversationRef(event);
 				if (conversation === undefined || event.message.text === undefined) {
 					continue;
 				}
+				const attachmentTypes = (event.message.attachments ?? []).map(
+					(attachment) => attachment.type,
+				);
 				await dispatch(assistant, {
 					id: channel.conversationKey(conversation),
 					message: {
 						kind: 'signal',
 						type: 'messenger.message',
 						body: event.message.text,
-						attributes: { messageId: event.message.mid },
+						attributes: {
+							messageId: event.message.mid,
+							...(event.message.quick_reply?.payload === undefined
+								? {}
+								: { quickReplyPayload: event.message.quick_reply.payload }),
+							...(attachmentTypes.length === 0
+								? {}
+								: { attachmentTypes: attachmentTypes.join(',') }),
+						},
 					},
 				});
 			}

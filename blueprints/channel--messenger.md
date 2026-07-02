@@ -93,13 +93,24 @@ export const channel = createMessengerChannel({
         if (conversation === undefined || event.message.text === undefined) {
           continue;
         }
+        const attachmentTypes = (event.message.attachments ?? []).map(
+          (attachment) => attachment.type,
+        );
         await dispatch(assistant, {
           id: channel.conversationKey(conversation),
           message: {
             kind: 'signal',
             type: 'messenger.message',
             body: event.message.text,
-            attributes: { messageId: event.message.mid },
+            attributes: {
+              messageId: event.message.mid,
+              ...(event.message.quick_reply?.payload === undefined
+                ? {}
+                : { quickReplyPayload: event.message.quick_reply.payload }),
+              ...(attachmentTypes.length === 0
+                ? {}
+                : { attachmentTypes: attachmentTypes.join(',') }),
+            },
           },
         });
       }

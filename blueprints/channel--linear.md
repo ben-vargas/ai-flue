@@ -78,7 +78,11 @@ export const channel = createLinearChannel({
           kind: 'signal',
           type: 'linear.comment.created',
           body: comment.body,
-          attributes: { deliveryId },
+          attributes: {
+            deliveryId,
+            ...(payload.actor ? { actorId: payload.actor.id } : {}),
+            ...(payload.actor && 'name' in payload.actor ? { actorName: payload.actor.name } : {}),
+          },
         },
       });
       return;

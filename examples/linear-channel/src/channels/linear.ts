@@ -5,11 +5,11 @@ import {
 } from '@flue/linear';
 import { defineTool, dispatch } from '@flue/runtime';
 import { LinearClient } from '@linear/sdk';
-import * as v from 'valibot';
 import type {
 	AgentSessionEventWebhookPayload,
 	EntityWebhookPayloadWithCommentData,
 } from '@linear/sdk/webhooks';
+import * as v from 'valibot';
 import assistant from '../agents/assistant.ts';
 
 const organizationId = optionalEnv('LINEAR_ORGANIZATION_ID');
@@ -38,7 +38,11 @@ export const channel = createLinearChannel({
 					kind: 'signal',
 					type: 'linear.comment.created',
 					body: comment.body,
-					attributes: { deliveryId },
+					attributes: {
+						deliveryId,
+						...(payload.actor ? { actorId: payload.actor.id } : {}),
+						...(payload.actor && 'name' in payload.actor ? { actorName: payload.actor.name } : {}),
+					},
 				},
 			});
 			return;

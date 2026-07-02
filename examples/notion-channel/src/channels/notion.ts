@@ -37,12 +37,15 @@ export const channel = createNotionChannel({
 					message: {
 						kind: 'signal',
 						type: `notion.${event.type}`,
-						body: JSON.stringify({
-							attemptNumber: event.attempt_number,
-							authors: event.authors,
-							data: event.data,
-						}),
-						attributes: { eventId: event.id, pageId: event.entity.id },
+						// `data` is Notion's event-specific detail object; page events
+						// carry no natural message text.
+						body: JSON.stringify(event.data ?? {}),
+						attributes: {
+							eventId: event.id,
+							pageId: event.entity.id,
+							attemptNumber: String(event.attempt_number),
+							authorIds: event.authors.map((author) => author.id).join(','),
+						},
 					},
 				});
 				return;

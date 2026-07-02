@@ -52,6 +52,14 @@ export const channel = createGoogleChatChannel({
           kind: 'signal',
           type: `google-chat.${payload.type}`,
           body: payload.message?.argumentText ?? payload.message?.text ?? '',
+          attributes: {
+            // The message resource name is the deduplication key for retried deliveries.
+            ...(payload.message?.name === undefined ? {} : { messageName: payload.message.name }),
+            ...(payload.user?.name === undefined ? {} : { userName: payload.user.name }),
+            ...(payload.user?.displayName === undefined
+              ? {}
+              : { userDisplayName: payload.user.displayName }),
+          },
         },
       });
       return c.body(null, 200);
@@ -143,6 +151,16 @@ export const channel = createGoogleChatChannel({
               kind: 'signal',
               type: `google-chat.${payload.type}`,
               body: payload.message?.argumentText ?? payload.message?.text ?? '',
+              attributes: {
+                // The message resource name is the deduplication key for retried deliveries.
+                ...(payload.message?.name === undefined
+                  ? {}
+                  : { messageName: payload.message.name }),
+                ...(payload.user?.name === undefined ? {} : { userName: payload.user.name }),
+                ...(payload.user?.displayName === undefined
+                  ? {}
+                  : { userDisplayName: payload.user.displayName }),
+              },
             },
           });
           return c.body(null, 200);

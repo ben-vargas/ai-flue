@@ -35,14 +35,17 @@ export const channel = createStripeChannel({
 					message: {
 						kind: 'signal',
 						type: `stripe.${event.type}`,
-						body: JSON.stringify({
+						body: `Checkout session ${session.id} reported payment status ${session.payment_status}.`,
+						attributes: {
+							eventId: event.id,
 							customerId,
 							sessionId: session.id,
 							paymentStatus: session.payment_status,
-							amountTotal: session.amount_total,
-							currency: session.currency,
-						}),
-						attributes: { eventId: event.id },
+							...(session.amount_total === null
+								? {}
+								: { amountTotal: String(session.amount_total) }),
+							...(session.currency === null ? {} : { currency: session.currency }),
+						},
 					},
 				});
 				return;

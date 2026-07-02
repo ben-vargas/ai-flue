@@ -48,12 +48,11 @@ export const channel = createShopifyChannel({
 					message: {
 						kind: 'signal',
 						type: 'shopify.orders/create',
-						body: JSON.stringify({
-							shopDomain: deliveredShopDomain,
-							orderName: order.name,
-						}),
+						body: `Shopify order ${order.name} created.`,
 						attributes: {
+							shopDomain: deliveredShopDomain,
 							orderId: order.id,
+							orderName: order.name,
 							...(webhookId === undefined ? {} : { webhookId }),
 							...(eventId === undefined ? {} : { eventId }),
 						},
