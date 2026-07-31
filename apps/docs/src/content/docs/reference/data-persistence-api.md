@@ -22,8 +22,8 @@ interface PersistenceAdapter {
 
 Adapter packages export a factory function returning this interface; users default-export the result from `db.ts`. The built-in reference implementation is `sqlite(path?: string)` from `@flue/runtime/node`.
 
-- `connect()` — open the database and return every store. Awaited once at startup, so async pool setup, remote handshakes, and — for adapters without `migrate` — the schema-version check belong here. An unreachable database fails at boot, not inside the first request.
-- `migrate()` — bring the store to the current schema/format version. Called once at startup, before `connect()`. Creates any missing schema, durably records the schema version when the store is first created, and fails loudly when the store records an unknown or newer version. Adapters that create schema implicitly may omit it, but must uphold the versioning obligation in their store-creating paths.
+- `connect()` — open the database and return every store. Awaited once at startup, so async pool setup, remote handshakes, and — for adapters without `migrate` — the format-version check belong here. An unreachable database fails at boot, not inside the first request.
+- `migrate()` — bring the store to the current format version. Called once at startup, before `connect()`. Creates any missing schema, durably records the format version when the store is first created, and fails loudly when the store records an unknown or newer version. Adapters that create schema implicitly may omit it, but must uphold the versioning obligation in their store-creating paths.
 - `close()` — release resources (connection pools, file handles). Called on shutdown.
 
 ## `PersistenceStores`
@@ -160,6 +160,11 @@ interface ConversationStreamStore {
   ): Promise<ConversationStreamReadResult>;
   getMeta(path: string): Promise<ConversationStreamMeta | null>;
   subscribe(path: string, listener: () => void): () => void;
+  putFoldCheckpoint?(path: string, checkpoint: ConversationFoldCheckpoint): Promise<void>;
+  getFoldCheckpoint?(
+    path: string,
+    options?: { atOrBefore?: string },
+  ): Promise<ConversationFoldCheckpoint | null>;
 }
 ```
 
@@ -169,6 +174,7 @@ interface ConversationStreamStore {
 - `read` — batches strictly after `options.offset` (default `'-1'`, the start). The sentinel `'now'` returns no batches and the current head as `nextOffset`. `limit` is clamped between `DEFAULT_READ_LIMIT` (`100`) and `MAX_READ_LIMIT` (`1000`). An offset beyond the head throws; an unknown path returns an empty, up-to-date result.
 - `getMeta` — the stream's identity, incarnation, head offset, and producer state, or `null` for an unknown path.
 - `subscribe` — register a process-local change listener for a path; returns an unsubscribe function. Notification is best-effort in-process fan-out, not a durable or cross-process signal.
+- `putFoldCheckpoint` / `getFoldCheckpoint` — optional fold-checkpoint capability: one durable serialized-fold snapshot per path, superseded on each write, so loads fold only the suffix appended since it instead of replaying the stream from the origin. A checkpoint is a cache over the log, never authoritative — the runtime validates its format version, incarnation, and offset on load and silently rebuilds by replay when anything mismatches. Adapters without the pair stay fully functional; the runtime degrades to full replay and warns once per path. Implementations must be torn-write safe: a partially persisted checkpoint must read back as absent or fail the read, never as a plausible blob. `getFoldCheckpoint` with `atOrBefore` returns the checkpoint only when its offset is at or before the bound.
 
 Offsets are opaque strings ordered by the stream; `formatOffset` and `parseOffset` convert between offset strings and integer sequence numbers. `defineSqlConversationStreamStore(dialect: SqlConversationDialect)` builds a complete `ConversationStreamStore` over an async SQL backend — the Postgres, libSQL, and MySQL adapters share one fence implementation and differ only in dialect constants. `InMemoryConversationStreamStore` and `StreamListenerRegistry` are exported as reference building blocks.
 
@@ -197,7 +203,7 @@ Rules that hold across all three stores; the contract suites test each of them.
 - **Append-only streams.** Canonical records are never updated or rewritten. A batch is all-or-nothing under a single offset, and offsets are strictly ordered.
 - **First terminal state wins.** A settled submission's outcome is never overridden — stale attempts observe `false` from the settle methods.
 - **Observable atomicity.** Where a method is described as atomic, concurrent callers must never both observe success; whether that is achieved with transactions, conditional updates, or unique indexes is the adapter's choice.
-- **Schema-version stamping.** An adapter durably records its schema/format version when it first creates the store (current version: `FLUE_SCHEMA_VERSION`, `8`) and throws `PersistedSchemaVersionError` — before reading or writing any data — when opened against a store recorded with an unknown or newer version. `assertSupportedFlueSchemaVersion(storedVersion)` performs the check. The pre-1.0 format is reset-only: stores created by another version are cleared, never migrated in place. The built-in SQL adapters implement the stamp with a one-row `flue_meta` key/value table (key `'schema_version'`); non-SQL adapters implement the same obligation natively.
+- **Format-version stamping.** An adapter durably records its format version when it first creates the store (current version: `FLUE_FORMAT_VERSION`, `1`) and throws `PersistedFormatVersionError` — before reading or writing any data — when opened against a store recorded with an unknown or newer version. `assertSupportedFlueFormatVersion(storedVersion)` performs the check. The format is reset-only: stores recorded with another version are cleared, never migrated in place. The built-in SQL adapters implement the stamp with a one-row `flue_meta` key/value table (key `'format_version'`); non-SQL adapters implement the same obligation natively.
 
 ## Contract test suites
 
@@ -220,7 +226,7 @@ defineStoreContractTests('My backend', {
 });
 ```
 
-- `defineStoreContractTests(label, backend)` — the `AgentSubmissionStore` suite: admission, canonical readiness, queue ordering, claims, lifecycle transitions, aborts, settlement obligations, durability stamping, attempt replacement, leases, and turn-boundary joins. `backend.create()` returns an `AgentSubmissionStore`.
+- `defineStoreContractTests(label, backend)` — the `AgentSubmissionStore` suite: admission, canonical readiness, queue ordering, claims, lifecycle transitions, aborts, settlement obligations, durability stamping, attempt replacement, leases, and turn-boundary joins. `backend.create()` returns an `AgentSubmissionStore`. The optional `backend.formatVersion` group gives the suite raw access to the persisted format-version stamp (`open()` returns a fresh, un-migrated store handle with `migrate`, `readStamp`, `writeStamp`, and `deleteStamp`) and enables the format-version stamping tests.
 - `defineConversationStreamStoreContractTests(label, backend)` — the `ConversationStreamStore` suite: racing creates, ordered atomic batches, idempotent and conflicting retries, producer fencing, submission-owned append authorization, and reads. `backend.create()` returns `{ stream, submissionStore? }`; the submission store is required for the authorization tests. Also importable from `@flue/runtime/test-utils/conversation-stream`.
 - `defineAttachmentStoreContractTests(label, backend)` — the `AttachmentStore` suite: byte round-trips, idempotent and concurrent exact puts, conflict errors on identity reuse, and integrity errors. `backend.create()` returns an `AttachmentStore`. Also importable from `@flue/runtime/test-utils/attachment-store`.
 
@@ -236,4 +242,4 @@ Pure helper functions exported from `@flue/runtime/adapter`, used by the built-i
 - `createDispatchAgentSubmissionInput(input)` — convert a `DispatchInput` into the persisted `AgentSubmissionInput` shape.
 - `prepareSubmissionAttachments`, `hydratePersistedSubmissionAttachments`, `matchesPersistedSubmissionAttachments`, `sameSubmissionChunks` — attachment chunking for oversized-row-safe payload storage, keyed by submission id (`SubmissionChunkRow`, `SubmissionChunkStore`).
 
-The adapter surface is deliberately narrow: store interfaces, vocabulary types, and pure helpers — no runtime orchestration, provider plumbing, or generated-entry internals. The error classes (`ConversationStreamStoreError`, `AttachmentConflictError`, `AttachmentIntegrityError`, `PersistedSchemaVersionError`) are documented in [Errors](/docs/reference/errors/).
+The adapter surface is deliberately narrow: store interfaces, vocabulary types, and pure helpers — no runtime orchestration, provider plumbing, or generated-entry internals. The error classes (`ConversationStreamStoreError`, `AttachmentConflictError`, `AttachmentIntegrityError`, `PersistedFormatVersionError`) are documented in [Errors](/docs/reference/errors/).

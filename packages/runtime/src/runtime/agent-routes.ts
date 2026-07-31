@@ -12,7 +12,7 @@
  */
 
 import { InvalidRequestError, RouteNotFoundError } from '../errors.ts';
-import type { FlueRuntime } from './flue-app.ts';
+import type { CloudflareRuntime, FlueRuntime } from './flue-app.ts';
 import { handleAgentRequest } from './handle-agent.ts';
 import {
 	handleAgentAttachmentRead,
@@ -51,12 +51,7 @@ export async function executeAgentConversationRead(
 	}
 
 	// Cloudflare: forward to the agent DO.
-	const response = await rt.routeAgentRequest(request, target.env, {
-		agentName,
-		instanceId,
-	});
-	if (response) return response;
-	throw routeNotFound(request);
+	return routeToAgent(rt, request, target, 'conversation read');
 }
 
 /** Admit one attached prompt (`POST`) for an agent instance (202 admission). */
@@ -78,12 +73,7 @@ export async function executeAgentPrompt(
 		});
 	}
 
-	const response = await rt.routeAgentRequest(request, target.env, {
-		agentName,
-		instanceId,
-	});
-	if (response) return response;
-	throw routeNotFound(request);
+	return routeToAgent(rt, request, target, 'prompt');
 }
 
 /** Abort all in-flight/queued durable work for one agent instance. */
@@ -91,19 +81,14 @@ export async function executeAgentAbort(
 	rt: FlueRuntime,
 	target: AgentRequestTarget,
 ): Promise<Response> {
-	const { agentName, instanceId, request } = target;
+	const { agentName, instanceId } = target;
 	if (rt.target === 'node') {
 		const aborted = await rt.abortAgentInstance(agentName, instanceId);
 		return Response.json({ aborted });
 	}
 	// Cloudflare: forward to the owning agent DO, which recognizes the
 	// abort intent by the canonical path tail and settles via its coordinator.
-	const response = await rt.routeAgentRequest(canonicalAgentRequest(target, '/abort'), target.env, {
-		agentName,
-		instanceId,
-	});
-	if (response) return response;
-	throw routeNotFound(request);
+	return routeToAgent(rt, canonicalAgentRequest(target, '/abort'), target, 'abort');
 }
 
 /** Serve one attachment's bytes. */
@@ -111,7 +96,7 @@ export async function executeAgentAttachmentRead(
 	rt: FlueRuntime,
 	target: AgentRequestTarget & { attachmentId: string },
 ): Promise<Response> {
-	const { agentName, instanceId, request } = target;
+	const { agentName, instanceId } = target;
 	if (rt.target === 'node') {
 		return handleAgentAttachmentRead({
 			conversationStore: rt.conversationStreamStore,
@@ -122,11 +107,38 @@ export async function executeAgentAttachmentRead(
 	}
 	// Cloudflare: forward to the agent DO, which owns the attachment bytes and
 	// recognizes the download intent by the canonical path tail.
-	const response = await rt.routeAgentRequest(
+	return routeToAgent(
+		rt,
 		canonicalAgentRequest(target, `/attachments/${encodeURIComponent(target.attachmentId)}`),
-		target.env,
-		{ agentName, instanceId },
+		target,
+		'attachment read',
 	);
+}
+
+/**
+ * Forward one request across the Durable Object boundary. A rejection here
+ * arrives from workerd's `stub.fetch()` tunnel stripped to a message string
+ * (no stack, no `cause` levels beyond what the DO flattened into the
+ * message), so the wrap names the target — which agent, which instance,
+ * which verb — before the router's error renderer logs it; without this the
+ * renderer sees a bare tunneled error with no routing context.
+ */
+async function routeToAgent(
+	rt: CloudflareRuntime,
+	request: Request,
+	target: AgentRequestTarget,
+	verb: string,
+): Promise<Response> {
+	const { agentName, instanceId } = target;
+	let response: Response | null;
+	try {
+		response = await rt.routeAgentRequest(request, target.env, { agentName, instanceId });
+	} catch (cause) {
+		throw new Error(
+			`[flue] agent "${agentName}" instance "${instanceId}" ${verb} failed across the Durable Object boundary.`,
+			{ cause },
+		);
+	}
 	if (response) return response;
 	throw routeNotFound(request);
 }

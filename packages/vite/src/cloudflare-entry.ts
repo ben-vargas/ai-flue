@@ -32,6 +32,12 @@ export interface GenerateCloudflareEntryOptions {
 	 * provider is emitted only when the list is omitted or names it.
 	 */
 	readonly providers: readonly string[] | undefined;
+	/**
+	 * Default Cloudflare tracing (`flue.config.ts` `tracing`). `false` omits
+	 * the default-tracing block and its import from the generated entry;
+	 * `undefined` means on.
+	 */
+	readonly tracing: boolean | undefined;
 }
 
 /** Posix-normalize a path for embedding in generated import specifiers. */
@@ -40,8 +46,9 @@ function importPath(filePath: string): string {
 }
 
 export function generateCloudflareEntry(options: GenerateCloudflareEntryOptions): string {
-	const { appEntry, cloudflareEntry, agents, providers } = options;
+	const { appEntry, cloudflareEntry, agents, providers, tracing } = options;
 	const includeBindingProvider = providers === undefined || providers.includes('cloudflare');
+	const includeTracing = tracing !== false;
 
 	// One import per module file; one entry (and one DO class) per agent.
 	const filePaths = [...new Set(agents.map((agent) => agent.filePath))];
@@ -111,7 +118,7 @@ import {
 } from '@flue/runtime/internal';
 import {
 	createCloudflareWorkerConfig,
-	createFlueAgentClass,
+	createFlueAgentClass,${includeTracing ? '\n\tinstallDefaultCloudflareTracing,' : ''}
 	runWithCloudflareContext,
 } from '@flue/runtime/cloudflare/internal';
 ${
@@ -137,6 +144,19 @@ ${
 if (!hasProvider('cloudflare')) {
 	setProvider(cloudflareBindingProvider({ binding: env.AI }));
 }
+`
+		: ''
+}
+${
+	includeTracing
+		? `
+// ─── Default tracing ────────────────────────────────────────────────────────
+// User \`app.ts\` imports are hoisted above this body, so a user-supplied
+// \`instrument(createCloudflareTracing(...))\` registers first and the
+// installer yields to it. A platform no-op until Workers Traces is enabled
+// on the account; \`tracing: false\` in flue.config.ts omits this block.
+
+installDefaultCloudflareTracing();
 `
 		: ''
 }
@@ -210,12 +230,13 @@ function runWithInstanceContext(doInstance, identity, fn) {
 	);
 }
 
-const devLifecycle = import.meta.env.DEV ? installDevLifecycleLogger() : undefined;
+// The dev logger is an observe() subscriber; DO isolates live and die with
+// their module scope, so there is nothing to dispose.
+if (import.meta.env.DEV) installDevLifecycleLogger();
 const cloudflareAgents = createCloudflareAgentRuntime({
 	agents,
 	createContext: createAgentContextForRequest,
 	runWithInstanceContext: (instance, agentName, fn) => runWithInstanceContext(instance, agentIdentities[agentName], fn),
-	onInteractionStart: devLifecycle?.onAgentInteractionStart,
 });
 
 // ─── Per-agent Durable Object classes ───────────────────────────────────────

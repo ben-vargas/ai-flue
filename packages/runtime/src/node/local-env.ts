@@ -141,8 +141,13 @@ function execShell(
 				});
 				return;
 			}
-			// `code` is null when the child died from a signal (abort/timeout).
-			settle({ stdout, stderr, exitCode: code ?? 1 });
+			// `code` is null when the child died from a signal. A kill driven
+			// by this adapter's own abort resolves with the timeout(1)
+			// convention's exit code 124; callers only ever see it for
+			// `timeoutMs` kills, because the caller-abort path rethrows
+			// AbortError before the result surfaces. A signal death we did
+			// not initiate keeps the generic failure code.
+			settle({ stdout, stderr, exitCode: code ?? (opts.signal?.aborted ? 124 : 1) });
 		});
 	});
 }

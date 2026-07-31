@@ -7,16 +7,15 @@
 		"dev": "astro dev",
 		"build": "astro build",
 		"deploy": "pnpm run build && pnpm exec wrangler deploy",
-		"deploy:nightly": "pnpm run build && pnpm exec wrangler deploy --env nightly",
 		"preview": "astro preview",
 		"astro": "astro"
 	},
 	"dependencies": {
-		"@astrojs/mdx": "7.0.3",
-		"@earendil-works/pi-ai": "^0.81.1",
-		"@paper-design/shaders": "0.0.77",
+		"@astrojs/mdx": "7.0.5",
+		"@earendil-works/pi-ai": "^0.83.0",
+		"@paper-design/shaders": "0.0.78",
 		"@tailwindcss/vite": "^4.2.0",
-		"astro": "7.1.3",
+		"astro": "7.1.6",
 		"tailwindcss": "^4.2.0"
 	},
 	"devDependencies": {

@@ -68,7 +68,9 @@ export function postMessage(ref: MessengerConversationRef) {
 				text: data.text,
 			});
 			return {
-				...(result.messageId === undefined ? {} : { messageId: result.messageId }),
+				output: {
+					...(result.messageId === undefined ? {} : { messageId: result.messageId }),
+				},
 			};
 		},
 	});

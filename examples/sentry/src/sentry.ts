@@ -1,4 +1,4 @@
-// flue-blueprint: tooling/sentry@3
+// flue-blueprint: tooling/sentry@4
 
 /**
  * Sentry observability for Flue.
@@ -21,6 +21,8 @@
  * Issues are limited to terminal failures: a failed operation or a failed
  * durable submission. Recovered errors an agent logs and moves past stay
  * logs — they arrive in Sentry Logs on the same trace, not as issues.
+ * Coordinator recovery failures (a submission stuck retrying, not yet — or
+ * never — settled) arrive as breadcrumbs, not issues either.
  *
  * Model and tool content (prompts, completions, tool arguments/results)
  * stays out of traces unless SENTRY_AI_RECORD_INPUTS /
@@ -125,6 +127,10 @@ instrument({
 			}
 			return;
 		}
+		if (event.type === 'submission_recovery') {
+			recordRecoveryBreadcrumb(event);
+			return;
+		}
 		if (event.type === 'log') {
 			Sentry.logger[event.level](event.message, logAttributes(event));
 		}
@@ -136,6 +142,28 @@ instrument({
 		await Sentry.flush(2000);
 	},
 });
+
+// A coordinator retrying or reconciling a stuck submission — not yet a
+// terminal outcome, and 'deferred'/'agent_unavailable' recur on every retry
+// wake, so this stays a breadcrumb rather than a captured issue. The one
+// terminal outcome, 'terminated', always co-occurs with a `submission_settled`
+// outcome:'failed' event that the branch above already captures; recording it
+// here too would duplicate that issue.
+function recordRecoveryBreadcrumb(event: Extract<FlueObservation, { type: 'submission_recovery' }>): void {
+	Sentry.addBreadcrumb({
+		category: 'flue.submission_recovery',
+		level: event.outcome === 'terminated' ? 'error' : 'warning',
+		message: `${event.operation}: ${event.outcome}`,
+		data: {
+			...correlationTags(event),
+			'flue.recovery.operation': event.operation,
+			'flue.recovery.outcome': event.outcome,
+			...(event.attemptCount !== undefined ? { 'flue.recovery.attempt_count': event.attemptCount } : {}),
+			...(event.maxAttempts !== undefined ? { 'flue.recovery.max_attempts': event.maxAttempts } : {}),
+			...(event.errorInfo ? { 'error.type': event.errorInfo.type } : {}),
+		},
+	});
+}
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 

@@ -1,6 +1,7 @@
 import type {
 	DeliveredAttachment,
 	FlueConversationMessage,
+	FlueConversationSettlement,
 	FlueConversationState,
 } from '@flue/sdk';
 
@@ -26,6 +27,13 @@ export interface AgentSnapshot {
 	 * retry affordance instead of having them silently disappear.
 	 */
 	failedSends: FailedSend[];
+	/**
+	 * Terminal outcomes of the conversation's tracked submissions, mirrored
+	 * from the observed conversation. Purely additive exposure for programmatic
+	 * needs (correlating a `submissionId` with its outcome); `status`/`error`
+	 * semantics are unchanged.
+	 */
+	settlements: FlueConversationSettlement[];
 }
 
 interface PendingSend {
@@ -56,6 +64,7 @@ export const emptyAgentState: AgentState = {
 	historyReady: false,
 	error: undefined,
 	failedSends: [],
+	settlements: [],
 	conversation: undefined,
 	pendingSends: [],
 	failedOptimistic: [],
@@ -239,6 +248,7 @@ function converge(state: AgentState): AgentState {
 	return {
 		...state,
 		messages,
+		settlements: conversation?.settlements ?? [],
 		pendingSends,
 		activeSubmissionIds,
 		status,

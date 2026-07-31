@@ -259,7 +259,7 @@ export function postMessage(ref: WhatsAppSendRef) {
     }),
     async run({ data: { text } }) {
       const result = await sendTextMessage(ref, text);
-      return { messageId: result.messages[0]?.id ?? null };
+      return { output: { messageId: result.messages[0]?.id ?? null } };
     },
   });
 }

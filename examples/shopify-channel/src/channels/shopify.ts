@@ -80,7 +80,7 @@ export function retrieveOrder(ref: ShopifyOrderRef) {
 		description: 'Retrieve the Shopify order already bound to this agent.',
 		async run() {
 			const order = await retrieveShopifyOrder(client, ref.orderId);
-			return { order } as unknown as JsonValue;
+			return { output: { order } as unknown as JsonValue };
 		},
 	});
 }

@@ -40,6 +40,7 @@ export {
 	SkillNotRegisteredError,
 	SubagentNotDeclaredError,
 	SubmissionAbortedError,
+	SubmissionConflictError,
 	SubmissionInterruptedError,
 	SubmissionRetryExhaustedError,
 	SubmissionTimeoutError,
@@ -95,7 +96,12 @@ export { type AgentInstanceInfo, dispatch, getAgentInstance } from './runtime/fl
 export { setProvider } from './runtime/providers.ts';
 export type { AgentIdentityBinding } from './runtime/registration.ts';
 export { __flueBindAgentModule } from './runtime/registration.ts';
-export { bash, createSandboxSessionEnv, type SandboxApi } from './sandbox.ts';
+export {
+	bash,
+	createSandboxSessionEnv,
+	type OrphanedExecSettlement,
+	type SandboxApi,
+} from './sandbox.ts';
 export { defineSkill } from './skill-definition.ts';
 export { defineTool } from './tool.ts';
 export type {
@@ -163,6 +169,7 @@ export type {
 	ToolInputSchema,
 	ToolOutput,
 	ToolOutputSchema,
+	ToolRunEnvelope,
 	ToolStep,
 } from './types.ts';
 

@@ -18,7 +18,7 @@ export function WithImage() {
 				images: [image],
 				result: v.object({ sawImage: v.boolean(), color: v.string() }),
 			});
-			return { plain: plain.text, structured: structured.data };
+			return { output: { plain: plain.text, structured: structured.data } };
 		},
 	});
 	return 'When asked to run a demo, call the `image-test` tool and report its result.';

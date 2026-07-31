@@ -113,7 +113,7 @@ export function postMessage(ref: LinearMessageRef) {
 					agentSessionId: ref.agentSessionId,
 					content: { type: 'response', body: text },
 				});
-				return { success: result.success };
+				return { output: { success: result.success } };
 			}
 			const result = await client.createComment({
 				issueId: ref.issueId,
@@ -121,8 +121,10 @@ export function postMessage(ref: LinearMessageRef) {
 				body: text,
 			});
 			return {
-				success: result.success,
-				...(result.commentId === undefined ? {} : { commentId: result.commentId }),
+				output: {
+					success: result.success,
+					...(result.commentId === undefined ? {} : { commentId: result.commentId }),
+				},
 			};
 		},
 	});

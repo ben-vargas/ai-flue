@@ -15,6 +15,127 @@ import type {
 export type { SessionEnv } from './types.ts';
 
 /**
+ * Settlement report for an orphaned command: an `exec` whose caller was
+ * released by an abort while the provider call was still in flight. The
+ * runtime's `SessionEnv` wrappers reject promptly on abort — never gated on
+ * the remote command's settlement — so on a provider that cannot cancel
+ * mid-flight, the command keeps running until it settles on its own. That
+ * settlement is consumed (fulfillment and rejection alike — a late
+ * `SandboxDiedError` lands on `error` instead of surfacing anywhere) and is
+ * never recorded into the conversation; the `onOrphanSettled` callback on
+ * {@link createSandboxSessionEnv} is its only outlet, for adapters that want
+ * to log, bill, or reap the orphan out-of-band.
+ */
+export interface OrphanedExecSettlement {
+	/** The command that was orphaned. */
+	command: string;
+	/** When the provider call started. */
+	startedAt: Date;
+	/** When the caller's abort released the awaiting fiber. */
+	abortedAt: Date;
+	/** When the orphaned provider call finally settled. */
+	settledAt: Date;
+	/** The orphan's result, when it fulfilled. */
+	result?: ShellResult;
+	/** The orphan's rejection reason, when it rejected (e.g. a late `SandboxDiedError`). */
+	error?: unknown;
+}
+
+/**
+ * Appended to the abort reason on a mid-flight rejection. Uniformly
+ * pessimistic: even a cancel-capable provider has not confirmed the kill at
+ * rejection time, and the message reaches the model verbatim through the
+ * error tool result.
+ */
+const ORPHANED_EXEC_SUFFIX =
+	' The sandbox command could not be confirmed cancelled and may still be running.';
+
+/**
+ * The `SessionEnv.exec` abort race, implemented once for every wrapper-built
+ * adapter: when `signal` aborts mid-flight, reject promptly with an
+ * `AbortError` — never gated on the provider promise, which most sandbox
+ * SDKs cannot cancel. The provider promise becomes an orphan whose
+ * fulfillment AND rejection are consumed here (load-bearing on workerd,
+ * where an unhandled rejection is an exception) and reported only to
+ * `onOrphanSettled`.
+ *
+ * A pre-aborted signal rejects before `run()` is invoked, so the command
+ * never executes; without a signal this is a plain await of `run()`.
+ */
+function raceExecAbort(
+	command: string,
+	run: () => Promise<ShellResult>,
+	signal: AbortSignal | undefined,
+	onOrphanSettled?: (settlement: OrphanedExecSettlement) => void,
+): Promise<ShellResult> {
+	if (signal?.aborted) return Promise.reject(abortErrorFor(signal));
+	if (!signal) return run();
+
+	const startedAt = new Date();
+	let pending: Promise<ShellResult>;
+	try {
+		pending = run();
+	} catch (error) {
+		return Promise.reject(error);
+	}
+
+	return new Promise<ShellResult>((resolve, reject) => {
+		let settled = false;
+
+		const onAbort = (): void => {
+			if (settled) return;
+			settled = true;
+			const abortedAt = new Date();
+			// The provider promise is now an orphan. Consume both settlement
+			// paths so nothing can surface as an unhandled rejection, and hand
+			// the settlement to the adapter's observer — its only outlet: the
+			// conversation already recorded the terminal story at abort time,
+			// and a post-hoc second outcome would violate reducer invariants.
+			const record = (outcome: { result: ShellResult } | { error: unknown }): void => {
+				try {
+					onOrphanSettled?.({ command, startedAt, abortedAt, settledAt: new Date(), ...outcome });
+				} catch {
+					// A throwing observer must not become an unhandled rejection
+					// of a continuation nobody awaits.
+				}
+			};
+			pending.then(
+				(result) => record({ result }),
+				(error: unknown) => record({ error }),
+			);
+			const base = abortErrorFor(signal);
+			const error = new DOMException(base.message + ORPHANED_EXEC_SUFFIX, 'AbortError');
+			// `cause` is read-only on DOMException in some runtimes.
+			try {
+				Object.defineProperty(error, 'cause', { value: signal.reason, configurable: true });
+			} catch {
+				/* leave cause unset */
+			}
+			reject(error);
+		};
+		signal.addEventListener('abort', onAbort, { once: true });
+
+		pending.then(
+			(result) => {
+				if (settled) return;
+				settled = true;
+				signal.removeEventListener('abort', onAbort);
+				// An abort that lands in the same tick as completion still
+				// rejects — no stale success.
+				if (signal.aborted) reject(abortErrorFor(signal));
+				else resolve(result);
+			},
+			(error: unknown) => {
+				if (settled) return;
+				settled = true;
+				signal.removeEventListener('abort', onAbort);
+				reject(error);
+			},
+		);
+	});
+}
+
+/**
  * Shared implementation of the `FlueFs.writeFile` parent-creation guarantee.
  * Every `SessionEnv` adapter (local, bash factory, SandboxApi wrapper) routes
  * writes through here so the cross-mode contract has exactly one
@@ -121,9 +242,9 @@ function createBashSessionEnv(bash: BashLike): SessionEnv {
 
 	return {
 		exec: async (cmd, opts) => {
-			// Pre/post abort checks here — mirrors the sandbox and local
-			// adapters, so a Bash-like implementation that ignores
-			// AbortSignal still never executes on a pre-aborted call.
+			// Pre-check before composing the timeout signal so a pre-aborted
+			// call never schedules a stray timer (raceExecAbort re-checks, but
+			// only after composition would have run).
 			if (opts?.signal?.aborted) throw abortErrorFor(opts.signal);
 
 			// Just-bash has no native timeout option. Translate `timeoutMs`
@@ -132,12 +253,17 @@ function createBashSessionEnv(bash: BashLike): SessionEnv {
 			// signal-aware sandbox adapters.
 			const { mergedSignal } = composeTimeoutSignal(opts?.timeoutMs, opts?.signal);
 
-			const result = await bash.exec(
+			// The abort race applies here for contract uniformity: a
+			// signal-blind Bash-like keeps executing in-process after the
+			// early rejection (shared event loop, shared FS) — a signal-aware
+			// one cancels via `mergedSignal` and the orphan window is bounded
+			// by its kill latency.
+			return raceExecAbort(
 				cmd,
-				opts ? { cwd: opts.cwd, env: opts.env, signal: mergedSignal } : undefined,
+				() =>
+					bash.exec(cmd, opts ? { cwd: opts.cwd, env: opts.env, signal: mergedSignal } : undefined),
+				opts?.signal,
 			);
-			if (opts?.signal?.aborted) throw abortErrorFor(opts.signal);
-			return result;
 		},
 		readFile: (p) => fs.readFile(resolve(p)),
 		readFileBuffer: (p) => fs.readFileBuffer(resolve(p)),
@@ -196,7 +322,12 @@ function assertBashLike(value: unknown): asserts value is BashLike {
  *   - `signal?: AbortSignal` (optional): for sandbox adapters whose SDK supports
  *     mid-flight cancellation (Mirage's executor, in-process bash). Lets
  *     Programmatic callers do ad-hoc `abort()`. Sandbox adapters that can't honor it
- *     should ignore it; the deadline is still enforced via `timeoutMs`.
+ *     should ignore it; the deadline is still enforced via `timeoutMs`, and
+ *     the {@link createSandboxSessionEnv} wrapper owns caller-facing abort:
+ *     on abort it rejects promptly and treats the still-running command as an
+ *     orphan ({@link OrphanedExecSettlement}). Adapters must not implement
+ *     their own abort race — a second one is redundant and splits the orphan
+ *     bookkeeping.
  *
  * Sandbox adapters that support both should observe whichever fires first.
  *
@@ -234,38 +365,51 @@ export interface SandboxApi {
 	): Promise<ShellResult>;
 }
 
-/** Wrap a SandboxApi into SessionEnv. No just-bash, no intermediate filesystem layer. */
-export function createSandboxSessionEnv(api: SandboxApi, cwd: string): SessionEnv {
+/**
+ * Wrap a SandboxApi into SessionEnv. No just-bash, no intermediate filesystem layer.
+ *
+ * `options.onOrphanSettled` observes {@link OrphanedExecSettlement}s: the
+ * eventual settlement of commands whose caller was released early by an
+ * abort. Adapter-facing only — the runtime never records orphan settlements.
+ */
+export function createSandboxSessionEnv(
+	api: SandboxApi,
+	cwd: string,
+	options?: { onOrphanSettled?: (settlement: OrphanedExecSettlement) => void },
+): SessionEnv {
 	const resolvePath = makeResolvePath(cwd);
+	const onOrphanSettled = options?.onOrphanSettled;
 
 	return {
 		async exec(
 			command: string,
-			options?: {
+			execOptions?: {
 				cwd?: string;
 				env?: Record<string, string>;
 				timeoutMs?: number;
 				signal?: AbortSignal;
 			},
 		): Promise<ShellResult> {
-			// Pre/post abort checks here — not in every sandbox adapter. Most
-			// provider SDKs (E2B, Daytona, Modal, Boxd, etc.) don't accept
-			// an AbortSignal, so a caller that aborts during a long-running
-			// remote command would otherwise see the call return
-			// successfully and the abort silently dropped. Centralizing the
-			// check means sandbox adapters only need to wire `signal` into their
-			// provider SDK when one supports it (Mirage, Vercel); the rest get
-			// correct abort semantics for free.
-			const signal = options?.signal;
-			if (signal?.aborted) throw abortErrorFor(signal);
-			const result = await api.exec(command, {
-				cwd: options?.cwd !== undefined ? resolvePath(options.cwd) : cwd,
-				env: options?.env,
-				timeoutMs: options?.timeoutMs,
+			// Abort semantics live here — not in every sandbox adapter. Most
+			// provider SDKs (E2B, Daytona, Modal, Boxd, etc.) don't accept an
+			// AbortSignal, so adapters only wire `signal` into their provider
+			// SDK when one supports it (Mirage, Vercel); the rest get the
+			// `SessionEnv.exec` abort contract for free: a pre-aborted call
+			// never executes, and a mid-flight abort rejects promptly —
+			// orphaning the remote command rather than awaiting it.
+			const signal = execOptions?.signal;
+			return raceExecAbort(
+				command,
+				() =>
+					api.exec(command, {
+						cwd: execOptions?.cwd !== undefined ? resolvePath(execOptions.cwd) : cwd,
+						env: execOptions?.env,
+						timeoutMs: execOptions?.timeoutMs,
+						signal,
+					}),
 				signal,
-			});
-			if (signal?.aborted) throw abortErrorFor(signal);
-			return result;
+				onOrphanSettled,
+			);
 		},
 
 		async readFile(path: string): Promise<string> {

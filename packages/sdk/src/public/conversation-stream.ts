@@ -130,6 +130,21 @@ export type ConversationStreamChunk =
 			answeredBySubmissionId?: string;
 			timestamp?: string;
 			position: ConversationChunkPosition;
+	  }
+	/**
+	 * Wire-only continuity marker: the durable generation identity of the
+	 * stream serving this connection. Emitted by the runtime once per SSE
+	 * connection (first data frame) and on every JSON updates response.
+	 * `observe()` compares it against the incarnation of the hydrating history
+	 * snapshot and resyncs (cancel + re-hydrate) on mismatch — the signal that
+	 * the stream was reset and regrown, so held offsets and position dedup
+	 * state belong to a dead generation. Not conversation content: it carries
+	 * no `position` (exempt from dedup) and no `conversationId` (the stream
+	 * exists before any conversation does), and applying it is a no-op.
+	 */
+	| {
+			type: 'stream-checkpoint';
+			incarnation: string;
 	  };
 
 /**
@@ -156,6 +171,7 @@ const CHUNK_TYPES = new Set<ConversationStreamChunk['type']>([
 	'tool-output-error',
 	'message-completed',
 	'submission-settled',
+	'stream-checkpoint',
 ]);
 
 /**
@@ -170,9 +186,24 @@ export function assertConversationStreamChunk(
 		!value ||
 		typeof value !== 'object' ||
 		typeof (value as { type?: unknown }).type !== 'string' ||
-		!CHUNK_TYPES.has((value as ConversationStreamChunk).type) ||
-		typeof (value as { conversationId?: unknown }).conversationId !== 'string'
+		!CHUNK_TYPES.has((value as ConversationStreamChunk).type)
 	) {
+		throw new ConversationStreamError(
+			`Unsupported agent conversation chunk: ${JSON.stringify(value)}.`,
+		);
+	}
+	// The stream-checkpoint continuity marker is not conversation content: it
+	// carries no conversationId and — deliberately — no position, so it can
+	// never disturb position dedup. Its incarnation is what observe() resyncs on.
+	if (value.type === 'stream-checkpoint') {
+		if (typeof (value as { incarnation?: unknown }).incarnation !== 'string') {
+			throw new ConversationStreamError(
+				`Agent conversation stream checkpoint is missing its incarnation: ${JSON.stringify(value)}.`,
+			);
+		}
+		return value;
+	}
+	if (typeof (value as { conversationId?: unknown }).conversationId !== 'string') {
 		throw new ConversationStreamError(
 			`Unsupported agent conversation chunk: ${JSON.stringify(value)}.`,
 		);
@@ -284,6 +315,11 @@ export function applyConversationChunk(
 			return completeMessage(state, chunk.messageId);
 		case 'submission-settled':
 			return applySettlement(state, chunk);
+		// A continuity marker, not content. `observe()` acts on it (incarnation
+		// resync) before application ever runs; for any other reducer of the
+		// wire union it is a no-op.
+		case 'stream-checkpoint':
+			return state;
 		default: {
 			const unknown = chunk as { type?: unknown };
 			throw new ConversationStreamError(

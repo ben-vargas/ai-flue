@@ -96,6 +96,8 @@ function Chat({ conversationId, token }: { conversationId: string; token: string
 }
 ```
 
+The hook does not take ownership of a client you pass in, so the same instance serves programmatic needs alongside the rendered conversation: create it once with `createFlueClient`, hand it to `useFlueAgent({ client })`, and call `observe()`, `wait()`, or `read()` on that same instance when application code needs to await a specific submission's settlement or extract a reply outside the React tree. Sharing one client keeps a single set of connections and one authentication configuration instead of duplicating them per consumer.
+
 ## Rendering and deferred identity
 
 During server rendering, the hook returns empty, idle state and opens no connections. A relative `url` such as `/api/...` resolves against the browser origin, so the server render stays dormant and the hook connects after hydration. An omitted `url` (and `client`) leaves the hook dormant while routing or application data resolves the conversation identity.

@@ -550,6 +550,7 @@ export function flue(config: FlueConfig = {}): Plugin[] {
 					cloudflareEntry: state.project.cloudflare,
 					agents: state.agents,
 					providers: state.project.providers,
+					tracing: state.project.tracing,
 				});
 			}
 			return undefined;

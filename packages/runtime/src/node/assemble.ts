@@ -9,7 +9,6 @@
 
 import type { PersistenceAdapter } from '../agent-execution-store.ts';
 import { createFlueContext } from '../client.ts';
-import type { AgentInteractionStart } from '../runtime/dev-lifecycle-logger.ts';
 import type { FlueRuntime } from '../runtime/flue-app.ts';
 import {
 	configureFlueRuntime,
@@ -18,12 +17,26 @@ import {
 } from '../runtime/flue-app.ts';
 import { resolveModel } from '../runtime/providers.ts';
 import type { FlueAgentRegistration } from '../runtime/registration.ts';
-import { registerFlueAgents } from '../runtime/registration.ts';
+import { getRegisteredFlueAgents, registerFlueAgents } from '../runtime/registration.ts';
 import type { RuntimeActivityGate } from '../runtime/runtime-activity-gate.ts';
 import { createRuntimeActivityGate } from '../runtime/runtime-activity-gate.ts';
 import { createNodeAgentCoordinator, createNodeDispatchQueue } from './agent-coordinator.ts';
 
 const SHUTDOWN_TIMEOUT_MS = 30_000;
+
+// Assembly overlap bookkeeping. Dev reloads load the new application before
+// stopping the old one, and both may hold the SAME adapter instance (a cached
+// db.ts module) — so a closing assembly may only close an adapter no live
+// configuration still uses, and a failed replacement hands the runtime back
+// to the assembly it displaced instead of leaving it unconfigured.
+const configurationAdapters = new WeakMap<FlueRuntime, PersistenceAdapter>();
+const closedConfigurations = new WeakSet<FlueRuntime>();
+
+/** Whether `adapter` belongs to the currently live runtime configuration. */
+export function adapterInUseByLiveRuntime(adapter: PersistenceAdapter): boolean {
+	const live = getFlueRuntime();
+	return live !== undefined && configurationAdapters.get(live) === adapter;
+}
 
 type ConnectedStores = Awaited<ReturnType<PersistenceAdapter['connect']>>;
 
@@ -86,8 +99,6 @@ export interface AssembleNodeAgentRuntimeOptions {
 	/** Runtime environment; defaults to `process.env`. */
 	env?: Record<string, string | undefined>;
 	devMode?: boolean;
-	/** Interaction-start callback (the dev lifecycle logger's seam). */
-	onInteractionStart?: (interaction: AgentInteractionStart) => void;
 }
 
 export interface AssembledNodeAgentRuntime {
@@ -109,6 +120,10 @@ export async function assembleNodeAgentRuntime(
 	options: AssembleNodeAgentRuntimeOptions,
 ): Promise<AssembledNodeAgentRuntime> {
 	const runtimeEnv = options.env ?? process.env;
+	// Captured before this assembly takes over, so a failed load can hand the
+	// runtime back to the application that is still serving.
+	const displacedConfiguration = getFlueRuntime();
+	const displacedAgents = getRegisteredFlueAgents();
 	registerFlueAgents(options.agents);
 
 	const { submissionStore, conversationStreamStore, attachmentStore } = options.stores;
@@ -138,8 +153,8 @@ export async function assembleNodeAgentRuntime(
 			}),
 		conversationStreamStore,
 		attachmentStore,
+		env: runtimeEnv,
 		activityGate,
-		...(options.onInteractionStart ? { onInteractionStart: options.onInteractionStart } : {}),
 	});
 	const dispatchQueue = createNodeDispatchQueue(coordinator);
 
@@ -154,6 +169,7 @@ export async function assembleNodeAgentRuntime(
 		conversationStreamStore,
 		attachmentStore,
 	};
+	configurationAdapters.set(runtimeConfiguration, options.adapter);
 	configureFlueRuntime(runtimeConfiguration);
 
 	// Reconcile work a previous process left interrupted (durable adapters
@@ -171,6 +187,7 @@ export async function assembleNodeAgentRuntime(
 		activityGate,
 		close(timeoutMs = SHUTDOWN_TIMEOUT_MS) {
 			closing ??= (async () => {
+				closedConfigurations.add(runtimeConfiguration);
 				const errors: unknown[] = [];
 				try {
 					await coordinator.shutdown(timeoutMs);
@@ -179,10 +196,26 @@ export async function assembleNodeAgentRuntime(
 				}
 				// Reload-safe: a replacement assembly may already have configured
 				// the runtime (hot reload swaps in the new app before disposing
-				// the old one) — only clear a configuration this assembly owns.
-				if (getFlueRuntime() === runtimeConfiguration) resetFlueRuntimeForTests();
+				// the old one) — only release a configuration this assembly owns.
+				// If the assembly this one displaced is still serving (this load
+				// failed after taking over), hand the runtime back to it;
+				// otherwise clear it.
+				if (getFlueRuntime() === runtimeConfiguration) {
+					if (displacedConfiguration && !closedConfigurations.has(displacedConfiguration)) {
+						registerFlueAgents(displacedAgents);
+						configureFlueRuntime(displacedConfiguration);
+					} else {
+						resetFlueRuntimeForTests();
+					}
+				}
 				try {
-					if (options.adapter.close) await options.adapter.close();
+					// The adapter may be shared with the live configuration (a
+					// cached db.ts module hands every reload the same instance);
+					// it stays open until an assembly that isn't succeeded by a
+					// same-adapter one closes it.
+					if (!adapterInUseByLiveRuntime(options.adapter) && options.adapter.close) {
+						await options.adapter.close();
+					}
 				} catch (error) {
 					errors.push(error);
 				}

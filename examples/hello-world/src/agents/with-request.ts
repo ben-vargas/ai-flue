@@ -9,7 +9,7 @@ export function WithRequest() {
 		harness: true,
 		async run({ harness }) {
 			const { text } = await harness.prompt('Say hello in 5 words.');
-			return { text };
+			return { output: { text } };
 		},
 	});
 	return 'When asked to run a demo, call the `greet` tool and report its result.';

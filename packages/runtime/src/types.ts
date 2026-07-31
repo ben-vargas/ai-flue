@@ -27,6 +27,7 @@ export type {
 	ToolInputSchema,
 	ToolOutput,
 	ToolOutputSchema,
+	ToolRunEnvelope,
 	ToolStep,
 } from './tool-types.ts';
 
@@ -105,6 +106,18 @@ export interface AgentDispatchRequest {
 	 *   rejects at admission (409, its uid in the error details).
 	 */
 	uid?: string | null;
+	/**
+	 * Caller-chosen name for this delivery (at most 256 characters) — pass a
+	 * provider's redelivery-stable id (a Slack `event_id`, a Stripe event id)
+	 * and a retried dispatch converges on the original submission instead of
+	 * producing a duplicate turn: the message is delivered and answered at
+	 * most once, and every admission returns the same receipt (replays with
+	 * `deduplicated: true`). The key names the delivery, not the outcome — a
+	 * submission that settled `failed` stays failed; retry with a fresh key
+	 * to ask again. Reusing a key with a different payload rejects with a
+	 * 409 `submission_conflict`. Keys are scoped to the `(agent, id)` target.
+	 */
+	idempotencyKey?: string;
 }
 
 /**
@@ -134,6 +147,13 @@ export interface DispatchReceipt {
 	 * send condition to guarantee later sends reach this same incarnation.
 	 */
 	uid: string;
+	/**
+	 * Present (`true`) when this admission converged on an existing keyed
+	 * submission instead of admitting a new one — the receipt echoes the
+	 * original submission's facts (its id and `acceptedAt`), and no second
+	 * turn runs.
+	 */
+	deduplicated?: true;
 }
 
 /**
@@ -256,11 +276,14 @@ export interface SessionEnv {
 			 */
 			timeoutMs?: number;
 			/**
-			 * Cancel the in-flight command. Aborting rejects with an
-			 * `AbortError`. Sandbox adapters that wrap a signal-aware SDK observe
-			 * this mid-flight; others see it only before/after the remote
-			 * call returns. Use `timeoutMs` for guaranteed deadline
-			 * enforcement on signal-blind sandbox adapters.
+			 * Cancel the in-flight command. When the signal aborts, the
+			 * returned promise rejects with an `AbortError` promptly — never
+			 * gated on the remote command's settlement. Sandbox adapters that
+			 * wrap a signal-aware SDK also cancel the command itself; on a
+			 * signal-blind provider the command becomes an orphan that may
+			 * keep running (and keep mutating the workspace) after the
+			 * rejection — the abort message says so. Use `timeoutMs` for
+			 * provider-native deadline enforcement.
 			 */
 			signal?: AbortSignal;
 		},
@@ -1233,6 +1256,52 @@ type FlueEventVariant =
 			attributes?: Record<string, unknown>;
 	  }
 	| { type: 'idle' }
+	| {
+			/** A durable submission was admitted (queued). Emitted at admission,
+			 *  before any attempt runs; idempotent admission replays re-emit it
+			 *  (at-least-once). */
+			type: 'submission_queued';
+			submissionId: string;
+			kind: 'dispatch' | 'direct';
+	  }
+	| {
+			/** An attempt started processing a claimed submission. Emitted on
+			 *  EVERY attempt — recovery replacements re-emit it with the
+			 *  incremented `attemptCount` — which is what lets an observer
+			 *  re-learn the busy set after an eviction or restart. */
+			type: 'submission_running';
+			submissionId: string;
+			kind: 'dispatch' | 'direct';
+			attemptCount: number;
+			maxAttempts: number;
+	  }
+	| {
+			/** A coordinator recovery/reconciliation step failed (or skipped
+			 *  work) and was contained instead of settling the submission.
+			 *  Re-emitted on every failed wake while the condition persists;
+			 *  `submissionId` is absent for pass-wide failures. */
+			type: 'submission_recovery';
+			submissionId?: string;
+			kind?: 'dispatch' | 'direct';
+			operation:
+				| 'materialize_submission'
+				| 'finalize_settlement'
+				| 'reconcile_submission'
+				| 'start_submission'
+				| 'process_submission'
+				| 'reconcile_pass';
+			outcome: 'deferred' | 'agent_unavailable' | 'attempt_cap_deferred' | 'terminated';
+			attemptCount?: number;
+			maxAttempts?: number;
+			error?: {
+				name?: string;
+				message: string;
+				type?: string;
+				details?: string;
+				dev?: string;
+				meta?: Record<string, unknown>;
+			};
+	  }
 	| {
 			type: 'submission_settled';
 			submissionId: string;

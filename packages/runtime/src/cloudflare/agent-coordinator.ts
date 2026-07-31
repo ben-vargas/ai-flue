@@ -5,13 +5,17 @@ import { ConversationRecordWriter } from '../conversation-writer.ts';
 import {
 	AgentInstanceExistsError,
 	AgentInstanceNotFoundError,
+	classifyError,
 	InvalidRequestError,
 	SubmissionAbortedError,
+	SubmissionConflictError,
 } from '../errors.ts';
+import { interceptExecution } from '../execution-interceptor.ts';
 import { createMcpConnectionCache } from '../mcp.ts';
 import {
 	type AttachedAgentSubmissionOptions,
 	admitInstanceContact,
+	adoptKeyedSubmissionReplay,
 	type createAgentSubmissionSessionHandler,
 	createDirectAgentSubmissionInput,
 	createDispatchAgentSubmissionInput,
@@ -19,21 +23,25 @@ import {
 	finalizePendingSettlement,
 	type InstanceContactAdmission,
 	type InstanceIdentity,
+	isInstanceContactRejection,
 	materializeSubmissionAttachments,
 	processSubmission,
 	reconcileInterruptedSubmission,
+	serializeSubmissionError,
+	settleUnclaimableSubmission,
 	submissionSyntheticRequest,
+	unreadySubmissionDeadline,
 } from '../runtime/agent-submissions.ts';
 import type { AttachmentStore } from '../runtime/attachment-store.ts';
 import type { ConversationStreamStore } from '../runtime/conversation-stream-store.ts';
-import type { AgentInteractionStart } from '../runtime/dev-lifecycle-logger.ts';
+import { type CoordinatorEventEmitter, createCoordinatorEventEmitter } from '../runtime/events.ts';
 import { assertAgentDispatchAdmissionInput, handleAgentRequest } from '../runtime/handle-agent.ts';
 import {
 	handleAgentAttachmentRead,
 	handleAgentConversationHead,
 	handleAgentConversationRead,
 } from '../runtime/handle-conversation-routes.ts';
-import { generateAttemptId } from '../runtime/ids.ts';
+import { generateAttemptId, isKeyDerivedSubmissionId } from '../runtime/ids.ts';
 import { agentStreamPath } from '../runtime/stream-offsets.ts';
 import { createSessionStorageKey } from '../session-identity.ts';
 import type { DeliveredMessage } from '../types.ts';
@@ -123,7 +131,6 @@ interface CloudflareAgentRuntimeOptions {
 		agentName: string,
 		callback: () => T,
 	) => T;
-	readonly onInteractionStart?: (interaction: AgentInteractionStart) => void;
 }
 
 export interface CloudflareAgentRuntime {
@@ -182,7 +189,7 @@ export function createCloudflareAgentRuntime(
 	return {
 		prepare({ storage, className, agentName }) {
 			const submissionStore = createSqlAgentExecutionStore(storage, className);
-			const conversationStores = createSqlConversationStores(storage);
+			const conversationStores = createSqlConversationStores(storage, className);
 			return {
 				agentName,
 				submissionStore,
@@ -215,11 +222,25 @@ class CloudflareAgentCoordinator {
 		private readonly instance: CloudflareAgentInstance,
 		private readonly prepared: CloudflareAgentPreparedCoordinator,
 		private readonly options: CloudflareAgentRuntimeOptions,
-	) {}
+	) {
+		this.emitCoordinatorEvent = createCoordinatorEventEmitter({
+			agentName: prepared.agentName,
+			instanceId: instance.name,
+			env: instance.env,
+		});
+	}
 
 	private conversationWriter: ConversationRecordWriter | undefined;
 	private conversationWriterCreation: Promise<ConversationRecordWriter> | undefined;
 	private conversationMaterialization: Promise<void> = Promise.resolve();
+	/**
+	 * Context-free live event emitter for coordinator signals
+	 * (`submission_queued`, `submission_recovery`, recovered settlements) —
+	 * independent of context/writer creation, which is among the failures it
+	 * reports, and infallible by contract so it can never worsen a recovery
+	 * catch block.
+	 */
+	private readonly emitCoordinatorEvent: CoordinatorEventEmitter;
 	/**
 	 * Live MCP connections for this instance (one DO = one agent instance).
 	 * Submissions reuse them while the isolate stays warm; eviction is the
@@ -299,7 +320,32 @@ class CloudflareAgentCoordinator {
 			// (e.g. the 30s backstop) starts over.
 			const attemptsBySubmission = new Map<string, number>();
 			for (;;) {
-				const started = await this.reconcileSubmissions(attemptsBySubmission);
+				// The reconcile pass is storage-only and runs under the
+				// `flue.coordinator` interception so tracing backends can group
+				// its platform-instrumented storage spans. Attempt fibers start
+				// AFTER the interception settles, deliberately: `runFiber` runs
+				// its callback in the caller's async context, so a fiber started
+				// inside the span's activation would re-parent its invoke_agent
+				// span under the coordinator span. A claim whose start is
+				// preempted here (crash, code-update reset) is an interrupted
+				// attempt by construction — the next pass's running-recovery
+				// loop reconciles it, and a durable abort in the widened
+				// claim-to-start gap resolves through the existing
+				// abortRequestedAt path.
+				const claims = await interceptExecution(
+					{ type: 'coordinator', phase: 'reconcile' },
+					{ instanceId: this.instance.name, agentName: this.agentName },
+					() => this.reconcileSubmissions(attemptsBySubmission),
+				);
+				const started: Array<Promise<void>> = [];
+				for (const claimed of claims) {
+					try {
+						const attempt = await this.startGuardedAttempt(claimed, attemptsBySubmission);
+						if (attempt) started.push(attempt.running);
+					} catch (error) {
+						this.logSubmissionReconciliationFailure(claimed, 'start_submission', error);
+					}
+				}
 				if (started.length === 0) break;
 				// Every promise is catch-guarded and finally-cleaned in
 				// startSubmissionAttempt — this await cannot reject, and the
@@ -508,24 +554,57 @@ class CloudflareAgentCoordinator {
 	 */
 	private async reconcileSubmissions(
 		attemptsBySubmission: Map<string, number>,
-	): Promise<ReadonlyArray<Promise<void>>> {
-		const started: Array<Promise<void>> = [];
-		if (!(await this.submissions.hasUnsettledSubmissions())) return started;
+	): Promise<ReadonlyArray<AgentSubmission>> {
+		const toStart: Array<AgentSubmission> = [];
+		if (!(await this.submissions.hasUnsettledSubmissions())) return toStart;
 		try {
 			for (const submission of await this.submissions.listUnreadySubmissions()) {
-				const agent = this.options.agents.find(
+				// A durable abort on an unready row settles here: the row is never
+				// claimable, so the attempt-based abort settle can never run — this
+				// is the guaranteed escape hatch for every stuck-unready class.
+				if (submission.abortRequestedAt !== undefined) {
+					await settleUnclaimableSubmission(
+						this.submissions,
+						submission,
+						'aborted',
+						new SubmissionAbortedError(),
+						this.emitCoordinatorEvent,
+					);
+					continue;
+				}
+				const found = this.options.agents.find(
 					(record) => record.name === submission.input.agent,
 				)?.agent;
-				if (
-					!agent ||
-					submission.input.agent !== this.agentName ||
-					submission.input.id !== this.instance.name
-				) {
+				const agent =
+					found &&
+					submission.input.agent === this.agentName &&
+					submission.input.id === this.instance.name
+						? found
+						: undefined;
+				if (!agent) {
+					if (
+						Date.now() >= unreadySubmissionDeadline(submission, undefined) &&
+						(await this.terminalizeUnreadySubmission(
+							submission,
+							new Error(
+								`[flue] Submission target agent "${submission.input.agent}" has no registered definition, so the submission could never start.`,
+							),
+						))
+					) {
+						continue;
+					}
 					console.error('[flue:submission-reconciliation]', {
 						agentName: this.agentName,
 						instanceId: this.instance.name,
 						submissionId: submission.submissionId,
 						sessionKey: submission.sessionKey,
+						operation: 'materialize_submission',
+						outcome: 'agent_unavailable',
+					});
+					this.emitCoordinatorEvent({
+						type: 'submission_recovery',
+						submissionId: submission.submissionId,
+						kind: submission.kind,
 						operation: 'materialize_submission',
 						outcome: 'agent_unavailable',
 					});
@@ -535,6 +614,12 @@ class CloudflareAgentCoordinator {
 					await this.materializeSubmissionConversation(submission.input, agent);
 					await this.submissions.markSubmissionCanonicalReady(submission.submissionId);
 				} catch (error) {
+					if (
+						Date.now() >= unreadySubmissionDeadline(submission, agent) &&
+						(await this.terminalizeUnreadySubmission(submission, error))
+					) {
+						continue;
+					}
 					this.logSubmissionReconciliationFailure(submission, 'materialize_submission', error);
 				}
 			}
@@ -546,7 +631,12 @@ class CloudflareAgentCoordinator {
 				// runnable-claim passes below for the instance's other work.
 				try {
 					const writer = await this.ensureConversationWriter();
-					await finalizePendingSettlement(this.submissions, writer, settlement);
+					await finalizePendingSettlement(
+						this.submissions,
+						writer,
+						settlement,
+						this.emitCoordinatorEvent,
+					);
 				} catch (error) {
 					this.logSubmissionReconciliationFailure(submission, 'finalize_settlement', error);
 				}
@@ -563,10 +653,10 @@ class CloudflareAgentCoordinator {
 				// durable write.
 				try {
 					const replacement = await this.reconcileInterruptedSubmission(submission);
-					if (replacement) {
-						const attempt = await this.startGuardedAttempt(replacement, attemptsBySubmission);
-						if (attempt) started.push(attempt.running);
-					}
+					// The attempt fiber starts after the reconcile pass returns —
+					// see drainLocked for why starts must escape the pass's
+					// tracing activation.
+					if (replacement) toStart.push(replacement);
 				} catch (error) {
 					this.logSubmissionReconciliationFailure(submission, 'reconcile_submission', error);
 				}
@@ -583,13 +673,7 @@ class CloudflareAgentCoordinator {
 					ownerId: this.instance.ctx.id.toString(),
 					leaseExpiresAt: 0,
 				});
-				if (!claimed) continue;
-				try {
-					const attempt = await this.startGuardedAttempt(claimed, attemptsBySubmission);
-					if (attempt) started.push(attempt.running);
-				} catch (error) {
-					this.logSubmissionReconciliationFailure(claimed, 'start_submission', error);
-				}
+				if (claimed) toStart.push(claimed);
 			}
 		} catch (error) {
 			console.error(
@@ -602,8 +686,17 @@ class CloudflareAgentCoordinator {
 				},
 				error,
 			);
+			this.emitCoordinatorEvent(
+				{
+					type: 'submission_recovery',
+					operation: 'reconcile_pass',
+					outcome: 'deferred',
+					error: serializeSubmissionError(error),
+				},
+				{ errorInfo: classifyError(error) },
+			);
 		}
-		return started;
+		return toStart;
 	}
 
 	private drainAttemptCapReached(
@@ -623,6 +716,15 @@ class CloudflareAgentCoordinator {
 			operation: 'start_submission',
 			outcome: 'drain_attempt_cap_deferred_to_scheduled_wake',
 		});
+		this.emitCoordinatorEvent({
+			type: 'submission_recovery',
+			submissionId: submission.submissionId,
+			kind: submission.kind,
+			operation: 'start_submission',
+			outcome: 'attempt_cap_deferred',
+			attemptCount: submission.attemptCount,
+			maxAttempts: submission.maxAttempts,
+		});
 		return true;
 	}
 
@@ -641,6 +743,40 @@ class CloudflareAgentCoordinator {
 			(attemptsBySubmission.get(submission.submissionId) ?? 0) + 1,
 		);
 		return this.startSubmissionAttempt(submission);
+	}
+
+	/**
+	 * Auto-fail a queued row whose materialization can never succeed, past its
+	 * admission-anchored durability bound (see `unreadySubmissionDeadline`).
+	 * Returns whether this coordinator won the terminal transition — a `false`
+	 * (another isolate settled first, or a racing claim made the row runnable)
+	 * falls back to the deferral logging so nothing is silently dropped.
+	 */
+	private async terminalizeUnreadySubmission(
+		submission: AgentSubmission,
+		error: unknown,
+	): Promise<boolean> {
+		const settled = await settleUnclaimableSubmission(
+			this.submissions,
+			submission,
+			'failed',
+			error,
+			this.emitCoordinatorEvent,
+		);
+		if (!settled) return false;
+		console.error(
+			'[flue:submission-reconciliation]',
+			{
+				agentName: this.agentName,
+				instanceId: this.instance.name,
+				submissionId: submission.submissionId,
+				sessionKey: submission.sessionKey,
+				operation: 'materialize_submission',
+				outcome: 'terminated',
+			},
+			error,
+		);
+		return true;
 	}
 
 	private logSubmissionReconciliationFailure(
@@ -665,6 +801,19 @@ class CloudflareAgentCoordinator {
 			},
 			error,
 		);
+		this.emitCoordinatorEvent(
+			{
+				type: 'submission_recovery',
+				submissionId: submission.submissionId,
+				kind: submission.kind,
+				operation,
+				outcome: 'deferred',
+				attemptCount: submission.attemptCount,
+				maxAttempts: submission.maxAttempts,
+				error: serializeSubmissionError(error),
+			},
+			{ errorInfo: classifyError(error) },
+		);
 	}
 
 	/**
@@ -686,6 +835,7 @@ class CloudflareAgentCoordinator {
 				this.createDurableContext(submissionSyntheticRequest(submission.input), submissionId),
 			{ ownerId: this.instance.ctx.id.toString(), leaseExpiresAt: 0 },
 			conversationWriter,
+			this.emitCoordinatorEvent,
 		);
 		return replacement ?? undefined;
 	}
@@ -735,6 +885,21 @@ class CloudflareAgentCoordinator {
 							outcome: 'failed',
 						},
 						error,
+					);
+					// Usually post-settlement (processSubmission settles failed
+					// durably and emits the live submission_settled before
+					// rethrowing); when the failure struck settlement itself the
+					// row is still unsettled and the backstop owns it.
+					this.emitCoordinatorEvent(
+						{
+							type: 'submission_recovery',
+							submissionId: submission.submissionId,
+							kind: submission.kind,
+							operation: 'process_submission',
+							outcome: 'deferred',
+							error: serializeSubmissionError(error),
+						},
+						{ errorInfo: classifyError(error) },
 					);
 				})
 				.finally(() => {
@@ -824,7 +989,7 @@ class CloudflareAgentCoordinator {
 			createContext: (submissionId) =>
 				this.createDurableContext(submissionSyntheticRequest(submission.input), submissionId),
 			conversationWriter,
-			onInteractionStart: this.options.onInteractionStart,
+			emitCoordinatorEvent: this.emitCoordinatorEvent,
 			signal,
 		});
 	}
@@ -833,24 +998,77 @@ class CloudflareAgentCoordinator {
 		message: DeliveredMessage,
 		options: AttachedAgentSubmissionOptions = {},
 	) {
-		const { traceCarrier, initialData, uid } = options;
-		const input = createDirectAgentSubmissionInput({
+		const { traceCarrier, initialData, uid, idempotencyKey } = options;
+		const input = await createDirectAgentSubmissionInput({
 			agent: this.agentName,
 			id: this.instance.name,
 			message,
 			initialData,
 			traceCarrier,
+			...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
 		});
+		const keyed = idempotencyKey !== undefined;
 		const agent = this.options.agents.find((record) => record.name === this.agentName)?.agent;
 		if (!agent) throw new Error('[flue] Agent target unavailable during durable admission.');
-		const contact = await admitInstanceContact({
-			agent,
-			id: this.instance.name,
-			initialData,
-			uid,
-			loadReducedState: async () => (await this.ensureConversationWriter()).loadReducedState(),
+		const loadReducedState = async () => (await this.ensureConversationWriter()).loadReducedState();
+		// A deduplicated replay re-attaches from the stream origin: the original
+		// admission-time offset is not persisted, and settlement records are
+		// observable from the origin indefinitely.
+		const adoptedReceipt = async (submissionId: string) => {
+			const reducedUid = (await loadReducedState()).uid;
+			if (reducedUid === undefined) return undefined;
+			await this.armDrain();
+			return {
+				submissionId,
+				offset: '-1',
+				uid: reducedUid,
+				deduplicated: true as const,
+			};
+		};
+		let contact: InstanceContactAdmission;
+		try {
+			contact = await admitInstanceContact({
+				agent,
+				id: this.instance.name,
+				initialData,
+				uid,
+				loadReducedState,
+			});
+		} catch (error) {
+			// Keyed retries can trip their own send condition (a create-only send
+			// whose first attempt created the instance): adopt the submission the
+			// key already names — the condition was consumed by the original
+			// admission. A fresh keyed send keeps today's exact semantics.
+			if (keyed && isInstanceContactRejection(error)) {
+				const adopted = await adoptKeyedSubmissionReplay(this.submissions, input);
+				const receipt = adopted && (await adoptedReceipt(adopted.submissionId));
+				if (receipt) return receipt;
+			}
+			throw error;
+		}
+		let admitted: AgentSubmission;
+		let deduplicated = false;
+		try {
+			admitted = await this.submissions.admitDirect(input);
+		} catch (error) {
+			// The store rejects a caller retry byte-exactly (it re-stamps
+			// acceptedAt/traceCarrier); a keyed admission converges on identity
+			// above the store instead. Adoption only ever swallows the failure
+			// when a matching-identity row exists.
+			if (!keyed) throw error;
+			const adopted = await adoptKeyedSubmissionReplay(this.submissions, input);
+			if (!adopted) throw error;
+			admitted = adopted;
+			deduplicated = true;
+		}
+		// Live queue signal, emitted immediately after durable admission.
+		// At-least-once: admission cannot distinguish an idempotent replay, so
+		// replays (keyed dedup included) re-emit.
+		this.emitCoordinatorEvent({
+			type: 'submission_queued',
+			submissionId: admitted.submissionId,
+			kind: 'direct',
 		});
-		const admitted = await this.submissions.admitDirect(input);
 		// The durable row exists from here on: the drain must be armed even if
 		// materialization/readiness/uid below throws, or the queued row would
 		// strand with nothing to ever claim it.
@@ -864,8 +1082,14 @@ class CloudflareAgentCoordinator {
 				await this.submissions.markSubmissionCanonicalReady(input.submissionId);
 			}
 			const writer = await this.ensureConversationWriter();
-			const offset = writer.offset;
-			const instanceUid = contact.uid ?? identity?.uid;
+			const offset = deduplicated ? '-1' : writer.offset;
+			// An adopted replay may hold neither the contact uid nor a fresh
+			// identity (its gate ran before the winning admission materialized) —
+			// the birth record is durable by then, so read the identity back.
+			let instanceUid = contact.uid ?? identity?.uid;
+			if (instanceUid === undefined && deduplicated) {
+				instanceUid = (await loadReducedState()).uid;
+			}
 			if (instanceUid === undefined) {
 				throw new Error(
 					"[flue] invariant: a materialized instance's birth record must carry a uid.",
@@ -875,6 +1099,7 @@ class CloudflareAgentCoordinator {
 				submissionId: input.submissionId,
 				offset,
 				uid: instanceUid,
+				...(deduplicated ? { deduplicated: true as const } : {}),
 			};
 		} finally {
 			await this.armDrain();
@@ -904,23 +1129,108 @@ class CloudflareAgentCoordinator {
 		}
 		const agent = this.options.agents.find((record) => record.name === this.agentName)?.agent;
 		if (!agent) return new Response('Dispatch target unavailable.', { status: 404 });
-		let contact: InstanceContactAdmission;
+		const keyed = isKeyDerivedSubmissionId(input.submissionId);
+		const submissionInput = createDispatchAgentSubmissionInput(input);
+		const loadReducedState = async () => (await this.ensureConversationWriter()).loadReducedState();
 		try {
-			contact = await admitInstanceContact({
-				agent,
-				id: this.instance.name,
-				initialData: input.initialData,
-				uid: input.uid,
-				loadReducedState: async () => (await this.ensureConversationWriter()).loadReducedState(),
+			let contact: InstanceContactAdmission;
+			try {
+				contact = await admitInstanceContact({
+					agent,
+					id: this.instance.name,
+					initialData: input.initialData,
+					uid: input.uid,
+					loadReducedState,
+				});
+			} catch (error) {
+				// Keyed retries can trip their own send condition (a create-only
+				// send whose first attempt created the instance): adopt the
+				// submission the key already names — the condition was consumed by
+				// the original admission — and echo the recorded uid. A fresh
+				// keyed send keeps today's exact semantics.
+				if (keyed && isInstanceContactRejection(error)) {
+					const adopted = await adoptKeyedSubmissionReplay(this.submissions, submissionInput);
+					const adoptedUid = adopted ? (await loadReducedState()).uid : undefined;
+					if (adopted && adoptedUid !== undefined) {
+						await this.armDrain();
+						return Response.json({
+							submissionId: adopted.submissionId,
+							acceptedAt: adopted.input.acceptedAt,
+							uid: adoptedUid,
+							deduplicated: true,
+						});
+					}
+				}
+				throw error;
+			}
+			const admission = await this.submissions.admitDispatch(input);
+			let submission: AgentSubmission;
+			let deduplicated = false;
+			if (admission.kind === 'submission') {
+				submission = admission.submission;
+			} else {
+				// The store rejects a caller retry byte-exactly (it re-stamps
+				// acceptedAt); a keyed conflict converges on submission identity
+				// above the store. Everything else — unkeyed conflicts and keyed
+				// divergence — is the structured 409 the Worker side rehydrates.
+				const adopted = keyed
+					? await adoptKeyedSubmissionReplay(this.submissions, submissionInput)
+					: undefined;
+				if (!adopted) throw new SubmissionConflictError({ submissionId: input.submissionId });
+				submission = adopted;
+				deduplicated = true;
+			}
+			// Live queue signal, emitted immediately after durable admission.
+			// At-least-once: admission cannot distinguish an idempotent replay,
+			// so replays (keyed dedup included) re-emit.
+			this.emitCoordinatorEvent({
+				type: 'submission_queued',
+				submissionId: submission.submissionId,
+				kind: 'dispatch',
 			});
+			// The durable row exists from here on: the drain must be armed even if
+			// materialization/readiness/uid below throws, or the queued row would
+			// strand with nothing to ever claim it.
+			try {
+				let identity: InstanceIdentity | undefined;
+				if (submission.canonicalReadyAt === null) {
+					identity = await this.materializeSubmissionConversation(submissionInput, agent);
+					// Tolerate a null return (see the direct path): a concurrent readiness
+					// pass may have advanced this row already; null is not a lost submission.
+					await this.submissions.markSubmissionCanonicalReady(input.submissionId);
+				}
+				// The uid rides every receipt: echoed for a continuing send, minted by
+				// materialization's identity ensure for a creating one. An adopted
+				// replay may hold neither (its gate ran before the winning admission
+				// materialized) — read the recorded identity back instead.
+				let uid = contact.uid ?? identity?.uid;
+				if (uid === undefined && deduplicated) uid = (await loadReducedState()).uid;
+				if (uid === undefined) {
+					throw new Error(
+						"[flue] invariant: a materialized instance's birth record must carry a uid.",
+					);
+				}
+				return Response.json({
+					submissionId: submission.submissionId,
+					// The stored row's timestamp, so a deduplicated replay echoes the
+					// ORIGINAL admission's receipt (identical on a fresh admission).
+					acceptedAt: submission.input.acceptedAt,
+					uid,
+					...(deduplicated ? { deduplicated: true } : {}),
+				});
+			} finally {
+				await this.armDrain();
+			}
 		} catch (error) {
 			// Structured body so the dispatch() caller's enqueue can rehydrate the
-			// typed admission error (`type` selects the class, `uid` restores the
-			// 409's existing-incarnation field) with caller-safe details intact.
+			// typed admission error (`type` selects the class; `uid` restores the
+			// instance-exists 409's incarnation field; `submissionId` restores the
+			// submission-conflict 409's existing id) with caller-safe details intact.
 			if (
 				error instanceof InvalidRequestError ||
 				error instanceof AgentInstanceNotFoundError ||
-				error instanceof AgentInstanceExistsError
+				error instanceof AgentInstanceExistsError ||
+				error instanceof SubmissionConflictError
 			) {
 				return Response.json(
 					{
@@ -928,45 +1238,14 @@ class CloudflareAgentCoordinator {
 						error: error.message,
 						details: error.details,
 						...(error instanceof AgentInstanceExistsError ? { uid: error.uid } : {}),
+						...(error instanceof SubmissionConflictError
+							? { submissionId: error.submissionId }
+							: {}),
 					},
 					{ status: error.status },
 				);
 			}
 			throw error;
-		}
-		const admission = await this.submissions.admitDispatch(input);
-		if (admission.kind === 'conflict') {
-			return new Response('Conflicting internal dispatch replay.', { status: 409 });
-		}
-		// The durable row exists from here on: the drain must be armed even if
-		// materialization/readiness/uid below throws, or the queued row would
-		// strand with nothing to ever claim it.
-		try {
-			let identity: InstanceIdentity | undefined;
-			if (admission.submission.canonicalReadyAt === null) {
-				identity = await this.materializeSubmissionConversation(
-					createDispatchAgentSubmissionInput(input),
-					agent,
-				);
-				// Tolerate a null return (see the direct path): a concurrent readiness
-				// pass may have advanced this row already; null is not a lost submission.
-				await this.submissions.markSubmissionCanonicalReady(input.submissionId);
-			}
-			// The uid rides every receipt: echoed for a continuing send, minted by
-			// materialization's identity ensure for a creating one.
-			const uid = contact.uid ?? identity?.uid;
-			if (uid === undefined) {
-				throw new Error(
-					"[flue] invariant: a materialized instance's birth record must carry a uid.",
-				);
-			}
-			return Response.json({
-				submissionId: admission.submission.submissionId,
-				acceptedAt: input.acceptedAt,
-				uid,
-			});
-		} finally {
-			await this.armDrain();
 		}
 	}
 }

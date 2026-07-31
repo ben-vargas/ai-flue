@@ -1,12 +1,15 @@
-import { projectAgentConversationSnapshot } from '../conversation-public.ts';
 import {
-	loadReducedConversationPrefix,
-	loadReducedConversationState,
-} from '../conversation-reader.ts';
+	type ConversationStreamCheckpointChunk,
+	projectAgentConversationSnapshot,
+} from '../conversation-public.ts';
+import { getConversationFoldHost } from '../conversation-fold-host.ts';
+import { loadReducedConversationPrefix } from '../conversation-reader.ts';
+import type { ReducedInstanceState } from '../conversation-reducer.ts';
 import {
 	AttachmentNotFoundError,
 	InvalidRequestError,
 	StreamNotFoundError,
+	StreamOffsetGoneError,
 	toHttpResponse,
 } from '../errors.ts';
 import type { AttachmentStore } from './attachment-store.ts';
@@ -19,6 +22,7 @@ import type {
 	ConversationStreamReadResult,
 	ConversationStreamStore,
 } from './conversation-stream-store.ts';
+import { parseOffset } from './stream-offsets.ts';
 
 const SECURITY_HEADERS = {
 	'X-Content-Type-Options': 'nosniff',
@@ -57,13 +61,13 @@ export async function handleAgentAttachmentRead(options: {
 }): Promise<Response> {
 	const meta = await options.conversationStore.getMeta(options.path);
 	if (!meta) return errorResponse(new StreamNotFoundError({ path: options.path }));
-	// Resolving the default conversation id requires the reduced state. This is
-	// the same work as a history read; acceptable for now, but a future
-	// attachmentId→conversationId index would avoid the full reduce per byte read.
-	const state = await loadReducedConversationState({
-		store: options.conversationStore,
-		path: options.path,
-	});
+	// Resolving the default conversation id requires the reduced state — served
+	// from the shared fold host, so a byte read folds only batches appended
+	// since the instance's last read or write.
+	const state = await getConversationFoldHost(
+		options.conversationStore,
+		options.path,
+	).getStateAtHead();
 	const snapshot = projectAgentConversationSnapshot(state);
 	if (!snapshot) return errorResponse(new StreamNotFoundError({ path: options.path }));
 	const stored = await options.attachmentStore.get({
@@ -125,13 +129,13 @@ async function historyResponse(options: {
 	}
 	const meta = await options.store.getMeta(options.path);
 	if (!meta) return errorResponse(new StreamNotFoundError({ path: options.path }));
-	const state = await loadReducedConversationState({
-		store: options.store,
-		path: options.path,
-	});
+	const state = await getConversationFoldHost(options.store, options.path).getStateAtHead();
 	const snapshot = projectAgentConversationSnapshot(state);
 	if (!snapshot) return errorResponse(new StreamNotFoundError({ path: options.path }));
-	return Response.json(snapshot, {
+	// The projection is meta-free; the route stamps the stream's generation
+	// identity so `observe()` can detect a reset-and-regrown stream mid-follow
+	// (via the stream-checkpoint chunk) against the generation it hydrated from.
+	return Response.json({ ...snapshot, incarnation: meta.incarnation } satisfies typeof snapshot, {
 		headers: {
 			'cache-control': 'no-store',
 			'Stream-Next-Offset': snapshot.offset,
@@ -156,14 +160,32 @@ async function updatesResponse(options: {
 	if (live instanceof Response) return live;
 	const meta = await options.store.getMeta(options.path);
 	if (!meta) return errorResponse(new StreamNotFoundError({ path: options.path }));
-	if (live === 'sse') {
-		return sseResponse(options.store, options.path, offset, options.request.signal);
+	// Reads start strictly after the requested offset, so equal-to-head is a
+	// legal empty wait; strictly beyond the head is a resume checkpoint that
+	// no longer exists (e.g. the store was reset and regrown shorter). Fail
+	// loud with a structured 416 before any response commits — this guard
+	// covers the plain, long-poll, and SSE paths, and without it the
+	// store-level invariant throw would surface as a silently-retried 500
+	// (or, on SSE, after the 200 already streamed). Compare numerically:
+	// the offset format check above does not require fixed-width padding.
+	if (parseOffset(offset) > parseOffset(meta.nextOffset)) {
+		return errorResponse(
+			new StreamOffsetGoneError({ path: options.path, offset, nextOffset: meta.nextOffset }),
+		);
 	}
-	let state = await loadReducedConversationPrefix({
-		store: options.store,
-		path: options.path,
-		offset,
-	});
+	// Every wire response leads with a stream-checkpoint chunk carrying the
+	// stream's generation identity. Riding an ordinary data frame is
+	// deliberate: the durable-stream client verifiably strips response headers
+	// and unknown control-frame fields before they reach SDK code, so an
+	// in-band chunk is the only channel a client can see.
+	const checkpoint: ConversationStreamCheckpointChunk = {
+		type: 'stream-checkpoint',
+		incarnation: meta.incarnation,
+	};
+	if (live === 'sse') {
+		return sseResponse(options.store, options.path, offset, checkpoint, options.request.signal);
+	}
+	const state = await stateAtOffset(options.store, options.path, offset);
 	let read = await options.store.read(options.path, { offset });
 	if (live === 'long-poll' && read.batches.length === 0) {
 		const waited = await waitForConversationData(
@@ -176,8 +198,25 @@ async function updatesResponse(options: {
 		read = waited;
 	}
 	const projected = projectConversationRead(state, read);
-	state = projected.state;
-	return dsJsonResponse(projected.items, read, projected.offset);
+	return dsJsonResponse([checkpoint, ...projected.items], read, projected.offset);
+}
+
+/**
+ * Reduced state at a reader's resume offset. The shared fold host serves the
+ * head directly — the overwhelmingly common case: clients resume from a
+ * history response's or admission receipt's `Stream-Next-Offset`. A lagging
+ * offset (older than the head) rebuilds its prefix by replay, exactly as
+ * before. Compared numerically: the wire offset format does not require
+ * fixed-width padding.
+ */
+async function stateAtOffset(
+	store: ConversationStreamStore,
+	path: string,
+	offset: string,
+): Promise<ReducedInstanceState> {
+	const state = await getConversationFoldHost(store, path).getStateAtHead();
+	if (parseOffset(state.recordsThroughOffset) === parseOffset(offset)) return state;
+	return loadReducedConversationPrefix({ store, path, offset });
 }
 
 function dsJsonResponse(
@@ -199,6 +238,7 @@ function sseResponse(
 	store: ConversationStreamStore,
 	path: string,
 	offset: string,
+	checkpoint: ConversationStreamCheckpointChunk,
 	signal: AbortSignal,
 ): Response {
 	const encoder = new TextEncoder();
@@ -207,7 +247,13 @@ function sseResponse(
 	let heartbeat: ReturnType<typeof setInterval> | undefined;
 	const body = new ReadableStream<Uint8Array>({
 		async start(controller) {
-			let state = await loadReducedConversationPrefix({ store, path, offset });
+			// One checkpoint per SSE connection, as the first data frame. The DS
+			// client buffers data frames until the first control frame, so this
+			// rides ahead of (or together with) the first read cycle's items —
+			// and every DS-internal reconnect is a fresh server connection,
+			// which re-delivers it.
+			controller.enqueue(encoder.encode(`event: data\ndata:${JSON.stringify([checkpoint])}\n\n`));
+			let state = await stateAtOffset(store, path, offset);
 			let currentOffset = offset;
 			let wake: (() => void) | undefined;
 			// A notification can fire while the loop is suspended in store.read
@@ -298,7 +344,8 @@ function liveMode(url: URL): 'long-poll' | 'sse' | null | Response {
 }
 
 function errorResponse(
-	error: InvalidRequestError | StreamNotFoundError | AttachmentNotFoundError,
+	error:
+		InvalidRequestError | StreamNotFoundError | StreamOffsetGoneError | AttachmentNotFoundError,
 ): Response {
 	return toHttpResponse(error);
 }

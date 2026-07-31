@@ -1,7 +1,7 @@
 ---
 {
   "kind": "sandbox",
-  "version": 3,
+  "version": 1,
   "website": "https://developers.cloudflare.com/workers/runtime-apis/bindings/worker-loader/",
   "aliases": ["@cloudflare/shell"]
 }
@@ -36,7 +36,7 @@ Write this file verbatim. It requires a Cloudflare Worker target with a
 `worker_loaders` binding.
 
 ```ts
-// flue-blueprint: sandbox/cloudflare-shell@3
+// flue-blueprint: sandbox/cloudflare-shell@1
 import {
 	STATE_TYPES,
 	Workspace,
@@ -444,147 +444,3 @@ When updating an existing integration, inspect and compare it against this compl
 ### Version 1 — 2026-06-14
 
 Initial version.
-
-### Version 2 — 2026-07-12
-
-Bounded `code` tool concurrency. Cloudflare allows at most 4 concurrent
-dynamic-worker invocations per request; when a model batched 5+ `code` calls
-in one turn under Flue's parallel tool execution, the surplus calls failed
-with `Too many concurrent dynamic workers`. The adapter now queues executions
-above a cap of 3.
-
-```diff
---- a/src/sandboxes/cloudflare-shell.ts
-+++ b/src/sandboxes/cloudflare-shell.ts
-@@ -1,4 +1,4 @@
--// flue-blueprint: sandbox/cloudflare-shell@1
-+// flue-blueprint: sandbox/cloudflare-shell@2
-@@ -238,6 +238,29 @@ const CodeParams = {
- 	required: ['code'],
- };
-
-+// Cloudflare allows at most 4 concurrent dynamic-worker invocations per
-+// request. A turn that batches more `code` calls than that would fail the
-+// surplus with "Too many concurrent dynamic workers" — queue them above a
-+// cap of 3 instead (headroom for anything else in the request that holds a
-+// dynamic worker).
-+const MAX_CONCURRENT_CODE_EXECUTIONS = 3;
-+let activeCodeExecutions = 0;
-+const codeExecutionWaiters: Array<() => void> = [];
-+
-+async function withCodeExecutionSlot<T>(run: () => Promise<T>): Promise<T> {
-+	while (activeCodeExecutions >= MAX_CONCURRENT_CODE_EXECUTIONS) {
-+		await new Promise<void>((resolve) => codeExecutionWaiters.push(resolve));
-+	}
-+	activeCodeExecutions++;
-+	try {
-+		return await run();
-+	} finally {
-+		activeCodeExecutions--;
-+		codeExecutionWaiters.shift()?.();
-+	}
-+}
-+
- function createCodeTool(
- 	executor: DynamicWorkerExecutor,
- 	stateProvider: ResolvedProvider,
-@@ -252,7 +275,9 @@ function createCodeTool(
- 		) {
- 			const code = (params as { code: string }).code;
--			const { result, error, logs } = await executor.execute(code, [stateProvider]);
-+			const { result, error, logs } = await withCodeExecutionSlot(() =>
-+				executor.execute(code, [stateProvider]),
-+			);
- 			if (error) {
-```
-
-### Version 3 — 2026-07-16
-
-Model-facing guidance only — no behavior change. The `code` tool's
-description and the `code` parameter description were rewritten from
-production failure data (a heavy consumer's Sentry classification of ~2,700
-code-tool warnings): each new rule pre-empts an observed misuse bucket —
-inventing nested `state` namespaces, calling other agent tools from inside
-the snippet, using Node `require()`/`process`/`Buffer`, guessing file paths
-instead of listing directories, bursting parallel `code` calls instead of
-batching with `Promise.all`, and emitting TypeScript or undeclared
-identifiers. To upgrade, replace the `CodeParams` `code` description string
-and the `buildCodeToolDescription()` body with the current blueprint's
-versions.
-
-```diff
---- a/src/sandboxes/cloudflare-shell.ts
-+++ b/src/sandboxes/cloudflare-shell.ts
-@@ -1,4 +1,4 @@
--// flue-blueprint: sandbox/cloudflare-shell@2
-+// flue-blueprint: sandbox/cloudflare-shell@3
-@@ const CodeParams = {
- 		code: {
- 			type: 'string',
- 			description:
--				'A single async arrow function with the signature `async () => { ... return result; }`. ' +
--				'Inside the body, call `state.*` to operate on the workspace (see the type declarations ' +
--				'below). The function executes in an isolated Worker — no network, no DOM, no imports. ' +
--				'Return whatever JSON-serializable value you want back; it is returned as the tool result.',
-+				'A string containing one self-contained async arrow function, for example ' +
-+				"`async () => await state.readFile('/notes.md')`. Must be plain JavaScript " +
-+				'(no TypeScript annotations). Only the `state` object is in scope — no other ' +
-+				'tools, no Node.js APIs, no imports. Batch multiple operations with Promise.all ' +
-+				'inside one function instead of issuing parallel code calls. Return a ' +
-+				'JSON-serializable value; it is returned as the tool result.',
- 		},
-@@ function buildCodeToolDescription(): string {
-+// Each rule below pre-empts an observed model failure bucket from production
-+// use (Sentry, 2026-06/07): nested `state` shapes, native agent tools invoked
-+// inside `code`, Node require()/API usage, guessed file paths, parallel
-+// code-call bursts, and generated-JavaScript syntax/identifier defects.
- function buildCodeToolDescription(): string {
- 	return [
--		'Run a snippet of JavaScript inside an isolated Worker against a durable',
--		'workspace filesystem. The snippet must be a single async arrow function:',
-+		'Run one JavaScript snippet in an isolated Worker against the durable',
-+		'workspace filesystem. The snippet must be a single, self-contained async',
-+		'arrow function:',
- 		'',
- 		'  async () => {',
- 		'    const text = await state.readFile("/notes.md");',
- 		'    await state.writeFile("/notes.md", text.toUpperCase());',
- 		'    return { bytes: text.length };',
- 		'  }',
- 		'',
--		'Rules:',
--		'- Write JavaScript, not TypeScript — no type annotations.',
--		'- Do not use `import` statements. Everything you need is on `state`.',
--		'- Always `return` the value you want back.',
-+		'To touch several files, batch the work inside ONE call (Promise.all for',
-+		'reads) instead of issuing parallel code calls:',
-+		'',
-+		'  async () => {',
-+		'    const [a, b] = await Promise.all([',
-+		'      state.readFile("/docs/a.md"),',
-+		'      state.readFile("/docs/b.md"),',
-+		'    ]);',
-+		'    return { a, b };',
-+		'  }',
-+		'',
-+		'Rules — each violation fails the call:',
-+		'- `state` is the ONLY global beyond standard JavaScript built-ins. It is a',
-+		'  flat object of async functions (declaration below); there is no state.fs,',
-+		'  state.workspace, or any other nested namespace.',
-+		'- Your other agent tools (read, write, edit, task, ...) DO NOT exist inside',
-+		'  this snippet. Call them as separate direct tool calls, never from code.',
-+		'- This is an isolated Worker, not Node.js: require(), import, fs, path,',
-+		'  process, and Buffer do not exist. Network access (fetch, connect) is',
-+		'  disabled — do not attempt outbound HTTP.',
-+		'- Only use paths you have seen — from earlier reads or state.readdir().',
-+		'  Never guess or construct a path from an ID or a name.',
-+		'- Write plain JavaScript (no TypeScript annotations) and declare every',
-+		'  variable you use. Keep the body simple; do analysis in your reply, not',
-+		'  in code.',
-+		'- Always `return` the value you want back; it must be JSON-serializable.',
- 		'- For multi-file refactors, prefer `state.planEdits()` + `state.applyEditPlan()` over many writes.',
- 		'- For tree-wide search/replace, use `state.replaceInFiles()` (transactional by default).',
--		'- Network access (`fetch`, `connect`) is disabled. Do not attempt outbound HTTP.',
- 		'',
- 		'The `state` API (TypeScript declaration; the runtime is JavaScript):',
-```

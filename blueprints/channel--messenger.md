@@ -136,7 +136,9 @@ export function postMessage(ref: MessengerConversationRef) {
         text,
       });
       return {
-        ...(result.messageId === undefined ? {} : { messageId: result.messageId }),
+        output: {
+          ...(result.messageId === undefined ? {} : { messageId: result.messageId }),
+        },
       };
     },
   });

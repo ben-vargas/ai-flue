@@ -1,6 +1,6 @@
 {
 	"name": "@flue/postgres",
-	"version": "2.0.0-nightly.202607240825",
+	"version": "2.0.0",
 	"type": "module",
 	"license": "Apache-2.0",
 	"homepage": "https://flueframework.com/",

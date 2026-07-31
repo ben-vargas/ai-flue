@@ -1,5 +1,5 @@
 ---
-{ "kind": "tooling", "version": 2, "root": true }
+{ "kind": "tooling", "version": 1, "root": true }
 ---
 
 # Generic Flue Tooling Integration
@@ -102,20 +102,3 @@ to export them.
 ### Version 1 — 2026-06-15
 
 Initial version.
-
-### Version 2 — 2026-06-16
-
-Update observer guidance for the unfiltered `observe(...)` API.
-
-```diff
---- a/tooling-integration.md
-+++ b/tooling-integration.md
-@@ -1,5 +1,7 @@
--Register `observe(...)` once at module scope and pass `types` for only the event
--variants consumed. Its callbacks run synchronously on the event path, are not
--awaited, and must remain cheap and non-throwing.
-+Register `observe(...)` once at module scope. Its callbacks receive every event,
-+run synchronously on the event path, are not awaited, and must remain cheap and
-+non-throwing. Branch on `event.type` and return immediately for activity the
-+integration does not consume.
-```

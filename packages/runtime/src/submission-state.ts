@@ -50,6 +50,13 @@ export type CanonicalSubmissionEntry =
 			message: AgentMessage;
 			/** The submission that owns this entry, when one was active at record time. */
 			submissionId?: string;
+			/**
+			 * The durable loop-ending flag on a tool-result entry, carried from its
+			 * `tool_outcome` record (see conversation-reducer.ts). The batch it
+			 * closes is terminal iff every result in it carries the flag —
+			 * mirroring the engine's `shouldTerminateToolBatch` verdict.
+			 */
+			toolTerminate?: boolean;
 	  }
 	| { id: string; type: 'compaction' };
 
@@ -103,11 +110,21 @@ export type SubmissionState =
 	 */
 	| { kind: 'advanced_past_input' }
 	/**
-	 * The last assistant response is canonical (stopReason stop/length).
-	 * `overflow` flags silent/truncation overflow on that response — see the
+	 * The last assistant response is canonical (stopReason stop/length), OR —
+	 * with `terminalToolBatch: true` — a toolUse response whose complete
+	 * trailing tool batch unanimously carries the durable terminate flag: the
+	 * engine would have ended the turn after that batch (see
+	 * `shouldTerminateToolBatch` in pi-agent-core), so the submission settles
+	 * with no further model call, converging on the live terminate outcome.
+	 * `overflow` flags silent/truncation overflow on the response — see the
 	 * module doc for the consumer divergence it encodes.
 	 */
-	| { kind: 'completed'; assistant: AssistantMessage; overflow: boolean }
+	| {
+			kind: 'completed';
+			assistant: AssistantMessage;
+			overflow: boolean;
+			terminalToolBatch?: true;
+	  }
 	/** A toolUse response with no persisted tool results. */
 	| { kind: 'tool_use_unresolved'; assistant: AssistantMessage }
 	/** A non-retryable error response. */
@@ -224,9 +241,24 @@ export function classifySubmissionState(
 		if (
 			following.some((entry) => entry.type === 'message' && entry.message.role === 'toolResult')
 		) {
+			if (findTrailingPartialToolBatch(following)) {
+				return {
+					kind: 'resume',
+					mode: 'tool_results_partial',
+					assistant,
+					consecutiveRetryableErrors: countConsecutiveRetryableModelErrors(following),
+				};
+			}
+			// A complete trailing batch that unanimously terminates is a FINISHED
+			// response, not a resume: the live engine ends the loop after such a
+			// batch, so driving another model turn here would diverge from the
+			// no-crash outcome.
+			if (isTerminalTrailingToolBatch(following, assistantIndex, assistant)) {
+				return { kind: 'completed', assistant, overflow, terminalToolBatch: true };
+			}
 			return {
 				kind: 'resume',
-				mode: findTrailingPartialToolBatch(following) ? 'tool_results_partial' : 'tool_results',
+				mode: 'tool_results',
 				assistant,
 				consecutiveRetryableErrors: countConsecutiveRetryableModelErrors(following),
 			};
@@ -288,6 +320,38 @@ function hasAdjacentStreamContinuation(
 		afterNext.message.role === 'signal' &&
 		afterNext.message.type === 'stream_continued'
 	);
+}
+
+/**
+ * Whether the trailing tool batch owned by the LAST assistant would have
+ * ended the engine's loop: the batch is non-empty and EVERY call's durable
+ * result carries the terminate flag — the exact unanimity predicate of
+ * pi-agent-core's `shouldTerminateToolBatch`, evaluated over persisted
+ * outcomes instead of in-memory results. Deliberately strict about the tail
+ * shape: every entry after the assistant must be one of its own tool results,
+ * so anything appended past the batch (a would-stop continuation signal, a
+ * joined input) means the response durably moved on and the model resumes as
+ * before. A thrown or interrupted call's outcome never carries the flag, so
+ * unanimity fails and the batch resumes — matching live semantics.
+ */
+function isTerminalTrailingToolBatch(
+	following: readonly CanonicalSubmissionEntry[],
+	assistantIndex: number,
+	assistant: AssistantMessage,
+): boolean {
+	const toolCallIds = assistant.content.flatMap((block) =>
+		block.type === 'toolCall' ? [block.id] : [],
+	);
+	if (toolCallIds.length === 0) return false;
+	const trailing = following.slice(assistantIndex + 1);
+	if (trailing.length !== toolCallIds.length) return false;
+	const terminated = new Set<string>();
+	for (const entry of trailing) {
+		if (entry.type !== 'message' || entry.message.role !== 'toolResult') return false;
+		if (entry.toolTerminate !== true) return false;
+		terminated.add(entry.message.toolCallId);
+	}
+	return toolCallIds.every((toolCallId) => terminated.has(toolCallId));
 }
 
 export interface TrailingPartialToolBatch {
@@ -375,7 +439,13 @@ export function findTrailingPartialToolBatch(
 export function isRetryableModelError(message: AssistantMessage): boolean {
 	if (message.stopReason !== 'error' || !message.errorMessage) return false;
 	if (message.errorMessage.includes(RETRYABLE_INTERRUPTION_MARKER)) return true;
-	return /overloaded|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|network.?error|connection.?(?:reset|refused|lost)|socket hang up|fetch failed|timed? out|timeout|terminated/i.test(
+	// pi-ai's OpenAI-compatible layer stamps unrecognized wire finish_reasons
+	// as "Provider finish_reason: <reason>". Aggregators (e.g. OpenRouter)
+	// report an upstream provider dying mid-generation as the bare "error"
+	// reason, which is transient like a 5xx. The lookahead excludes qualified
+	// reasons (error_quota, error-content-filter, content_filter, …), which
+	// stay terminal.
+	return /overloaded|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|network.?error|connection.?(?:reset|refused|lost)|socket hang up|fetch failed|timed? out|timeout|terminated|provider finish_reason:\s*error(?![-\w])/i.test(
 		message.errorMessage,
 	);
 }

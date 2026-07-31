@@ -61,5 +61,8 @@ errors flow through normal Hono error handling.
 This package does not include an outbound Slack client or model tools. Run
 `flue add channel slack` for editable project code using the official
 `@slack/web-api` client. Instance ids are stable thread identifiers, not
-authorization capabilities. The package is stateless and does not deduplicate
-Events API retries.
+authorization capabilities. The package is stateless; deduplicate Events API
+retries by naming the delivery in the dispatch —
+`dispatch(agent, { id, message, idempotencyKey: payload.event_id })` — so a
+redelivery converges on the original submission instead of running a second
+turn.

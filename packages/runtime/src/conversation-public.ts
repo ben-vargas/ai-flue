@@ -32,6 +32,16 @@ export interface AgentConversationSnapshot {
 	v: 1;
 	conversationId: string;
 	offset: string;
+	/**
+	 * Durable stream-generation identity (see `ConversationStreamMeta.incarnation`).
+	 * A reset-and-regrown stream (dev restart on the in-memory store, wiped
+	 * store) serves different content at overlapping offsets; the incarnation is
+	 * what lets a client detect that its offsets belong to a dead generation.
+	 * Stamped by the history route from stream meta — absent on snapshots
+	 * projected without meta access (`conversation-reset` chunks), where the
+	 * generation cannot have changed within the delivering connection.
+	 */
+	incarnation?: string;
 	messages: ConversationUiMessage[];
 	settlements: AgentConversationSettlement[];
 }
@@ -134,6 +144,27 @@ type ConversationChunkPosition = { batch: number; index: number };
 export type ConversationStreamChunk = ConversationStreamChunkBody & {
 	position: ConversationChunkPosition;
 };
+
+/**
+ * Wire-only continuity marker for the `updates` view. Carries the stream's
+ * durable generation identity so a client can detect that its resume offsets
+ * belong to a dead generation (a reset-and-regrown stream serves different
+ * content at overlapping offsets — and replayed positions would be silently
+ * eaten by position dedup). Minted by the HTTP read handlers — once per SSE
+ * connection (the first data frame, so DS-internal reconnects get a fresh one)
+ * and on every JSON updates response — never by the projection, so in-process
+ * observers (`observeSubmissionSettlement`) never see it. It carries no
+ * `position` (it is not conversation content and must not disturb dedup) and
+ * no `conversationId` (it describes the stream, which exists before any
+ * conversation does).
+ */
+export interface ConversationStreamCheckpointChunk {
+	type: 'stream-checkpoint';
+	incarnation: string;
+}
+
+/** Everything the `updates` wire can carry: projected chunks plus wire-only markers. */
+export type ConversationStreamWireChunk = ConversationStreamChunk | ConversationStreamCheckpointChunk;
 
 // The public conversation API addresses exactly one conversation per agent
 // instance: the default harness/session root. An instance can hold other root
@@ -288,7 +319,7 @@ function encodeRecord(
 				},
 			];
 		case 'signal': {
-			const { purpose, display } = classifySignal(record.signalType);
+			const { purpose, display, settlement } = classifySignal(record.signalType);
 			const signal = {
 				...(record.tagName ? { tagName: record.tagName } : {}),
 				...(record.attributes ? { attributes: record.attributes } : {}),
@@ -305,6 +336,7 @@ function encodeRecord(
 						...(record.submissionId ? { submissionId: record.submissionId } : {}),
 						...(record.turnId ? { turnId: record.turnId } : {}),
 						...(Object.keys(signal).length > 0 ? { signal } : {}),
+						...(settlement ? { settlement } : {}),
 						parts: [{ type: 'text', text: record.content, state: 'done' }],
 					},
 				},
@@ -393,7 +425,6 @@ function encodeRecord(
 			);
 		}
 		case 'submission_settled': {
-			if (!record.submissionId) return [];
 			const answeredBy =
 				typeof record.attemptId === 'string'
 					? assistantSubmissionByAttempt(state).get(record.attemptId)
@@ -457,15 +488,13 @@ function projectSettlements(
 	return [...state.recordsById.values()]
 		.filter(
 			(record): record is SubmissionSettledRecord =>
-				record.type === 'submission_settled' &&
-				record.conversationId === conversationId &&
-				typeof record.submissionId === 'string',
+				record.type === 'submission_settled' && record.conversationId === conversationId,
 		)
 		.map((record) => {
 			const by =
 				typeof record.attemptId === 'string' ? answeredBy.get(record.attemptId) : undefined;
 			return {
-				submissionId: record.submissionId as string,
+				submissionId: record.submissionId,
 				outcome: record.outcome,
 				...(record.error === undefined ? {} : { error: record.error }),
 				...(by === undefined ? {} : { answeredBySubmissionId: by }),

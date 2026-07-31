@@ -246,6 +246,14 @@ interface ToolOutcomeRecord extends ConversationRecordEnvelope {
 	 */
 	output?: unknown;
 	/**
+	 * Durable mirror of the engine's loop-ending flag on this result
+	 * (`AgentToolResult.terminate`): the turn ends after this batch iff every
+	 * outcome in it carries the flag. Written only when true; absent means the
+	 * legacy/non-terminating behavior. Internal recovery metadata — never part
+	 * of model context or public projections.
+	 */
+	terminate?: boolean;
+	/**
 	 * Tool-handler execution time in milliseconds, measured from execution start
 	 * to end. Durably records the same duration otherwise only carried on the
 	 * ephemeral `tool` event. Absent on outcomes synthesized without a timed
@@ -309,6 +317,13 @@ interface ChildSessionRetainedRecord extends ConversationRecordEnvelope {
 
 export interface SubmissionSettledRecord extends ConversationRecordEnvelope {
 	type: 'submission_settled';
+	/**
+	 * Required, overriding the envelope's optional stamp: a settlement without
+	 * the submission it settles is meaningless (every reader keys on it), every
+	 * writer stamps it, and reset-only schema versioning means no legitimate
+	 * store lacks it. The reducer fold rejects a persisted record missing it.
+	 */
+	submissionId: string;
 	outcome: 'completed' | 'failed' | 'aborted';
 	error?: unknown;
 }

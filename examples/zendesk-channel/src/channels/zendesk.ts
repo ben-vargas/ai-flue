@@ -67,7 +67,7 @@ export function retrieveTicket(ref: ZendeskTicketRef) {
 		name: 'retrieve_zendesk_ticket',
 		description: 'Retrieve the Zendesk ticket already bound to this agent.',
 		async run() {
-			return (await client.getTicket(ref.ticketId)) as unknown as JsonValue;
+			return { output: (await client.getTicket(ref.ticketId)) as unknown as JsonValue };
 		},
 	});
 }

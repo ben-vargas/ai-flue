@@ -2,7 +2,18 @@ export type FlueExecutionOperation =
 	| { type: 'agent'; operationId: string; operationKind: 'prompt' | 'skill' | 'task' }
 	| { type: 'model'; turnId: string }
 	| { type: 'tool'; toolCallId: string; toolName: string }
-	| { type: 'task'; taskId: string };
+	| { type: 'task'; taskId: string }
+	/**
+	 * Framework bookkeeping around agent invocations — the coordinator's
+	 * storage-only work (submission listing/claiming, conversation
+	 * materialization, settlement finalization). Tracing backends wrap it in
+	 * an internal `flue.coordinator` span so platform-instrumented storage
+	 * and RPC calls group under it instead of landing as unparented noise;
+	 * the semconv spans (`invoke_agent`/`chat`/`execute_tool`) are never
+	 * children of it. New phases distinguish by the attribute, not by new
+	 * span names.
+	 */
+	| { type: 'coordinator'; phase: 'reconcile' };
 
 export interface FlueTraceCarrier {
 	traceparent: string;

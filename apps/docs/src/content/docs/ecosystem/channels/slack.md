@@ -244,7 +244,7 @@ export function replyInThread(ref: { channelId: string; threadTs: string }) {
         thread_ts: ref.threadTs,
         text,
       });
-      return { channel: result.channel ?? null, ts: result.ts ?? null };
+      return { output: { channel: result.channel ?? null, ts: result.ts ?? null } };
     },
   });
 }

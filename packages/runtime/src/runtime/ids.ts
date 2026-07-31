@@ -77,6 +77,46 @@ export function generateSubmissionId(): string {
 	return `sub_${ulid()}`;
 }
 
+/**
+ * Deterministic submission id for a caller-keyed admission: when a send
+ * carries an `idempotencyKey`, the key becomes the submission id and a retry
+ * lands on the existing idempotent admission machinery instead of minting a
+ * fresh identity.
+ *
+ * FROZEN WIRE FORMAT — do not change the prefix or the preimage. A redelivery
+ * after a deploy must derive the same id, so both are versioned by the
+ * `flue-submission-key` label in the preimage; a future derivation change
+ * needs a new label (and prefix), never an edit of this one. The hash is
+ * namespaced by `(agent, instanceId)` because the submission store is shared
+ * across all agents and instances — the same channel event id fanned out to
+ * two instances must not collide. The transport kind is deliberately
+ * EXCLUDED: the same key arriving on both transports must surface as a loud
+ * row-kind conflict, never a silent duplicate turn.
+ */
+export async function deriveKeyedSubmissionId(
+	agent: string,
+	id: string,
+	idempotencyKey: string,
+): Promise<string> {
+	const preimage = `flue-submission-key\n${agent}\n${id}\n${idempotencyKey}`;
+	const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(preimage));
+	const hex = [...new Uint8Array(digest)]
+		.map((byte) => byte.toString(16).padStart(2, '0'))
+		.join('');
+	return `sub_ik_${hex.slice(0, 32)}`;
+}
+
+/**
+ * Whether a submission id was derived from a caller idempotency key. Only
+ * {@link deriveKeyedSubmissionId} mints the `sub_ik_` prefix (submission ids
+ * are server-minted, never caller-supplied), so the prefix is the durable
+ * keyed-admission marker both coordinators branch on for replay adoption —
+ * nothing extra rides the dispatch wire or the persisted payload.
+ */
+export function isKeyDerivedSubmissionId(submissionId: string): boolean {
+	return submissionId.startsWith('sub_ik_');
+}
+
 export function generateAttemptId(): string {
 	return `attempt_${ulid()}`;
 }
@@ -90,6 +130,17 @@ export function generateAttemptId(): string {
  */
 export function generateToolCallId(): string {
 	return `call_${ulid()}`;
+}
+
+/**
+ * Correlation ref minted when the HTTP error renderer writes a server-side
+ * log line. The same value rides the wire envelope (`error.ref`), the
+ * `flue-error-ref` response header, and the log-line prefix — never persisted,
+ * so a ref is a promise of a matching log line, not a durable resource. ULID
+ * ordering lets an operator bracket the log window from the ref alone.
+ */
+export function generateErrorRef(): string {
+	return `err_${ulid()}`;
 }
 
 /** Per-process producer identity for conversation-stream ownership. */

@@ -20,7 +20,7 @@ export interface MessageGroup {
 	id: string;
 	role: 'user' | 'assistant';
 	messages: FlueConversationMessage[];
-	event?: { type: 'response-aborted'; text: string };
+	event?: { type: 'response-aborted' | 'response-failed'; text: string };
 }
 
 /** Concatenated answer text (reasoning excluded) for the copy button. */
@@ -144,7 +144,11 @@ function AssistantGroup({
 					{event ? (
 						<Marker variant="border" className="my-1.5">
 							<MarkerIcon>
-								<Square className="size-3.5 fill-current" />
+								{event.type === 'response-failed' ? (
+									<AlertCircle className="size-3.5" />
+								) : (
+									<Square className="size-3.5 fill-current" />
+								)}
 							</MarkerIcon>
 							<MarkerContent>{event.text}</MarkerContent>
 						</Marker>

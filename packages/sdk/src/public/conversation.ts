@@ -122,6 +122,15 @@ export interface FlueConversationMessage {
 	turnId?: string;
 	/** Typed signal detail; present only on `system`-role messages. */
 	signal?: FlueConversationSignalDescriptor;
+	/**
+	 * Structured settlement marker; present only on the terminal advisory the
+	 * runtime appends when a submission settles short of a reply, so clients
+	 * can render a failed or aborted turn structurally instead of parsing the
+	 * advisory's prose. The message's `submissionId` names the settled
+	 * submission. Completed submissions get no marker — the assistant reply is
+	 * the marker — and `settlements` remains the programmatic outcome index.
+	 */
+	settlement?: { outcome: 'failed' | 'aborted' };
 	parts: FlueConversationPart[];
 	/**
 	 * Message metadata is entirely agent-authored: whatever the agent's
@@ -157,6 +166,16 @@ export interface FlueConversationSnapshot {
 	v: 1;
 	conversationId: string;
 	offset: string;
+	/**
+	 * Opaque identity of the stream generation the snapshot was read from. A
+	 * runtime whose conversation store was reset and regrown (a dev-server
+	 * restart on the in-memory store) starts a new generation that serves
+	 * different content at overlapping offsets; `observe()` compares this
+	 * against the `stream-checkpoint` chunks on the live stream and re-hydrates
+	 * on mismatch. Absent on snapshots embedded in `conversation-reset` chunks,
+	 * where the generation cannot have changed within the delivering connection.
+	 */
+	incarnation?: string;
 	messages: FlueConversationMessage[];
 	settlements: FlueConversationSettlement[];
 }

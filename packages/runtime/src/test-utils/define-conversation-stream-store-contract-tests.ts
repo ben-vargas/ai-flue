@@ -627,5 +627,94 @@ export function defineConversationStreamStoreContractTests(
 				batches: [{ records: [{ id: 'record_2' }] }],
 			});
 		});
+
+		// ─── Optional fold-checkpoint capability ────────────────────────────
+		// Backends without putFoldCheckpoint/getFoldCheckpoint skip these: the
+		// runtime degrades to full replay, which the loader suite covers.
+
+		it('round-trips a fold checkpoint and supersedes it on rewrite when supported', async () => {
+			const { stream } = await create();
+			if (!stream.putFoldCheckpoint || !stream.getFoldCheckpoint) return;
+			await stream.createStream('agents/echo/contract', {
+				agentName: 'echo',
+				instanceId: 'contract',
+			});
+			const producer = await stream.acquireProducer('agents/echo/contract', 'coordinator');
+			const first = await stream.append({
+				path: 'agents/echo/contract',
+				producerId: producer.producerId,
+				producerEpoch: producer.producerEpoch,
+				incarnation: producer.incarnation,
+				producerSequence: 0,
+				records: [userRecord('record_1', 'entry_1')],
+			});
+			const second = await stream.append({
+				path: 'agents/echo/contract',
+				producerId: producer.producerId,
+				producerEpoch: producer.producerEpoch,
+				incarnation: producer.incarnation,
+				producerSequence: 1,
+				records: [userRecord('record_2', 'entry_2')],
+			});
+			await stream.putFoldCheckpoint('agents/echo/contract', {
+				offset: first.offset,
+				incarnation: producer.incarnation,
+				formatVersion: 1,
+				data: '{"checkpoint":"first"}',
+			});
+			await stream.putFoldCheckpoint('agents/echo/contract', {
+				offset: second.offset,
+				incarnation: producer.incarnation,
+				formatVersion: 1,
+				data: '{"checkpoint":"second"}',
+			});
+
+			expect(await stream.getFoldCheckpoint('agents/echo/contract')).toEqual({
+				offset: second.offset,
+				incarnation: producer.incarnation,
+				formatVersion: 1,
+				data: '{"checkpoint":"second"}',
+			});
+			expect(await stream.getFoldCheckpoint('agents/echo/missing')).toBeNull();
+		});
+
+		it('withholds a fold checkpoint past the atOrBefore bound when supported', async () => {
+			const { stream } = await create();
+			if (!stream.putFoldCheckpoint || !stream.getFoldCheckpoint) return;
+			await stream.createStream('agents/echo/contract', {
+				agentName: 'echo',
+				instanceId: 'contract',
+			});
+			const producer = await stream.acquireProducer('agents/echo/contract', 'coordinator');
+			const first = await stream.append({
+				path: 'agents/echo/contract',
+				producerId: producer.producerId,
+				producerEpoch: producer.producerEpoch,
+				incarnation: producer.incarnation,
+				producerSequence: 0,
+				records: [userRecord('record_1', 'entry_1')],
+			});
+			const second = await stream.append({
+				path: 'agents/echo/contract',
+				producerId: producer.producerId,
+				producerEpoch: producer.producerEpoch,
+				incarnation: producer.incarnation,
+				producerSequence: 1,
+				records: [userRecord('record_2', 'entry_2')],
+			});
+			await stream.putFoldCheckpoint('agents/echo/contract', {
+				offset: second.offset,
+				incarnation: producer.incarnation,
+				formatVersion: 1,
+				data: '{"checkpoint":"head"}',
+			});
+
+			expect(
+				await stream.getFoldCheckpoint('agents/echo/contract', { atOrBefore: first.offset }),
+			).toBeNull();
+			expect(
+				await stream.getFoldCheckpoint('agents/echo/contract', { atOrBefore: second.offset }),
+			).toMatchObject({ offset: second.offset });
+		});
 	});
 }

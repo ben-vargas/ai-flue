@@ -6,6 +6,13 @@ import {
 	type ConversationStreamChunk,
 	createConversationStreamState,
 } from './conversation-stream.ts';
+import {
+	AUTH_FAILURE_LIMIT,
+	comparePosition,
+	retryBackoffMs,
+	STALE_STREAM_TIMEOUT_MS,
+	statusOf,
+} from './follow-policy.ts';
 import type { FlueEventStream } from './stream.ts';
 
 /**
@@ -58,6 +65,12 @@ export interface AgentConversationObservationSource {
 		live?: ConversationLiveMode;
 		signal?: AbortSignal;
 		backoffOptions?: BackoffOptions;
+		/**
+		 * Liveness seam: invoked on every transport batch, including empty
+		 * keep-alive batches that yield no chunks. Feeds the stale-stream
+		 * watchdog in `follow()`.
+		 */
+		onActivity?: () => void;
 	}): FlueEventStream<ConversationStreamChunk>;
 }
 
@@ -80,13 +93,26 @@ export function createAgentConversationObservation(
 	let removeExternalAbortListener: (() => void) | undefined;
 	let stream: FlueEventStream<ConversationStreamChunk> | undefined;
 	let retryTimer: ReturnType<typeof setTimeout> | undefined;
+	// Stale-stream watchdog for the active stream. Armed by follow(), reset on
+	// every chunk and transport activity tick (plain setTimeout reset, no
+	// interval), cleared whenever the active stream is torn down.
+	let watchdogTimer: ReturnType<typeof setTimeout> | undefined;
 	let reconnectAttempt = 0;
+	// Consecutive 401/403 failures since the last real progress. See
+	// {@link AUTH_FAILURE_LIMIT} for the reset rules.
+	let authFailureStreak = 0;
 	// Highest chunk position applied to `streamState`. Chunks at or below it are
 	// redeliveries (e.g. an SSE reconnect replaying a batch) and are skipped so
 	// append-style deltas are never double-applied. Reset on every (re)hydrate:
 	// conversation reads are exclusive, so live chunks are always strictly after
 	// the freshly materialized snapshot, leaving nothing to dedupe against it.
 	let lastApplied: ConversationChunkPosition | undefined;
+	// Stream generation the current state was hydrated from. A live
+	// `stream-checkpoint` chunk carrying a different incarnation means the
+	// stream was reset and regrown under us — held offsets and `lastApplied`
+	// belong to a dead generation (whose replayed positions dedup would
+	// silently eat) — so follow() resyncs with an immediate re-hydrate.
+	let observedIncarnation: string | undefined;
 
 	const publish = (next: AgentConversationObservationSnapshot) => {
 		snapshot = next;
@@ -104,6 +130,12 @@ export function createAgentConversationObservation(
 		stream = undefined;
 		if (retryTimer) clearTimeout(retryTimer);
 		retryTimer = undefined;
+		disarmWatchdog();
+	};
+
+	const disarmWatchdog = () => {
+		if (watchdogTimer) clearTimeout(watchdogTimer);
+		watchdogTimer = undefined;
 	};
 
 	// On reconnect we rehydrate a fresh snapshot via `history()` rather than
@@ -114,16 +146,24 @@ export function createAgentConversationObservation(
 	// redelivery.
 	const scheduleRetry = (value: number, error: Error) => {
 		if (!isCurrent(value)) return;
+		// Entering retry means no stream is active (every caller tears its
+		// stream down first), so nothing is left for the watchdog to guard
+		// until follow() arms it again.
+		disarmWatchdog();
 		if (controller?.signal.aborted) {
 			publish({ ...snapshot, phase: 'closed', error: undefined });
 			return;
 		}
-		if (isFatalStatus(error)) {
+		const status = statusOf(error);
+		// 400 is protocol misuse — no retry can help. 401/403 retry with fresh
+		// per-request headers until AUTH_FAILURE_LIMIT consecutive failures.
+		if (status === 401 || status === 403) authFailureStreak++;
+		if (status === 400 || authFailureStreak >= AUTH_FAILURE_LIMIT) {
 			publish({ ...snapshot, phase: 'error', error });
 			return;
 		}
 		publish({ ...snapshot, phase: 'connecting', error });
-		const delay = Math.min(1000 * 2 ** reconnectAttempt++, 30_000);
+		const delay = retryBackoffMs(reconnectAttempt++);
 		retryTimer = setTimeout(() => {
 			retryTimer = undefined;
 			if (!isCurrent(value)) return;
@@ -135,21 +175,62 @@ export function createAgentConversationObservation(
 		if (!isCurrent(value)) return;
 		publish({ ...snapshot, phase: 'live', error: undefined });
 		let nextStream: FlueEventStream<ConversationStreamChunk>;
+		// Declare the stream stale after STALE_STREAM_TIMEOUT_MS of total
+		// silence: cancel it (aborting the underlying connection) and route
+		// through scheduleRetry as a transient error — a stall carries no
+		// status, so it keeps backoff semantics and never touches the
+		// auth-failure streak.
+		const onStale = () => {
+			watchdogTimer = undefined;
+			if (!isCurrent(value) || stream !== nextStream) return;
+			stream = undefined;
+			nextStream.cancel();
+			scheduleRetry(
+				value,
+				new Error(
+					`Agent conversation stream stalled: no activity for ${STALE_STREAM_TIMEOUT_MS}ms.`,
+				),
+			);
+		};
+		const armWatchdog = () => {
+			if (watchdogTimer) clearTimeout(watchdogTimer);
+			watchdogTimer = setTimeout(onStale, STALE_STREAM_TIMEOUT_MS);
+		};
 		try {
 			nextStream = source.updates({
 				offset,
 				live: options.live,
 				signal: controller?.signal,
 				backoffOptions: options.backoffOptions,
+				onActivity: armWatchdog,
 			});
 		} catch (error) {
 			scheduleRetry(value, toError(error));
 			return;
 		}
 		stream = nextStream;
+		armWatchdog();
 		try {
 			for await (const chunk of nextStream) {
 				if (!isCurrent(value) || stream !== nextStream) return;
+				// Any delivered chunk is liveness, even one dedup discards below.
+				armWatchdog();
+				// Continuity markers are transport metadata, not content: no
+				// position (never enters dedup), nothing to apply, not progress.
+				// A changed incarnation means the stream was reset and regrown —
+				// cancel and re-hydrate immediately. This is routine recovery,
+				// not a failure: phase dips to 'connecting' with no error and no
+				// backoff, and the bounded auth budget is untouched.
+				if (chunk.type === 'stream-checkpoint') {
+					if (observedIncarnation === undefined || chunk.incarnation === observedIncarnation) {
+						continue;
+					}
+					stream = undefined;
+					nextStream.cancel();
+					disarmWatchdog();
+					void hydrate(value);
+					return;
+				}
 				if (!streamState) throw new Error('Agent conversation updates require materialized state.');
 				// Drop redelivered chunks (at-least-once transports replay the
 				// in-flight batch on reconnect). Positions are monotonic but not
@@ -166,7 +247,11 @@ export function createAgentConversationObservation(
 					phase: 'live',
 					error: undefined,
 				});
+				// An applied chunk is real progress: reset backoff growth and
+				// refill the transient-auth budget. Opening the stream or
+				// receiving an empty batch is NOT progress and resets nothing.
 				reconnectAttempt = 0;
+				authFailureStreak = 0;
 			}
 			if (!isCurrent(value) || stream !== nextStream) return;
 			stream = undefined;
@@ -184,8 +269,16 @@ export function createAgentConversationObservation(
 		try {
 			const history = await source.history({ signal: controller?.signal });
 			if (!isCurrent(value)) return;
+			// A successful read is real progress: the credential demonstrably
+			// works, so the transient-auth budget refills. Issuing the request
+			// alone must not refill it, or a flapping credential (401 → issue →
+			// 401 → …) would retry forever.
+			authFailureStreak = 0;
 			streamState = createConversationStreamState(history);
 			lastApplied = undefined;
+			// Runtimes always stamp the incarnation; `undefined` (a snapshot from
+			// a server predating it) disables checkpoint comparison entirely.
+			observedIncarnation = history.incarnation;
 			// Do not reset reconnectAttempt here: a successful history read is not
 			// progress on the updates stream. Resetting it on every hydrate defeats
 			// backoff growth when the stream keeps failing right after (fixed ~1s
@@ -200,14 +293,13 @@ export function createAgentConversationObservation(
 			await follow(value, history.offset);
 		} catch (error) {
 			if (!isCurrent(value)) return;
-			const normalized = toError(error);
 			if (statusOf(error) === 404) {
 				streamState = undefined;
 				reconnectAttempt = 0;
 				publish({ conversation: undefined, offset: undefined, phase: 'absent', error: undefined });
 				return;
 			}
-			scheduleRetry(value, normalized);
+			scheduleRetry(value, toError(error));
 		}
 	};
 
@@ -223,6 +315,9 @@ export function createAgentConversationObservation(
 			}
 		});
 		reconnectAttempt = 0;
+		// Every observation episode gets a fresh auth budget: a manual
+		// refresh() after an auth-fatal error retries with fresh headers.
+		authFailureStreak = 0;
 		const value = generation;
 		queueMicrotask(() => void hydrate(value));
 	};
@@ -278,22 +373,6 @@ function linkSignal(
 	return undefined;
 }
 
-function statusOf(error: unknown): number | undefined {
-	return error && typeof error === 'object' && 'status' in error && typeof error.status === 'number'
-		? error.status
-		: undefined;
-}
-
-function isFatalStatus(error: unknown): boolean {
-	const status = statusOf(error);
-	return status === 400 || status === 401 || status === 403;
-}
-
 function toError(error: unknown): Error {
 	return error instanceof Error ? error : new Error(String(error));
-}
-
-/** Lexicographic order on chunk positions: by `batch`, then `index`. */
-function comparePosition(a: ConversationChunkPosition, b: ConversationChunkPosition): number {
-	return a.batch !== b.batch ? a.batch - b.batch : a.index - b.index;
 }

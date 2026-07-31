@@ -74,6 +74,18 @@ interface ConversationSignalDescriptor {
 	attributes?: Record<string, string>;
 }
 
+/**
+ * Structured settlement marker on a terminal advisory message. Present only on
+ * the advisory the runtime appends when a submission settles short of a reply,
+ * reusing the public settlement-outcome vocabulary so clients can react to a
+ * failed or aborted turn structurally instead of parsing advisory prose.
+ * Completed submissions get no timeline marker — the assistant reply is the
+ * marker — and `settlements[]` on snapshots remains the programmatic index.
+ */
+interface ConversationSettlementMarker {
+	outcome: 'failed' | 'aborted';
+}
+
 export interface ConversationUiMessage {
 	/**
 	 * Stable message identity. An assistant message represents one whole
@@ -96,6 +108,12 @@ export interface ConversationUiMessage {
 	turnId?: string;
 	/** Typed signal detail; present only on `system`-role messages. */
 	signal?: ConversationSignalDescriptor;
+	/**
+	 * Structured settlement marker; present only on the terminal advisory the
+	 * runtime writes for a failed or aborted submission. See
+	 * {@link ConversationSettlementMarker}.
+	 */
+	settlement?: ConversationSettlementMarker;
 	parts: ConversationUiPart[];
 	/**
 	 * Message metadata is entirely agent-authored (`useResponseStart`/`useResponseFinish`
@@ -122,14 +140,22 @@ export interface ConversationUiMessage {
 export function classifySignal(signalType: string): {
 	purpose: ConversationMessagePurpose;
 	display: ConversationMessageDisplay;
+	settlement?: ConversationSettlementMarker;
 } {
 	switch (signalType) {
 		case 'stream_interrupted':
 		case 'stream_continued':
 			return { purpose: 'advisory', display: 'hidden' };
+		// Terminal-outcome markers, written by `recordSubmissionTerminal`:
+		// `submission_aborted` is the distinct aborted outcome;
+		// `submission_interrupted` covers every failure terminal path (retry
+		// exhaustion, timeout, pre-input interruption). The structured
+		// `settlement` marker mirrors that split so clients never parse the
+		// advisory prose.
 		case 'submission_aborted':
+			return { purpose: 'advisory', display: 'diagnostic', settlement: { outcome: 'aborted' } };
 		case 'submission_interrupted':
-			return { purpose: 'advisory', display: 'diagnostic' };
+			return { purpose: 'advisory', display: 'diagnostic', settlement: { outcome: 'failed' } };
 		// Dynamic-resource narration: runtime bookkeeping announcing that the
 		// declared tools/skills/subagents changed, not a caller dispatch.
 		case 'resources':
@@ -384,7 +410,7 @@ function projectCompletedMessage(entry: ReducedMessageEntry): ConversationUiMess
 		};
 	}
 	if (message.role === 'signal') {
-		const { purpose, display } = classifySignal(message.type);
+		const { purpose, display, settlement } = classifySignal(message.type);
 		const signal: ConversationSignalDescriptor = {
 			...(message.tagName ? { tagName: message.tagName } : {}),
 			...(message.attributes ? { attributes: message.attributes } : {}),
@@ -397,6 +423,7 @@ function projectCompletedMessage(entry: ReducedMessageEntry): ConversationUiMess
 			...(entry.submissionId ? { submissionId: entry.submissionId } : {}),
 			...(entry.turnId ? { turnId: entry.turnId } : {}),
 			...(Object.keys(signal).length > 0 ? { signal } : {}),
+			...(settlement ? { settlement } : {}),
 			parts: [{ type: 'text', text: message.content, state: 'done' }],
 		};
 	}

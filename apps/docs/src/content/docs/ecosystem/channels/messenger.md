@@ -191,7 +191,7 @@ export function postMessage(ref: MessengerConversationRef) {
         to: ref.participant,
         text,
       });
-      return { messageId: result.messageId };
+      return { output: { messageId: result.messageId } };
     },
   });
 }

@@ -76,7 +76,7 @@ MongoDB transactions require one of these deployments:
 - a single-node replica set.
 
 A standalone `mongod` is unsupported. Migration checks the topology before
-creating collections or stamping the Flue schema version and fails when the
+creating collections or stamping the Flue format version and fails when the
 deployment cannot run transactions.
 
 For local development, a single-node replica set is one MongoDB server started
@@ -110,7 +110,7 @@ Flue calls `migrate()` automatically at server startup. After validating the
 topology, migration creates collections with strict validators and creates the
 required indexes. It then inspects the actual validator, validation level and
 action, plus each required index's key, uniqueness, partial filter, and
-collation before writing the schema version. Incompatible definitions and data
+collation before writing the format version. Incompatible definitions and data
 written by a newer Flue version stop startup. There is no separate migration
 command.
 
@@ -139,5 +139,5 @@ Build the Node target and start it with `MONGODB_URL` and `MONGODB_DATABASE`
 pointing at a throwaway supported deployment. Confirm migration creates the
 collections and indexes, create state, restart Flue, and verify the state
 reloads. Exercise a value larger than 4 MiB to cover multipart staging. A
-throwaway standalone `mongod` should fail migration before the schema version is
+throwaway standalone `mongod` should fail migration before the format version is
 stamped. Do not verify against a production database.

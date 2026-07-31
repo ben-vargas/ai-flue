@@ -20,27 +20,34 @@
  * Platform traces carry conversation content by default — input/output
  * messages, system instructions, tool definitions/arguments/results — via the
  * shared `@flue/runtime/telemetry` pipeline: an optional `transform` is
- * policy, the structural in-band truncation under `CONTENT_BUDGET_BYTES` is
- * physics. `content: false` restores content-free spans. Raw error messages
+ * policy, the structural in-band truncation is physics. Content draws from
+ * one per-span `CONTENT_BUDGET_BYTES` pool (workerd caps a span's *total*
+ * attribute bytes and ignores every write after the first overflow), and
+ * operational attributes precede content within each write batch, so usage,
+ * finish, and error data always land regardless of content size.
+ * `content: false` restores content-free spans. Raw error messages
  * and stacks stay excluded regardless of policy (exception content never
  * ships on this backend) — failures record only a low-cardinality
  * `error.type`. Content projection and serialization run only on sampled
  * spans (`isTraced`).
  *
- * This module is the only runtime importer of `cloudflare:workers` on the
- * `@flue/runtime/cloudflare` entry; keep it out of the coordinator /
- * root-internal module graph, which must stay Node-evaluable.
+ * This module is the only runtime value-importer of `cloudflare:workers`
+ * (reached from the `@flue/runtime/cloudflare` and `cloudflare/internal`
+ * entries, which only evaluate inside workerd); keep it out of the
+ * coordinator / root-internal module graph, which must stay Node-evaluable.
  */
 import * as cloudflareWorkers from 'cloudflare:workers';
 import type { FlueExecutionInterceptor } from '../../execution-interceptor.ts';
-import type { FlueInstrumentation } from '../../instrumentation.ts';
+import { type FlueInstrumentation, hasInstrumentation, instrument } from '../../instrumentation.ts';
 import type { FlueObservationSubscriber } from '../../observation.ts';
 import {
 	agentInputMessage,
 	agentOutputMessage,
 	CONTENT_ATTR,
+	type ContentLedger,
 	type ContentOption,
-	contentAttribute,
+	createContentLedger,
+	drawContentAttribute,
 	type GenAIContentType,
 	inputMessages,
 	normalizeFinishReason,
@@ -81,7 +88,7 @@ type AttributeValues = Record<string, string | number | boolean | undefined>;
 interface PendingSpan {
 	name: string;
 	/** Deferred so attribute work only happens on sampled invocations. */
-	attributes: () => AttributeValues;
+	attributes: (ledger: ContentLedger) => AttributeValues;
 	/**
 	 * Owning operation, for the operation-end sweep of stranded stashes. The
 	 * attribute thunks close over request content (input messages, tool
@@ -95,6 +102,8 @@ interface PendingSpan {
 interface TrackedSpan {
 	span: PlatformSpan;
 	ended: boolean;
+	/** Shared content pool: start-time and finish-time draws bill one span. */
+	ledger: ContentLedger;
 	/** Owning operation, for the operation-end sweep of leaked children. */
 	operationKey?: string;
 }
@@ -142,10 +151,15 @@ export function createCloudflareTracing(
 	): Promise<T> {
 		pending.delete(key);
 		return platform.startActiveSpan(span.name, (opened) => {
-			const tracked: TrackedSpan = { span: opened, ended: false, operationKey: owner };
+			const tracked: TrackedSpan = {
+				span: opened,
+				ended: false,
+				ledger: createContentLedger(),
+				operationKey: owner,
+			};
 			active.set(key, tracked);
 			// Attribute (and content-projection) work only on sampled invocations.
-			if (opened.isTraced) writeAttributes(tracked, span.attributes());
+			if (opened.isTraced) writeAttributes(tracked, span.attributes(tracked.ledger));
 			let running: Promise<T>;
 			try {
 				running = next();
@@ -186,18 +200,57 @@ export function createCloudflareTracing(
 		active.delete(key);
 	}
 
-	function endFromEvent(key: string, attributes: () => AttributeValues): void {
+	function endFromEvent(key: string, attributes: (ledger: ContentLedger) => AttributeValues): void {
 		pending.delete(key);
 		const tracked = active.get(key);
 		if (!tracked) return;
 		// Deferred like the start-side thunks: finish attributes (and the
 		// output-content projection) are only built for sampled spans.
-		if (!tracked.ended && tracked.span.isTraced) writeAttributes(tracked, attributes());
+		if (!tracked.ended && tracked.span.isTraced)
+			writeAttributes(tracked, attributes(tracked.ledger));
 		settleSpan(key, tracked);
+	}
+
+	/**
+	 * A coordinator recovery/reconciliation failure, recorded as a zero-width
+	 * span event on the ambient platform span — the drain runs inside an
+	 * alarm invocation Workers Traces already sees, so this nests under that
+	 * invocation without opening a new root trace. Same posture as every
+	 * other failure this adapter records: only the low-cardinality
+	 * `error.type` travels, never a raw message or stack.
+	 *
+	 * The span name is the bare operation, `submission_recovery`, with no
+	 * suffix. The semconv agent-spans grammar (`{operation} {variable-name}`)
+	 * reserves that suffix slot for an entity name (agent/workflow/tool) —
+	 * "when gen_ai.agent.name is not available, [the name] SHOULD be
+	 * `invoke_agent`" — not for a sub-operation discriminator. `event.operation`
+	 * already rides `FLUE_ATTR.recoveryOperation`, the attribute the spec
+	 * intends for it; folding it into the name would fragment the aggregation
+	 * axis into six span names instead of one.
+	 */
+	function recordRecoveryEvent(
+		event: Extract<FlueObservation, { type: 'submission_recovery' }>,
+	): void {
+		platform.startActiveSpan('submission_recovery', (span) => {
+			writeAttributes(
+				{ span, ended: false, ledger: createContentLedger() },
+				{
+					[FLUE_ATTR.submissionId]: event.submissionId,
+					[FLUE_ATTR.recoveryOperation]: event.operation,
+					[FLUE_ATTR.recoveryOutcome]: event.outcome,
+					...(event.errorInfo ? { [ATTR.errorType]: lowCardinality(event.errorInfo.type) } : {}),
+				},
+			);
+			span.end();
+		});
 	}
 
 	const observe: FlueObservationSubscriber = (event) => {
 		if (disposed) return;
+		if (event.type === 'submission_recovery') {
+			recordRecoveryEvent(event);
+			return;
+		}
 		if (event.type === 'operation_start') {
 			if (event.operationKind !== 'prompt' && event.operationKind !== 'skill') return;
 			// A prompt inside a task context is the task's own model loop; the
@@ -208,7 +261,7 @@ export function createCloudflareTracing(
 				attributes: () => ({
 					[ATTR.operationName]: 'invoke_agent',
 					[ATTR.agentName]: event.agentName,
-					[ATTR.agentId]: event.instanceId,
+					[FLUE_ATTR.instanceId]: event.instanceId,
 					[ATTR.conversationId]: event.conversationId,
 					[FLUE_ATTR.submissionId]: event.submissionId,
 					[FLUE_ATTR.operationKind]: event.operationKind,
@@ -219,13 +272,14 @@ export function createCloudflareTracing(
 		if (event.type === 'task_start') {
 			pending.set(taskKey(event), {
 				name: spanName('invoke_agent', event.agent),
-				attributes: () => ({
+				attributes: (ledger) => ({
 					[ATTR.operationName]: 'invoke_agent',
 					[ATTR.agentName]: event.agent,
 					[ATTR.conversationId]: event.conversationId,
 					[ATTR.toolCallId]: event.toolCallId,
 					[FLUE_ATTR.taskId]: event.taskId,
 					...contentEntry(
+						ledger,
 						content,
 						event,
 						CONTENT_ATTR.inputMessages,
@@ -241,17 +295,32 @@ export function createCloudflareTracing(
 			pending.set(turnKey(event), {
 				name: spanName('chat', request.requestedModel),
 				owner: ownerKey(event),
-				attributes: () => ({
+				attributes: (ledger) => ({
 					[ATTR.operationName]: 'chat',
 					[ATTR.providerName]: request.providerName,
 					[ATTR.requestModel]: request.requestedModel,
 					[ATTR.requestStream]: true,
+					// Not in the semconv inference-span table (agent linkage there
+					// is structural, via the parent invoke_agent) — recorded here
+					// so backends can aggregate the span's token usage by agent
+					// without span stitching; the registry attribute keeps its
+					// registered meaning. Ecosystem precedent: OpenLLMetry stamps
+					// agent context on LLM-call spans the same way (#535).
+					[ATTR.agentName]: event.agentName,
 					[ATTR.conversationId]: event.conversationId,
 					[ATTR.reasoningLevel]: request.reasoningLevel,
 					[ATTR.maxTokens]: request.maxTokens,
 					[ATTR.temperature]: request.temperature,
+					[ATTR.serverAddress]: request.serverAddress,
+					[ATTR.serverPort]: request.serverPort,
+					// `true | undefined` by construction — the semconv says never
+					// to record `false`, and the undefined-skip in the writer
+					// keeps that shape.
+					[ATTR.compacted]: request.contextCompacted,
+					...openaiAttributes(request.providerName, request.api),
 					...(event.purpose !== 'agent' ? { [FLUE_ATTR.turnPurpose]: event.purpose } : {}),
 					...contentEntry(
+						ledger,
 						content,
 						event,
 						CONTENT_ATTR.inputMessages,
@@ -259,6 +328,7 @@ export function createCloudflareTracing(
 						'input_messages',
 					),
 					...contentEntry(
+						ledger,
 						content,
 						event,
 						CONTENT_ATTR.systemInstructions,
@@ -266,6 +336,7 @@ export function createCloudflareTracing(
 						'system_instructions',
 					),
 					...contentEntry(
+						ledger,
 						content,
 						event,
 						CONTENT_ATTR.toolDefinitions,
@@ -281,83 +352,101 @@ export function createCloudflareTracing(
 			// span covers it.
 			if (event.origin === 'framework' && event.toolName === 'task') return;
 			// Caller-origin bash is the user's shell operation, not a model tool
-			// call — its command line and output stay out of trace content (same
-			// exclusion as @flue/opentelemetry).
-			const shell = event.origin === 'caller' && event.toolName === 'bash';
+			// call: `execute_tool` (and the `gen_ai.tool.*` attributes) describe
+			// tools the framework runs on behalf of the model, so claiming them
+			// here would pollute that aggregation axis. It gets the same
+			// flue-owned span `@flue/opentelemetry` emits for this event — no
+			// `gen_ai.*` claims — and its command line and output stay out of
+			// trace content.
+			if (event.origin === 'caller' && event.toolName === 'bash') {
+				pending.set(toolKey(event), {
+					name: 'flue.operation shell',
+					owner: ownerKey(event),
+					attributes: () => ({
+						[FLUE_ATTR.toolOrigin]: event.origin,
+					}),
+				});
+				return;
+			}
 			pending.set(toolKey(event), {
 				name: spanName('execute_tool', event.toolName),
 				owner: ownerKey(event),
-				attributes: () => ({
+				attributes: (ledger) => ({
 					[ATTR.operationName]: 'execute_tool',
 					[ATTR.toolName]: event.toolName,
 					[ATTR.toolCallId]: event.toolCallId,
 					[ATTR.toolType]: 'function',
+					// Conditionally required on execute_tool spans: the agent the
+					// tool runs on behalf of.
+					[ATTR.agentName]: event.agentName,
 					[ATTR.conversationId]: event.conversationId,
 					[FLUE_ATTR.toolOrigin]: event.origin,
-					...(shell
-						? {}
-						: {
-								...contentEntry(
-									content,
-									event,
-									CONTENT_ATTR.toolDescription,
-									() => event.description,
-									'tool_description',
-									true,
-								),
-								...toolPayloadEntry(content, event, 'arguments', event.args),
-							}),
+					...contentEntry(
+						ledger,
+						content,
+						event,
+						CONTENT_ATTR.toolDescription,
+						() => event.description,
+						'tool_description',
+						true,
+					),
+					...toolPayloadEntry(ledger, content, event, 'arguments', event.args),
 				}),
 			});
 			return;
 		}
 		if (event.type === 'turn') {
-			endFromEvent(turnKey(event), () => ({
+			// Operational attributes precede content within the batch: write order
+			// is workerd charge order, so content absorbs any budget overflow.
+			endFromEvent(turnKey(event), (ledger) => ({
 				[ATTR.responseModel]: event.response.responseModel,
 				[ATTR.responseId]: event.response.responseId,
 				...(event.response.finishReason
 					? { [FLUE_ATTR.finishReason]: normalizeFinishReason(event.response.finishReason) }
 					: {}),
 				...usageAttributes(event.response.usage),
+				...(event.isError ? terminalErrorAttributes(event.response.error?.type) : {}),
 				...contentEntry(
+					ledger,
 					content,
 					event,
 					CONTENT_ATTR.outputMessages,
 					() => outputMessages(event.response.output, event.response.finishReason),
 					'output_messages',
 				),
-				...(event.isError ? terminalErrorAttributes(event.response.error?.type) : {}),
 			}));
 			return;
 		}
 		if (event.type === 'tool') {
 			if (event.origin === 'framework' && event.toolName === 'task') return;
-			endFromEvent(toolKey(event), () => ({
+			endFromEvent(toolKey(event), (ledger) => ({
+				...(event.isError ? terminalErrorAttributes(event.errorInfo?.type) : {}),
 				// Results ride only successful completions; errored tools carry the
 				// low-cardinality error class and no payload. Caller-origin bash
 				// stays content-free (see tool_start).
 				...(event.isError || (event.origin === 'caller' && event.toolName === 'bash')
 					? {}
 					: toolPayloadEntry(
+							ledger,
 							content,
 							event,
 							'result',
 							Object.hasOwn(event, 'effectiveResult') ? event.effectiveResult : event.result,
 						)),
-				...(event.isError ? terminalErrorAttributes(event.errorInfo?.type) : {}),
 			}));
 			return;
 		}
 		if (event.type === 'task') {
-			endFromEvent(taskKey(event), () => ({
+			endFromEvent(taskKey(event), (ledger) => ({
+				...(event.isError ? terminalErrorAttributes(event.errorInfo?.type) : {}),
 				...contentEntry(
+					ledger,
 					content,
 					event,
 					CONTENT_ATTR.outputMessages,
 					() => agentOutputMessage(event.agentOutput),
 					'output_messages',
 				),
-				...(event.isError ? terminalErrorAttributes(event.errorInfo?.type) : {}),
 			}));
 			return;
 		}
@@ -372,11 +461,13 @@ export function createCloudflareTracing(
 			for (const [childKey, stash] of pending) {
 				if (stash.owner === key) pending.delete(childKey);
 			}
-			endFromEvent(key, () => ({
+			endFromEvent(key, (ledger) => ({
 				...usageAttributes(event.usage),
+				...(event.isError ? terminalErrorAttributes(event.errorInfo?.type) : {}),
 				...(event.operationKind === 'prompt' || event.operationKind === 'skill'
 					? {
 							...contentEntry(
+								ledger,
 								content,
 								event,
 								CONTENT_ATTR.inputMessages,
@@ -384,6 +475,7 @@ export function createCloudflareTracing(
 								'input_messages',
 							),
 							...contentEntry(
+								ledger,
 								content,
 								event,
 								CONTENT_ATTR.outputMessages,
@@ -392,7 +484,6 @@ export function createCloudflareTracing(
 							),
 						}
 					: {}),
-				...(event.isError ? terminalErrorAttributes(event.errorInfo?.type) : {}),
 			}));
 			return;
 		}
@@ -406,6 +497,33 @@ export function createCloudflareTracing(
 
 	const interceptor: FlueExecutionInterceptor = (operation, ctx, next) => {
 		if (disposed) return next();
+		if (operation.type === 'coordinator') {
+			// Framework bookkeeping around agent invocations, spanned so the
+			// platform's auto-instrumented storage/RPC calls group under it
+			// instead of landing as unparented siblings of invoke_agent. The
+			// span is wholly interception-scoped (opened here, ended when the
+			// work settles) — no terminal observe event owes it attributes —
+			// and the coordinator starts attempt fibers only after this
+			// interception returns, so the semconv spans never nest under it.
+			// One stable span name; phases distinguish by attribute so views
+			// keyed on the name survive new phases.
+			return platform.startActiveSpan('flue.coordinator', (opened) => {
+				const tracked: TrackedSpan = { span: opened, ended: false, ledger: createContentLedger() };
+				if (opened.isTraced) {
+					writeAttributes(tracked, {
+						[FLUE_ATTR.coordinatorPhase]: operation.phase,
+						[FLUE_ATTR.instanceId]: ctx.instanceId,
+						'flue.agent.name': ctx.agentName,
+					});
+				}
+				return next().finally(() => {
+					tracked.ended = true;
+					try {
+						opened.end();
+					} catch {}
+				});
+			});
+		}
 		if (operation.type === 'agent') {
 			const key = operationKey({ ...ctx, operationId: operation.operationId });
 			const span = pending.get(key);
@@ -451,6 +569,38 @@ export function createCloudflareTracing(
 	};
 }
 
+/**
+ * Install default-options Cloudflare tracing unless the application already
+ * installed its own. Called by the generated Worker entry, whose body
+ * evaluates after the user's hoisted `app.ts` imports — an explicit
+ * `instrument(createCloudflareTracing(...))` in user module scope therefore
+ * always registers first and wins (same evaluation-order contract as the
+ * entry's Workers-AI provider guard). Applications never call this: to
+ * customize, install the adapter yourself; to suppress the default entirely,
+ * set `tracing: false` in `flue.config.ts`, which drops the call from the
+ * generated entry. The install is a platform no-op until Workers Traces is
+ * enabled on the account (wrangler `observability.traces` or the dashboard).
+ *
+ * Returns the installed default's disposer, or `undefined` when it yielded.
+ */
+export function installDefaultCloudflareTracing(): (() => Promise<void>) | undefined {
+	if (hasInstrumentation(CLOUDFLARE_TRACING_INSTRUMENTATION_KEY)) return undefined;
+	return instrument(createCloudflareTracing());
+}
+
+/**
+ * `openai.api.type` distinguishes the Chat Completions and Responses
+ * surfaces, same mapping as `@flue/opentelemetry`.
+ */
+function openaiAttributes(providerName: string, api: string): AttributeValues {
+	if (providerName !== 'openai') return {};
+	if (api === 'openai-completions') return { [ATTR.openaiApiType]: 'chat_completions' };
+	if (api === 'openai-responses' || api === 'azure-openai-responses') {
+		return { [ATTR.openaiApiType]: 'responses' };
+	}
+	return {};
+}
+
 function usageAttributes(usage: PromptUsage | undefined): AttributeValues {
 	if (!usage) return {};
 	return {
@@ -492,11 +642,12 @@ function lowCardinality(value: string | undefined): string {
 }
 
 /**
- * One content-bearing attribute through the shared pipeline. The producer is
+ * One content-bearing attribute drawn from the span's pool. The producer is
  * lazy so projection work is skipped entirely under `content: false` (and,
  * via the deferred attribute thunks, on unsampled spans).
  */
 function contentEntry(
+	ledger: ContentLedger,
 	content: ContentOption | undefined,
 	event: FlueObservation,
 	name: string,
@@ -504,24 +655,29 @@ function contentEntry(
 	contentType: GenAIContentType,
 	rawString = false,
 ): AttributeValues {
-	if (content === false) return {};
-	const result = contentAttribute(content, produce(), event, { contentType, rawString });
+	const result = drawContentAttribute(ledger, content, produce, event, {
+		key: name,
+		contentType,
+		rawString,
+	});
 	return result.value === undefined ? {} : { [name]: result.value };
 }
 
 /**
  * Tool payloads keep the semconv `gen_ai.tool.call.*` keys for plain objects
  * and move to the `flue.tool.call.*` fallback names otherwise, mirroring
- * `@flue/opentelemetry`.
+ * `@flue/opentelemetry`. The draw is charged under the semconv key; the raw
+ * fallback differs by a few bytes, well inside the pool's slack.
  */
 function toolPayloadEntry(
+	ledger: ContentLedger,
 	content: ContentOption | undefined,
 	event: FlueObservation,
 	kind: 'arguments' | 'result',
 	value: unknown,
 ): AttributeValues {
-	if (content === false) return {};
-	const result = contentAttribute(content, value, event, {
+	const result = drawContentAttribute(ledger, content, () => value, event, {
+		key: kind === 'arguments' ? CONTENT_ATTR.toolArguments : CONTENT_ATTR.toolResult,
 		contentType: kind === 'arguments' ? 'tool_arguments' : 'tool_result',
 		rawString: true,
 	});

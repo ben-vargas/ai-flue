@@ -1,12 +1,6 @@
 # Flue
 
-Framework where projects containing agents are built into deployable server artifacts by the `flue()` Vite plugin.
-
-## About This Repository
-
-This repository is Flue's publish destination, not its development home. Development happens in a private repository, and every release lands here as a single versioned commit whose diff is everything that changed since the previous release. There is no development history to bisect between releases.
-
-The test suite and internal planning documents are not part of the published tree, so `pnpm test` finds no test files here. Every snapshot is verified before publish: `pnpm install --frozen-lockfile`, `pnpm build`, and `pnpm check:types` must pass on exactly the tree in this repository.
+Flue is a TypeScript framework for building autonomous AI agents and running them anywhere. An agent is a plain exported function: hooks in its body compose its capabilities — model (`useModel`), tools, skills, sandboxes, state — and its return value is its instruction. Agents live in durable conversations: accepted input survives crashes, restarts, and redeploys, and interrupted work recovers to a deterministic state. Applications build with Vite (the `flue()` plugin plus an explicit `app.ts` route map) and deploy to Node.js or Cloudflare Workers from the same source, with persistence adapters (SQLite, Postgres, MySQL, MongoDB, Redis, and more), channels that turn provider webhooks (Slack, GitHub, Telegram, ...) into agent conversations, and clients — the Flue Agent SDK (`@flue/sdk`), `@flue/react`, and the `flue` CLI — for driving conversations over HTTP or from code. The model layer is [Pi](https://pi.dev)'s provider protocol, used directly.
 
 ## Contributing
 
@@ -47,10 +41,13 @@ A blueprint is a Markdown implementation guide returned by `flue add`; its kind 
 - `demo/` — Standalone Vite+React chat SPA that connects to any running Flue example server.
 - `apps/docs/` — The documentation site; its content is the source of truth for user-facing docs.
 
+No tests exist in the repo.
+
 ## Development
 
 ```
 pnpm install
 pnpm build          # turbo build across the workspace
 pnpm check:types    # typecheck (excludes apps-www)
+pnpm format         # format your work
 ```

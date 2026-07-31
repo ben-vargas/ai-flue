@@ -25,4 +25,7 @@ export const channel = createIntercomChannel({
 The channel publishes `HEAD /webhook` for endpoint validation and
 `POST /webhook` for signed notifications. It verifies the exact request body
 before parsing, preserves future topics, and does not own installation,
-subscriptions, OAuth, deduplication, or outbound Intercom behavior.
+subscriptions, OAuth, or outbound Intercom behavior. It holds no delivery
+state either; deduplicate notification retries by naming the delivery in the
+dispatch (`idempotencyKey: notification.id`) so a redelivery converges on the
+original submission.

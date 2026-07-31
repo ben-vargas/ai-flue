@@ -3,6 +3,7 @@ import type { ConversationRecord } from '../conversation-records.ts';
 import { ConversationStreamStoreError } from '../errors.ts';
 import { parseSessionStorageKey } from '../session-identity.ts';
 import {
+	type ConversationFoldCheckpoint,
 	type ConversationProducerClaim,
 	type ConversationStreamIdentity,
 	type ConversationStreamMeta,
@@ -272,6 +273,57 @@ class SqlConversationStreamStore implements ConversationStreamStore {
 
 	subscribe(path: string, listener: () => void): () => void {
 		return this.listeners.subscribe(path, listener);
+	}
+
+	async putFoldCheckpoint(path: string, checkpoint: ConversationFoldCheckpoint): Promise<void> {
+		const dialect = this.dialect;
+		const p = (index: number) => dialect.placeholder(index);
+		dialect.validatePath?.(path, 'put_fold_checkpoint');
+		// Delete-then-insert inside one transaction spells the upsert portably
+		// across all three dialects; the transaction keeps supersession atomic.
+		await dialect.transaction(async (tx) => {
+			await tx.query(`DELETE FROM flue_conversation_fold_checkpoints WHERE path = ${p(1)}`, [path]);
+			await tx.query(
+				`INSERT INTO flue_conversation_fold_checkpoints
+				 (path, head_offset, incarnation, format_version, data)
+				 VALUES (${p(1)}, ${p(2)}, ${p(3)}, ${p(4)}, ${p(5)})`,
+				[
+					path,
+					checkpoint.offset,
+					checkpoint.incarnation,
+					checkpoint.formatVersion,
+					checkpoint.data,
+				],
+			);
+		});
+	}
+
+	async getFoldCheckpoint(
+		path: string,
+		options?: { atOrBefore?: string },
+	): Promise<ConversationFoldCheckpoint | null> {
+		const dialect = this.dialect;
+		const p = (index: number) => dialect.placeholder(index);
+		dialect.validatePath?.(path, 'get_fold_checkpoint');
+		const rows = await dialect.query(
+			`SELECT head_offset, incarnation, format_version, data
+			 FROM flue_conversation_fold_checkpoints WHERE path = ${p(1)}`,
+			[path],
+		);
+		const row = rows[0];
+		if (!row) return null;
+		if (
+			options?.atOrBefore !== undefined &&
+			parseOffset(String(row.head_offset)) > parseOffset(options.atOrBefore)
+		) {
+			return null;
+		}
+		return {
+			offset: String(row.head_offset),
+			incarnation: String(row.incarnation),
+			formatVersion: Number(row.format_version),
+			data: String(row.data),
+		};
 	}
 }
 

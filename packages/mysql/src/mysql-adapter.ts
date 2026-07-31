@@ -12,15 +12,16 @@ import type {
 } from '@flue/runtime/adapter';
 import {
 	admitSubmissionWithBackend,
-	assertSupportedFlueSchemaVersion,
+	assertSupportedFlueFormatVersion,
 	createDispatchAgentSubmissionInput,
 	createSessionStorageKey,
 	DURABILITY_DEFAULT_MAX_ATTEMPTS,
 	DURABILITY_DEFAULT_TIMEOUT_MS,
-	FLUE_SCHEMA_VERSION,
+	FLUE_FORMAT_VERSION,
 	hydratePersistedSubmissionAttachments,
 	isSubmissionPayload,
 	LEASE_DURATION_MS,
+	PersistedFormatVersionError,
 	SUBMISSION_HARNESS_NAME,
 	SUBMISSION_SESSION_NAME,
 } from '@flue/runtime/adapter';
@@ -108,6 +109,13 @@ const schemaTables = {
 		'data',
 		'submission_id',
 		'attempt_id',
+	],
+	flue_conversation_fold_checkpoints: [
+		'path',
+		'head_offset',
+		'incarnation',
+		'format_version',
+		'data',
 	],
 	flue_attachments: [
 		'stream_path',
@@ -198,6 +206,11 @@ const criticalColumns: Record<string, SchemaColumn> = {
 		collation: 'utf8mb4_bin',
 		nullable: false,
 	},
+	'flue_conversation_fold_checkpoints.path': {
+		type: `varchar(${MYSQL_CONVERSATION_STREAM_PATH_LIMIT})`,
+		collation: 'utf8mb4_bin',
+		nullable: false,
+	},
 };
 
 const longtextColumns = [
@@ -207,6 +220,7 @@ const longtextColumns = [
 	'flue_agent_submissions.settlement_record',
 	'flue_conversation_streams.identity_json',
 	'flue_conversation_stream_batches.data',
+	'flue_conversation_fold_checkpoints.data',
 ];
 
 const requiredIndexes = [
@@ -250,6 +264,12 @@ const requiredIndexes = [
 		columns: ['stream_path', 'attachment_id'],
 		nonUnique: false,
 	},
+	{
+		table: 'flue_conversation_fold_checkpoints',
+		name: 'PRIMARY',
+		columns: ['path'],
+		nonUnique: false,
+	},
 ];
 
 function invalidMysqlSchema(subject: string): Error {
@@ -257,7 +277,7 @@ function invalidMysqlSchema(subject: string): Error {
 }
 
 async function ensureTables(runner: MysqlRunner): Promise<void> {
-	// Read schema_version once (flue_meta may not exist yet on a fresh
+	// Read format_version once (flue_meta may not exist yet on a fresh
 	// database): assert a known stored version, or — when unversioned —
 	// reject a database that already has other flue_ tables (legacy,
 	// pre-version-marker schema) before any DDL runs.
@@ -266,27 +286,51 @@ async function ensureTables(runner: MysqlRunner): Promise<void> {
 	);
 	const versionRows =
 		metaRows.length > 0
-			? await runner.query(`SELECT value FROM flue_meta WHERE \`key\` = 'schema_version'`)
+			? await runner.query(`SELECT value FROM flue_meta WHERE \`key\` = 'format_version'`)
 			: [];
 	const storedVersion = versionRows[0]?.value;
 	if (storedVersion !== undefined && storedVersion !== null) {
-		assertSupportedFlueSchemaVersion(String(storedVersion));
+		assertSupportedFlueFormatVersion(String(storedVersion));
 	} else {
-		const existingRows = await runner.query(
-			`SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME LIKE 'flue\\_%' AND TABLE_NAME <> 'flue_meta' LIMIT 1`,
-		);
-		if (existingRows.length > 0) assertSupportedFlueSchemaVersion('unversioned');
-		// MySQL DDL commits per statement, so the stamp must land BEFORE any
-		// other table exists: a crash mid-migration then leaves a versioned
-		// store that re-migrates cleanly instead of tripping the
-		// unversioned-legacy rejection forever.
-		await runner.query(
-			`CREATE TABLE IF NOT EXISTS flue_meta (\`key\` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin PRIMARY KEY, value VARCHAR(64) NOT NULL) ENGINE=InnoDB`,
-		);
-		await runner.query(
-			`INSERT INTO flue_meta (\`key\`, value) VALUES ('schema_version', ?) ON DUPLICATE KEY UPDATE value = value`,
-			[String(FLUE_SCHEMA_VERSION)],
-		);
+		const legacyRows =
+			metaRows.length > 0
+				? await runner.query(`SELECT value FROM flue_meta WHERE \`key\` = 'schema_version'`)
+				: [];
+		const legacyVersion = legacyRows[0]?.value;
+		if (legacyVersion !== undefined && legacyVersion !== null) {
+			// Nightly-era stores stamped `schema_version` 8 hold storage
+			// shapes byte-for-byte identical to format 1, so adoption is a
+			// pure relabel of the stamp — one UPDATE renames the row in place
+			// (a single autocommitted statement, so the store is never
+			// observable without a stamp at either key). Any other value at
+			// the old key names a store this runtime cannot read.
+			if (String(legacyVersion) !== '8') {
+				throw new PersistedFormatVersionError({
+					storedVersion: String(legacyVersion),
+					supportedVersion: FLUE_FORMAT_VERSION,
+				});
+			}
+			await runner.query(
+				`UPDATE flue_meta SET \`key\` = 'format_version', value = ? WHERE \`key\` = 'schema_version'`,
+				[String(FLUE_FORMAT_VERSION)],
+			);
+		} else {
+			const existingRows = await runner.query(
+				`SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME LIKE 'flue\\_%' AND TABLE_NAME <> 'flue_meta' LIMIT 1`,
+			);
+			if (existingRows.length > 0) assertSupportedFlueFormatVersion('unversioned');
+			// MySQL DDL commits per statement, so the stamp must land BEFORE any
+			// other table exists: a crash mid-migration then leaves a versioned
+			// store that re-migrates cleanly instead of tripping the
+			// unversioned-legacy rejection forever.
+			await runner.query(
+				`CREATE TABLE IF NOT EXISTS flue_meta (\`key\` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin PRIMARY KEY, value VARCHAR(64) NOT NULL) ENGINE=InnoDB`,
+			);
+			await runner.query(
+				`INSERT INTO flue_meta (\`key\`, value) VALUES ('format_version', ?) ON DUPLICATE KEY UPDATE value = value`,
+				[String(FLUE_FORMAT_VERSION)],
+			);
+		}
 	}
 	const ddl = [
 		`CREATE TABLE IF NOT EXISTS flue_submission_chunks (submission_id VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL, item_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL, chunk_index INT NOT NULL, chunk_count INT NOT NULL, data LONGTEXT NOT NULL, PRIMARY KEY (submission_id, item_id, chunk_index)) ENGINE=InnoDB`,
@@ -295,6 +339,7 @@ async function ensureTables(runner: MysqlRunner): Promise<void> {
 		`CREATE TABLE IF NOT EXISTS flue_conversation_streams (path VARCHAR(${MYSQL_CONVERSATION_STREAM_PATH_LIMIT}) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin PRIMARY KEY, identity_json LONGTEXT NOT NULL, next_offset BIGINT NOT NULL DEFAULT 0, producer_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin, producer_epoch BIGINT NOT NULL DEFAULT 0, next_producer_sequence BIGINT NOT NULL DEFAULT 0, incarnation VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL) ENGINE=InnoDB`,
 		`CREATE TABLE IF NOT EXISTS flue_conversation_stream_batches (path VARCHAR(${MYSQL_CONVERSATION_STREAM_PATH_LIMIT}) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL, seq BIGINT NOT NULL, producer_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL, producer_epoch BIGINT NOT NULL, producer_sequence BIGINT NOT NULL, data LONGTEXT NOT NULL, submission_id VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin, attempt_id VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin, PRIMARY KEY (path, seq), UNIQUE INDEX flue_conversation_stream_batches_producer_idx (path, producer_id, producer_epoch, producer_sequence)) ENGINE=InnoDB`,
 		`CREATE TABLE IF NOT EXISTS flue_attachments (stream_path VARCHAR(${MYSQL_CONVERSATION_STREAM_PATH_LIMIT}) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL, attachment_id VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL, mime_type VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL, byte_size BIGINT UNSIGNED NOT NULL, digest VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL, conversation_id VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL, bytes LONGBLOB NOT NULL, created_at BIGINT NOT NULL, PRIMARY KEY (stream_path, attachment_id)) ENGINE=InnoDB`,
+		`CREATE TABLE IF NOT EXISTS flue_conversation_fold_checkpoints (path VARCHAR(${MYSQL_CONVERSATION_STREAM_PATH_LIMIT}) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin PRIMARY KEY, head_offset VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL, incarnation VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL, format_version BIGINT NOT NULL, data LONGTEXT NOT NULL) ENGINE=InnoDB`,
 	];
 	for (const statement of ddl) await runner.query(statement);
 	const tables = await runner.query(
@@ -819,6 +864,25 @@ class MysqlSubmissionStore implements AgentSubmissionStore {
 		return this.settleRunningSubmission(
 			attempt,
 			error instanceof Error ? error.message : String(error),
+		);
+	}
+
+	async settleQueuedSubmission(
+		submissionId: string,
+		_outcome: 'failed' | 'aborted',
+		error: unknown,
+	): Promise<boolean> {
+		const message = error instanceof Error ? error.message : String(error);
+		// A queued-gated CAS (SELECT ... FOR UPDATE + UPDATE, the adapter's
+		// no-RETURNING idiom): no attempt is created and no joined-delivery
+		// fan-out is needed — joins attach to a RUNNING host, so a queued row can
+		// never have deliveries joined into it.
+		return updateIfPresent(
+			this.runner,
+			`SELECT submission_id FROM flue_agent_submissions WHERE submission_id = ? AND status = 'queued'`,
+			[submissionId],
+			`UPDATE flue_agent_submissions SET status = 'settled', settled_at = ?, error = ? WHERE submission_id = ? AND status = 'queued'`,
+			[Date.now(), message, submissionId],
 		);
 	}
 

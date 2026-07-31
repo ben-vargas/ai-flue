@@ -48,6 +48,18 @@ export interface AgentPromptOptions {
 	 *   `error.meta.uid` (read it from the `FlueApiError`'s `body`).
 	 */
 	uid?: string | null;
+	/**
+	 * Caller-chosen name for this delivery (at most 256 characters) — a
+	 * retried send carrying the same key converges on the original submission
+	 * instead of admitting a duplicate: the message is delivered and answered
+	 * at most once, and every admission returns the same receipt (replays
+	 * with `deduplicated: true`). The key names the delivery, not the
+	 * outcome — a submission that settled `failed` stays failed; retry with a
+	 * fresh key to ask again. Reusing a key with a different payload rejects
+	 * with a 409 `submission_conflict` (read the existing submission's id
+	 * from the `FlueApiError` body's `error.meta.submissionId`).
+	 */
+	idempotencyKey?: string;
 	signal?: AbortSignal;
 }
 
@@ -57,7 +69,9 @@ export interface AgentSendResult {
 	streamUrl: string;
 	/**
 	 * Opaque DS stream offset captured at admission. Reading `streamUrl` from
-	 * this offset yields exactly this prompt's events.
+	 * this offset yields exactly this prompt's events. On a deduplicated send
+	 * the offset is the stream origin (`'-1'`), not a tight prompt-events
+	 * window — the settlement is still observable from there.
 	 */
 	offset: string;
 	/** Correlates the admitted prompt with its attached agent events. */
@@ -68,6 +82,12 @@ export interface AgentSendResult {
 	 * option to guarantee later sends reach this same incarnation.
 	 */
 	uid: string;
+	/**
+	 * Present (`true`) when this send's `idempotencyKey` converged on an
+	 * existing submission instead of admitting a new one — the receipt echoes
+	 * the original submission's facts, and no second turn runs.
+	 */
+	deduplicated?: boolean;
 }
 
 /** `POST <conversation url>` — 202 admission of one delivered message. */
@@ -75,12 +95,15 @@ export async function sendConversationMessage(
 	http: HttpClient,
 	options: AgentPromptOptions,
 ): Promise<AgentSendResult> {
-	// `initialData` and `uid` are reserved top-level siblings beside the
-	// message fields; `uid: null` is meaningful (create-only), so presence
-	// keys on the option, not on undefined.
+	// `initialData`, `uid`, and `idempotencyKey` are reserved top-level
+	// siblings beside the message fields; `uid: null` is meaningful
+	// (create-only), so presence keys on the option, not on undefined.
 	const siblings = {
 		...(options.initialData !== undefined ? { initialData: options.initialData } : {}),
 		...(options.uid !== undefined ? { uid: options.uid } : {}),
+		...(options.idempotencyKey !== undefined
+			? { idempotencyKey: options.idempotencyKey }
+			: {}),
 	};
 	return http.json<AgentSendResult>({
 		method: 'POST',

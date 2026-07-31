@@ -59,6 +59,16 @@ export function runWithInstrumentationOwner<T>(owner: InstrumentationOwner, fn: 
 	return ownerStorage.run(owner as InstrumentationOwnerRegistration, fn);
 }
 
+/**
+ * Whether a keyed instrumentation is currently installed. Lets a default
+ * installer (the generated Cloudflare Worker entry's tracing block) yield to
+ * an explicit `instrument(...)` call in user module scope, which evaluates
+ * first. Not part of the public API.
+ */
+export function hasInstrumentation(key: symbol): boolean {
+	return installedKeys.has(key);
+}
+
 export function instrument(instrumentation: FlueInstrumentation): () => Promise<void> {
 	const existing = installed.get(instrumentation);
 	if (existing) return existing;

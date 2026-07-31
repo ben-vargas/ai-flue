@@ -122,7 +122,14 @@ export function createFlueContext(config: FlueContextConfig): FlueContextInterna
 	const createEvent = (event: FlueEventInput): FlueEvent => ({
 		...event,
 		instanceId: config.id,
-		...(config.submissionId === undefined ? {} : { submissionId: config.submissionId }),
+		// Payload wins for submissionId: the context stamps its own only when
+		// the emission didn't set one. A settlement published under a host
+		// context (a joined dispatch-while-busy delivery) names the settled
+		// submission, not the host — the same payload-wins rule the session and
+		// harness decoration layers apply to their correlation fields.
+		...(event.submissionId === undefined && config.submissionId !== undefined
+			? { submissionId: config.submissionId }
+			: {}),
 		...(config.agentName === undefined ? {} : { agentName: config.agentName }),
 		v: 3,
 		eventIndex: eventIndex++,

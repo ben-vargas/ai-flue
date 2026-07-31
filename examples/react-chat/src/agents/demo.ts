@@ -54,7 +54,7 @@ export function Demo() {
 			await new Promise((resolve) => setTimeout(resolve, 500));
 			log.info('demo job completed');
 			writeJobCardData({ status: 'done', step: 'finished' });
-			return { ok: true, requestedAt: data.requestedAt };
+			return { output: { ok: true, requestedAt: data.requestedAt } };
 		},
 	});
 	return 'When asked to run the demo, call the run_demo tool and report its result.';

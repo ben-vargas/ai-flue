@@ -244,7 +244,7 @@ export function postMessage(ref: { channelId: string }) {
       const result = (await client.post(`/channels/${ref.channelId}/messages`, {
         body: { content },
       })) as { id?: string };
-      return { messageId: result.id ?? null };
+      return { output: { messageId: result.id ?? null } };
     },
   });
 }

@@ -46,4 +46,6 @@ service-account OAuth and Chat REST client.
 
 Instance ids identify Google Chat spaces and optional threads. A thread
 must belong to its space. Instance ids are not authorization capabilities. The
-package is stateless and does not deduplicate interaction or Pub/Sub event ids.
+package is stateless; deduplicate interaction and Pub/Sub redeliveries by
+naming the delivery in the dispatch (`idempotencyKey: event.id`) so a
+redelivery converges on the original submission.

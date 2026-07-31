@@ -8,11 +8,17 @@
  * `@flue/runtime/telemetry` subpath: both change together, in one release.
  */
 
-/** Upstream semconv commit the `gen_ai.*` keys and shapes were read from. */
+/**
+ * Upstream semconv commit the `gen_ai.*` keys and shapes were read from.
+ *
+ * This pin is the whole provenance story: the GenAI conventions repo has not
+ * published an OTel schema URL (its README's "Schema URL" section is TODO),
+ * so no `schemaUrl` is declared on any tracer/meter — fabricating one would
+ * hand schema-aware tooling a dead link with defined semantics.
+ */
 export const GEN_AI_SEMCONV_REVISION = '4c8addb53718b544134be47e256237026fe88875';
 /** Bumped when the role/parts message projection changes shape. */
 export const GEN_AI_PROJECTION_REVISION = 5;
-export const GEN_AI_SCHEMA_URL = 'https://opentelemetry.io/schemas/gen-ai-dev/1.42.0-dev';
 /**
  * Bumped when the `flue.*` extension vocabulary changes. Revision 4: the
  * `flue.telemetry.content.<type>.truncated/.omitted` marker attributes are

@@ -76,7 +76,7 @@ export function getCustomerSummary(ref: StripeCustomerRef) {
 						email: customer.email,
 						...(customer.delinquent === undefined ? {} : { delinquent: customer.delinquent }),
 					};
-			return summary;
+			return { output: summary };
 		},
 	});
 }

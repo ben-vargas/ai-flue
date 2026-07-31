@@ -20,10 +20,8 @@ import {
 	projectAgentConversationBatch,
 	projectAgentConversationSnapshot,
 } from '../conversation-public.ts';
-import {
-	loadReducedConversationPrefix,
-	loadReducedConversationState,
-} from '../conversation-reader.ts';
+import { getConversationFoldHost } from '../conversation-fold-host.ts';
+import { loadReducedConversationPrefix } from '../conversation-reader.ts';
 import { reduceConversationRecords } from '../conversation-reducer.ts';
 import type {
 	ConversationStreamReadResult,
@@ -159,7 +157,15 @@ export async function observeSubmissionSettlement(
 	// the observation is deliberately unabortable, so default to one that
 	// never fires.
 	const signal = options.signal ?? new AbortController().signal;
-	let state = await loadReducedConversationPrefix({ store, path, offset: options.offset });
+	// The shared fold host serves the observation base when the caller's
+	// offset is the head (the common case: observing from an admission
+	// receipt's offset before the attempt starts streaming); an older offset
+	// rebuilds its prefix by replay, as before.
+	const atHead = await getConversationFoldHost(store, path).getStateAtHead();
+	let state =
+		parseOffset(atHead.recordsThroughOffset) === parseOffset(options.offset)
+			? atHead
+			: await loadReducedConversationPrefix({ store, path, offset: options.offset });
 	let offset = options.offset;
 	while (true) {
 		throwIfAborted(options.signal);
@@ -257,7 +263,7 @@ export interface ReadSubmissionReplyOptions {
 export async function readSubmissionReply(
 	options: ReadSubmissionReplyOptions,
 ): Promise<SubmissionReply> {
-	const state = await loadReducedConversationState({ store: options.store, path: options.path });
+	const state = await getConversationFoldHost(options.store, options.path).getStateAtHead();
 	const snapshot = projectAgentConversationSnapshot(state);
 	if (!snapshot) return { text: '', data: {} };
 	return replyFromSnapshot(snapshot, options.submissionId);

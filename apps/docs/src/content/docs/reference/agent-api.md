@@ -492,7 +492,7 @@ function defineTool<...>(options: {
   output?: ToolOutputSchema; // Valibot schema
   harness?: boolean;
   durable?: boolean;
-  run(context: ToolContext<...>): ToolRunResult | Promise<ToolRunResult>;
+  run(context: ToolContext<...>): ToolRunEnvelope<Output> | string | void | Promise<ToolRunEnvelope<Output> | string | void>;
 }): ToolDefinition;
 ```
 
@@ -502,7 +502,7 @@ A typing and validation helper: it validates the definition and returns it froze
 - `input` — a Valibot schema for the call's arguments. Must be a top-level object schema (the model sends a JSON object); anything else throws. When present, the parsed output arrives as `context.data`, typed by inference. When absent, the tool receives no `data` property and callers' arguments are ignored.
 - `output` — a Valibot schema for the return value. When present, the runtime parses the returned value through it before recording; a mismatch throws `ToolOutputValidationError`, and a schema producing `undefined` throws `ToolOutputSerializationError`.
 - `harness`, `durable` — capability flags, detailed below. Must be booleans when present.
-- `run` — the implementation. May be async. Its return value must be JSON-serializable and is snapshotted as JSON-compatible data, then JSON-stringified for the model; non-serializable output throws `ToolOutputSerializationError`. Returning `undefined` is allowed only when no `output` schema is declared, and reaches the model as `null`. Throwing inside `run` records a tool error the model sees; it does not fail the submission.
+- `run` — the implementation. May be async, and returns a `ToolRunEnvelope` — `{ output?, terminate? }`. `output` is the tool's result: it must be JSON-serializable, is snapshotted as JSON-compatible data, and is then JSON-stringified for the model; non-serializable output throws `ToolOutputSerializationError`. Returning a bare `string` is shorthand for `{ output: <string> }`, and returning nothing (`void`) is allowed only when no `output` schema is declared, reaching the model as `null`; any other bare return — a plain object, array, number, boolean, or `null` — throws, telling you to wrap it as `{ output: <value> }`. `terminate: true` ends the agent's turn once the current tool batch settles, the same loop-ending contract `finish`/`give_up` use — a multi-tool batch ends the turn only when every result in it terminates, a throwing tool never terminates, and the flag is recorded on the tool's canonical outcome, so termination survives a crash between the batch committing and the submission settling. Throwing inside `run` records a tool error the model sees; it does not fail the submission.
 - Arguments that fail the `input` schema throw `ToolInputValidationError` before `run` is invoked; the model receives the validation failure as the tool result and may retry.
 
 Error classes are documented in [Errors](/docs/reference/errors/). For teaching material see the [Tools guide](/docs/guide/tools/).

@@ -153,7 +153,7 @@ export function Reporter() {
       const response = await harness.prompt(`Compile the metrics report for ${data.period}.`, {
         result: v.object({ summary: v.string() }),
       });
-      return response.data;
+      return { output: response.data };
     },
   });
   return 'When asked for a report, call the `compile-report` tool.';

@@ -20,8 +20,8 @@ export const ATTR = {
 	responseModel: 'gen_ai.response.model',
 	responseId: 'gen_ai.response.id',
 	conversationId: 'gen_ai.conversation.id',
+	compacted: 'gen_ai.conversation.compacted',
 	agentName: 'gen_ai.agent.name',
-	agentId: 'gen_ai.agent.id',
 	requestStream: 'gen_ai.request.stream',
 	reasoningLevel: 'gen_ai.request.reasoning.level',
 	maxTokens: 'gen_ai.request.max_tokens',
@@ -34,9 +34,19 @@ export const ATTR = {
 	toolCallId: 'gen_ai.tool.call.id',
 	toolType: 'gen_ai.tool.type',
 	errorType: 'error.type',
+	serverAddress: 'server.address',
+	serverPort: 'server.port',
+	openaiApiType: 'openai.api.type',
 } as const;
 
 export const FLUE_ATTR = {
+	/**
+	 * The agent instance id, same key `@flue/opentelemetry` uses. Deliberately
+	 * not `gen_ai.agent.id`: the semconv reserves that for hosted-agent
+	 * identifiers on the *client* invoke_agent variant (and recommends against
+	 * in-memory instance ids); Flue's agent spans are the in-process variant.
+	 */
+	instanceId: 'flue.instance.id',
 	submissionId: 'flue.submission.id',
 	operationKind: 'flue.operation.kind',
 	taskId: 'flue.task.id',
@@ -46,4 +56,8 @@ export const FLUE_ATTR = {
 	usageTotalTokens: 'flue.usage.total_tokens',
 	/** Recognized cancellation — a control path, never counted as an error. */
 	canceled: 'flue.canceled',
+	recoveryOperation: 'flue.recovery.operation',
+	recoveryOutcome: 'flue.recovery.outcome',
+	/** Phase of a `flue.coordinator` span; new phases extend this, not the span name. */
+	coordinatorPhase: 'flue.coordinator.phase',
 } as const;

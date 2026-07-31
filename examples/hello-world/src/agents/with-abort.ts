@@ -58,17 +58,19 @@ export function WithAbort() {
 				shellManualAborted = isAbortError(error);
 			}
 			return {
-				timeoutAborted,
-				manualAborted,
-				preAborted,
-				shellTimeoutAborted,
-				shellManualAborted,
-				allPassed:
-					timeoutAborted &&
-					manualAborted &&
-					preAborted &&
-					shellTimeoutAborted &&
+				output: {
+					timeoutAborted,
+					manualAborted,
+					preAborted,
+					shellTimeoutAborted,
 					shellManualAborted,
+					allPassed:
+						timeoutAborted &&
+						manualAborted &&
+						preAborted &&
+						shellTimeoutAborted &&
+						shellManualAborted,
+				},
 			};
 		},
 	});

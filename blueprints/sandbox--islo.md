@@ -122,8 +122,12 @@ class IsloSandboxApi implements SandboxApi {
 		const remote = `${envPrefix}${tmo}bash -lc ${q(cd + command)}`;
 
 		const args = ['--output', 'json', 'use', this.name, '--', 'bash', '-lc', remote];
-		// The islo CLI has no cancellation primitive. The signal option is accepted
-		// for SandboxApi; Flue's runtime enforces pre/post signal checks.
+		// The islo CLI has no cancellation primitive, so `options?.signal` is
+		// deliberately not forwarded here — createSandboxSessionEnv (which
+		// this adapter builds on) owns caller-facing abort and rejects
+		// promptly on it. The spawned child becomes an orphan: it keeps
+		// running to completion against the sandbox, and its result below is
+		// simply never observed by the caller that already moved on.
 		return new Promise((resolve, reject) => {
 			const child = spawn(this.cliPath, args, {
 				env: process.env,

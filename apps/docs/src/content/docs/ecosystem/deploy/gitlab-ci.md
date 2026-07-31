@@ -281,7 +281,7 @@ export function AutoTriage() {
           result: v.object({ fix_applied: v.boolean(), branch: v.optional(v.string()) }),
         });
       }
-      return triage;
+      return { output: triage };
     },
   });
   return 'When given an issue IID, call the `triage-issue` tool and report its result.';

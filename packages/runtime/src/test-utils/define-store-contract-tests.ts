@@ -19,6 +19,7 @@
 
 import { afterEach, describe, expect, it } from 'vitest';
 import type { AgentSubmissionStore } from '../agent-execution-store.ts';
+import { PersistedFormatVersionError } from '../errors.ts';
 import type { AgentSubmissionInput } from '../runtime/agent-submissions.ts';
 import type { DispatchInput } from '../runtime/dispatch-queue.ts';
 
@@ -76,6 +77,35 @@ export interface StoreContractTestBackend {
 	/** Create a fresh store instance for a single test. */
 	create(): AgentSubmissionStore | Promise<AgentSubmissionStore>;
 	/** Optional cleanup after each test (e.g. close connections, delete temp files). */
+	cleanup?(): void | Promise<void>;
+	/**
+	 * Raw access to the backend's persisted format-version stamp. When
+	 * provided, the suite additionally verifies the stamping and adoption
+	 * behavior of the backend's migration.
+	 */
+	formatVersion?: FormatVersionTestBackend;
+}
+
+export interface FormatVersionTestBackend {
+	/** Open a fresh, un-migrated store handle for a single test. */
+	open(): FormatVersionTestHandle | Promise<FormatVersionTestHandle>;
+}
+
+/**
+ * One store opened for format-version testing: `migrate()` runs the backend's
+ * migration against the store's current contents, and the stamp accessors
+ * read and write raw version-stamp values (`flue_meta` rows, meta-hash
+ * fields, meta documents, …) directly in the underlying storage.
+ */
+export interface FormatVersionTestHandle {
+	migrate(): Promise<void>;
+	/** Read the raw stamp value at `key`, or undefined when absent. */
+	readStamp(key: string): Promise<string | undefined>;
+	/** Write a raw stamp value at `key`, replacing any existing value. */
+	writeStamp(key: string, value: string): Promise<void>;
+	/** Delete the stamp at `key`. */
+	deleteStamp(key: string): Promise<void>;
+	/** Release resources (close connections, delete temp state). */
 	cleanup?(): void | Promise<void>;
 }
 
@@ -533,6 +563,138 @@ export function defineStoreContractTests(label: string, backend: StoreContractTe
 				const store = await create();
 
 				expect(await store.requestSessionAbort('no-such-session')).toEqual([]);
+			});
+		});
+
+		// ── Queued terminal settlement (unready abort / auto-fail) ─────────
+
+		describe('settleQueuedSubmission()', () => {
+			it('settles an unready queued submission as failed with the error message', async () => {
+				const store = await create();
+				// Never canonical-ready: exactly the un-claimable class the method
+				// exists for.
+				await store.admitDispatch(dispatchInput());
+
+				expect(
+					await store.settleQueuedSubmission(
+						'dispatch-1',
+						'failed',
+						new Error('materialization permanently failing'),
+					),
+				).toBe(true);
+
+				const settled = await store.getSubmission('dispatch-1');
+				expect(settled).toMatchObject({
+					status: 'settled',
+					error: 'materialization permanently failing',
+					settledAt: expect.any(Number),
+				});
+				expect(await store.hasUnsettledSubmissions()).toBe(false);
+				// The terminal row is a sink: not runnable, not markable, not claimable.
+				expect(await store.listRunnableSubmissions()).toEqual([]);
+				expect(await store.markSubmissionCanonicalReady('dispatch-1')).toBeNull();
+				expect(await store.claimSubmission(claim('dispatch-1', 'attempt-late'))).toBeNull();
+			});
+
+			it('settles an abort-flagged queued submission as aborted', async () => {
+				const store = await create();
+				const admitted = await store.admitDispatch(dispatchInput());
+				const sessionKey = admitted.kind === 'submission' ? admitted.submission.sessionKey : '';
+				await store.requestSessionAbort(sessionKey);
+
+				expect(
+					await store.settleQueuedSubmission(
+						'dispatch-1',
+						'aborted',
+						new Error('Submission was aborted.'),
+					),
+				).toBe(true);
+
+				expect(await store.getSubmission('dispatch-1')).toMatchObject({
+					status: 'settled',
+					error: 'Submission was aborted.',
+				});
+				expect(await store.hasUnsettledSubmissions()).toBe(false);
+			});
+
+			it('also settles a canonical-ready queued submission — queued is the only gate', async () => {
+				const store = await create();
+				await admitDispatchReady(store, dispatchInput());
+
+				expect(await store.settleQueuedSubmission('dispatch-1', 'aborted', new Error('stop'))).toBe(
+					true,
+				);
+				expect(await store.getSubmission('dispatch-1')).toMatchObject({ status: 'settled' });
+			});
+
+			it('returns false against a racing claim — the first terminal state wins both ways', async () => {
+				const store = await create();
+				// Claim first: the queued gate must reject the settle and leave the
+				// running attempt untouched.
+				await admitDispatchReady(store, dispatchInput());
+				await store.claimSubmission(claim('dispatch-1', 'attempt-1'));
+				expect(
+					await store.settleQueuedSubmission('dispatch-1', 'failed', new Error('too late')),
+				).toBe(false);
+				expect(await store.getSubmission('dispatch-1')).toMatchObject({
+					status: 'running',
+					attemptId: 'attempt-1',
+				});
+
+				// Settle first: the claim must lose.
+				await admitDispatchReady(
+					store,
+					dispatchInput({ submissionId: 'dispatch-2', id: 'agent-2' }),
+				);
+				expect(
+					await store.settleQueuedSubmission('dispatch-2', 'failed', new Error('gave up')),
+				).toBe(true);
+				expect(await store.claimSubmission(claim('dispatch-2', 'attempt-2'))).toBeNull();
+				expect(await store.getSubmission('dispatch-2')).toMatchObject({
+					status: 'settled',
+					error: 'gave up',
+				});
+			});
+
+			it('returns false on a settled submission and preserves the first terminal state', async () => {
+				const store = await create();
+				await admitDispatchReady(store, dispatchInput());
+				await store.claimSubmission(claim('dispatch-1', 'attempt-1'));
+				await store.completeSubmission(attempt('dispatch-1', 'attempt-1'));
+
+				expect(
+					await store.settleQueuedSubmission('dispatch-1', 'failed', new Error('late failure')),
+				).toBe(false);
+				const settled = await store.getSubmission('dispatch-1');
+				expect(settled).toMatchObject({ status: 'settled' });
+				expect(settled?.error).toBeUndefined();
+			});
+
+			it('returns false on joining and joined rows', async () => {
+				const store = await create();
+				await admitDispatchReady(store, dispatchInput({ submissionId: 'host-1' }));
+				await store.claimSubmission(claim('host-1', 'attempt-1'));
+				const host = attempt('host-1', 'attempt-1');
+				await admitDispatchReady(store, dispatchInput({ submissionId: 'joined-1' }));
+				await admitDispatchReady(store, dispatchInput({ submissionId: 'joining-1' }));
+				await store.claimJoinableSubmissions(host, 'assistant');
+				await store.finalizeJoinedSubmission(host, 'joined-1');
+
+				expect(await store.settleQueuedSubmission('joined-1', 'aborted', new Error('stop'))).toBe(
+					false,
+				);
+				expect(await store.settleQueuedSubmission('joining-1', 'aborted', new Error('stop'))).toBe(
+					false,
+				);
+				expect(await store.getSubmission('joined-1')).toMatchObject({ status: 'joined' });
+				expect(await store.getSubmission('joining-1')).toMatchObject({ status: 'joining' });
+			});
+
+			it('returns false for an unknown submission id', async () => {
+				const store = await create();
+				expect(await store.settleQueuedSubmission('nonexistent', 'failed', new Error('boom'))).toBe(
+					false,
+				);
 			});
 		});
 
@@ -1230,6 +1392,54 @@ export function defineStoreContractTests(label: string, backend: StoreContractTe
 			it('getSubmission returns null for unknown ids', async () => {
 				const store = await create();
 				expect(await store.getSubmission('nonexistent')).toBeNull();
+			});
+		});
+
+		// ── Format-version stamping ─────────────────────────────────────────
+
+		if (backend.formatVersion) defineFormatVersionTests(backend.formatVersion);
+	});
+}
+
+function defineFormatVersionTests(formatVersion: FormatVersionTestBackend): void {
+	describe('format-version stamping', () => {
+		async function withHandle(
+			run: (handle: FormatVersionTestHandle) => Promise<void>,
+		): Promise<void> {
+			const handle = await formatVersion.open();
+			try {
+				await run(handle);
+			} finally {
+				await handle.cleanup?.();
+			}
+		}
+
+		it('stamps a fresh store with format_version 1', async () => {
+			await withHandle(async (handle) => {
+				await handle.migrate();
+				expect(await handle.readStamp('format_version')).toBe('1');
+			});
+		});
+
+		it('adopts a store stamped schema_version 8 in place', async () => {
+			await withHandle(async (handle) => {
+				await handle.migrate();
+				await handle.deleteStamp('format_version');
+				await handle.writeStamp('schema_version', '8');
+				await handle.migrate();
+				expect(await handle.readStamp('format_version')).toBe('1');
+				expect(await handle.readStamp('schema_version')).toBeUndefined();
+			});
+		});
+
+		it('rejects a store stamped schema_version 7 without adopting it', async () => {
+			await withHandle(async (handle) => {
+				await handle.migrate();
+				await handle.deleteStamp('format_version');
+				await handle.writeStamp('schema_version', '7');
+				await expect(handle.migrate()).rejects.toThrowError(PersistedFormatVersionError);
+				expect(await handle.readStamp('format_version')).toBeUndefined();
+				expect(await handle.readStamp('schema_version')).toBe('7');
 			});
 		});
 	});

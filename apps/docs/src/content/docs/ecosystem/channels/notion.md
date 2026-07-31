@@ -180,10 +180,12 @@ export function retrievePage(pageId: string) {
     async run() {
       const page = await client.pages.retrieve({ page_id: pageId });
       return {
-        id: page.id,
-        object: page.object,
-        archived: 'archived' in page ? page.archived : null,
-        inTrash: 'in_trash' in page ? page.in_trash : null,
+        output: {
+          id: page.id,
+          object: page.object,
+          archived: 'archived' in page ? page.archived : null,
+          inTrash: 'in_trash' in page ? page.in_trash : null,
+        },
       };
     },
   });

@@ -9,7 +9,7 @@ import {
 	sameAttachmentRef,
 	verifyAttachmentBytes,
 } from './runtime/attachment-store.ts';
-import { migrateFlueSqlSchema } from './schema-version.ts';
+import { migrateFlueSqlSchema } from './format-version.ts';
 import type { SqlStorage } from './sql-storage.ts';
 
 export const ATTACHMENT_CHUNK_BYTE_LENGTH = 512 * 1024;
@@ -28,7 +28,7 @@ interface SqlAttachmentChunkRow {
 }
 
 export function ensureSqlAttachmentTable(sql: SqlStorage): void {
-	// DDL must stay behind the schema-version fence like its two siblings
+	// DDL must stay behind the format-version fence like its two siblings
 	// (ensureSqlAgentExecutionTables, ensureSqlConversationStreamTables): a
 	// store recorded with an unknown version must reject before any write.
 	migrateFlueSqlSchema(sql, () => {

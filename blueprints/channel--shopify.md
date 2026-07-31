@@ -162,7 +162,7 @@ export function retrieveOrder(orderId: string) {
       );
       if (result.errors) throw new Error('Shopify Admin API request failed.');
       if (!result.data?.order) throw new Error('Shopify order was not found.');
-      return result.data.order;
+      return { output: result.data.order };
     },
   });
 }

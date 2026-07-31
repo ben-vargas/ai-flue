@@ -79,8 +79,8 @@ Do not hardcode or invent a connection string. Read `VALKEY_URL` or the project'
 existing equivalent from its secret system and never commit credentials.
 
 Flue discovers `db.ts` and runs the adapter's `migrate()` hook at server startup.
-Migration inspects the server, initializes the schema-version metadata key
-idempotently, and rejects data written by an unsupported newer schema. There is
+Migration inspects the server, initializes the format-version metadata key
+idempotently, and rejects data written by an unsupported newer format. There is
 no separate migration command.
 
 By default, `inspectServer` uses `CONFIG GET` and falls back to `INFO` to verify

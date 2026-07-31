@@ -271,7 +271,7 @@ export function AutoTriage() {
           result: v.object({ fix_applied: v.boolean(), pr_url: v.optional(v.string()) }),
         });
       }
-      return triage;
+      return { output: triage };
     },
   });
   return 'When given an issue number, call the `triage-issue` tool and report its result.';

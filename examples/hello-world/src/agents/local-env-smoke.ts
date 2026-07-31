@@ -31,7 +31,7 @@ export function LocalEnvSmoke() {
 				results['sentinel host env var NOT leaked'] =
 					(await harness.sandbox.exec(`echo "$${sentinelKey}"`)).stdout.trim() === '';
 				await harness.sandbox.exec(`rm -rf ${tmpDir}`);
-				return { results, allPassed: Object.values(results).every(Boolean) };
+				return { output: { results, allPassed: Object.values(results).every(Boolean) } };
 			} finally {
 				if (previous === undefined) delete process.env[sentinelKey];
 				else process.env[sentinelKey] = previous;

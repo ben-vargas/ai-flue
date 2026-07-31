@@ -24,14 +24,15 @@ import type {
 } from '@flue/runtime/adapter';
 import {
 	admitSubmissionWithBackend,
-	assertSupportedFlueSchemaVersion,
+	assertSupportedFlueFormatVersion,
 	createDispatchAgentSubmissionInput,
 	DURABILITY_DEFAULT_MAX_ATTEMPTS,
 	DURABILITY_DEFAULT_TIMEOUT_MS,
-	FLUE_SCHEMA_VERSION,
+	FLUE_FORMAT_VERSION,
 	hydratePersistedSubmissionAttachments,
 	isSubmissionPayload,
 	LEASE_DURATION_MS,
+	PersistedFormatVersionError,
 } from '@flue/runtime/adapter';
 import { LibsqlAttachmentStore } from './libsql-attachment-store.ts';
 import { createLibsqlConversationStreamStore } from './libsql-conversation-store.ts';
@@ -144,7 +145,7 @@ async function ensureTables(runner: LibsqlRunner): Promise<void> {
 	// Wrap all schema setup in a single transaction so partial failures don't
 	// leave the database half-migrated.
 	await runner.transaction(async (tx) => {
-		// Stamp a fresh database with the current schema version; refuse to
+		// Stamp a fresh database with the current format version; refuse to
 		// touch a database recorded with an unknown or newer version.
 		await tx.query(`
 			CREATE TABLE IF NOT EXISTS flue_meta (
@@ -152,18 +153,39 @@ async function ensureTables(runner: LibsqlRunner): Promise<void> {
 				value TEXT NOT NULL
 			)
 		`);
-		const versionRows = await tx.query(`SELECT value FROM flue_meta WHERE key = 'schema_version'`);
+		const versionRows = await tx.query(`SELECT value FROM flue_meta WHERE key = 'format_version'`);
 		const storedVersion = versionRows[0]?.value;
 		if (storedVersion === undefined || storedVersion === null) {
-			const existing = await tx.query(
-				String.raw`SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'flue\_%' ESCAPE '\' AND name <> 'flue_meta' LIMIT 1`,
-			);
-			if (existing.length > 0) assertSupportedFlueSchemaVersion('unversioned');
-			await tx.query(`INSERT OR IGNORE INTO flue_meta (key, value) VALUES ('schema_version', ?)`, [
-				String(FLUE_SCHEMA_VERSION),
-			]);
+			const legacyRows = await tx.query(`SELECT value FROM flue_meta WHERE key = 'schema_version'`);
+			const legacyVersion = legacyRows[0]?.value;
+			if (legacyVersion !== undefined && legacyVersion !== null) {
+				// Nightly-era stores stamped `schema_version` 8 hold storage
+				// shapes byte-for-byte identical to format 1, so adoption is a
+				// pure relabel of the stamp — one UPDATE renames the row in
+				// place. Any other value at the old key names a store this
+				// runtime cannot read.
+				if (String(legacyVersion) !== '8') {
+					throw new PersistedFormatVersionError({
+						storedVersion: String(legacyVersion),
+						supportedVersion: FLUE_FORMAT_VERSION,
+					});
+				}
+				await tx.query(
+					`UPDATE flue_meta SET key = 'format_version', value = ? WHERE key = 'schema_version'`,
+					[String(FLUE_FORMAT_VERSION)],
+				);
+			} else {
+				const existing = await tx.query(
+					String.raw`SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'flue\_%' ESCAPE '\' AND name <> 'flue_meta' LIMIT 1`,
+				);
+				if (existing.length > 0) assertSupportedFlueFormatVersion('unversioned');
+				await tx.query(
+					`INSERT OR IGNORE INTO flue_meta (key, value) VALUES ('format_version', ?)`,
+					[String(FLUE_FORMAT_VERSION)],
+				);
+			}
 		} else {
-			assertSupportedFlueSchemaVersion(String(storedVersion));
+			assertSupportedFlueFormatVersion(String(storedVersion));
 		}
 
 		await tx.query(`
@@ -242,6 +264,15 @@ async function ensureTables(runner: LibsqlRunner): Promise<void> {
 				attempt_id TEXT,
 				PRIMARY KEY (path, seq),
 				UNIQUE (path, producer_id, producer_epoch, producer_sequence)
+			)
+		`);
+		await tx.query(`
+			CREATE TABLE IF NOT EXISTS flue_conversation_fold_checkpoints (
+				path TEXT PRIMARY KEY,
+				head_offset TEXT NOT NULL,
+				incarnation TEXT NOT NULL,
+				format_version INTEGER NOT NULL,
+				data TEXT NOT NULL
 			)
 		`);
 		await tx.query(`
@@ -692,6 +723,25 @@ class LibsqlSubmissionStore implements AgentSubmissionStore {
 			await this.settleJoinedSubmissions(tx, attempt.submissionId, message);
 			return true;
 		});
+	}
+
+	async settleQueuedSubmission(
+		submissionId: string,
+		_outcome: 'failed' | 'aborted',
+		error: unknown,
+	): Promise<boolean> {
+		const message = error instanceof Error ? error.message : String(error);
+		// A single queued-gated CAS: no attempt is created and no joined-delivery
+		// fan-out is needed — joins attach to a RUNNING host, so a queued row can
+		// never have deliveries joined into it.
+		const rows = await this.runner.query(
+			`UPDATE flue_agent_submissions
+			 SET status = 'settled', settled_at = ?, error = ?
+			 WHERE submission_id = ? AND status = 'queued'
+			 RETURNING submission_id`,
+			[Date.now(), message, submissionId],
+		);
+		return rows.length > 0;
 	}
 
 	// ── Turn-boundary joins ──────────────────────────────────────────────

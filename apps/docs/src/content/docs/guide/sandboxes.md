@@ -60,7 +60,7 @@ export const reviewDocument = defineTool({
   async run({ harness, data }) {
     await harness.sandbox.writeFile('document.md', data.document);
     await harness.prompt('Review document.md and write your findings to review.md.');
-    return { review: await harness.sandbox.readFile('review.md') };
+    return { output: { review: await harness.sandbox.readFile('review.md') } };
   },
 });
 ```
@@ -168,6 +168,8 @@ export function CodeRunner() {
 ```
 
 `createSessionEnv({ id })` receives the agent instance id. A factory that looks up an existing provider sandbox by that id before creating one gives each conversation a durable workspace that survives across messages and process restarts.
+
+Cancelling a running command — the model's own `timeout`, or your application aborting the surrounding task — always rejects promptly, whatever the provider does under the hood. `local()`'s process-group kill actually stops the command, but most provider SDKs have no mid-flight cancellation: the remote command keeps running in the background after the rejection, and its eventual output is discarded rather than appearing later in the conversation. A provider whose SDK does support cancellation (Vercel, Mirage) stops the command for real instead of just abandoning it.
 
 ### Sandbox-provided tools
 

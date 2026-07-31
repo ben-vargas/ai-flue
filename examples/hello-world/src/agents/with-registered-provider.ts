@@ -37,7 +37,7 @@ export function WithRegisteredProvider() {
 		harness: true,
 		async run({ harness }) {
 			const response = await harness.prompt('Reply with exactly one word: ok');
-			return { ok: true, hasResponse: response.text.length > 0 };
+			return { output: { ok: true, hasResponse: response.text.length > 0 } };
 		},
 	});
 	return 'When asked to run a demo, call the `provider-smoke` tool and report its result.';

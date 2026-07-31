@@ -33,7 +33,11 @@ export { isAssistantContextOverflow } from './compaction.ts';
 // Conversation wire types projected onto the HTTP `history`/`updates` views.
 // Exposed here only so the SDK can pin its public projection types to the
 // runtime's emitted shapes via a compile-time assignability test.
-export type { AgentConversationSnapshot, ConversationStreamChunk } from './conversation-public.ts';
+export type {
+	AgentConversationSnapshot,
+	ConversationStreamChunk,
+	ConversationStreamWireChunk,
+} from './conversation-public.ts';
 export { configureErrorRendering, RuntimeUnavailableError, toHttpResponse } from './errors.ts';
 export type { InstrumentationOwner } from './instrumentation.ts';
 export { createInstrumentationOwner, runWithInstrumentationOwner } from './instrumentation.ts';
@@ -47,7 +51,11 @@ export type {
 	AssembledNodeAgentRuntime,
 	AssembleNodeAgentRuntimeOptions,
 } from './node/assemble.ts';
-export { assembleNodeAgentRuntime, connectPersistenceAdapter } from './node/assemble.ts';
+export {
+	adapterInUseByLiveRuntime,
+	assembleNodeAgentRuntime,
+	connectPersistenceAdapter,
+} from './node/assemble.ts';
 export type {
 	AgentSubmissionInput,
 	AttachedAgentSubmissionAdmission,
@@ -75,7 +83,6 @@ export {
 	InMemoryConversationStreamStore,
 	SqliteConversationStreamStore,
 } from './runtime/conversation-stream-store.ts';
-export type { AgentInteractionStart } from './runtime/dev-lifecycle-logger.ts';
 export { installDevLifecycleLogger } from './runtime/dev-lifecycle-logger.ts';
 export type { DispatchInput, DispatchQueue } from './runtime/dispatch-queue.ts';
 export type { CloudflareRuntime, FlueRuntime, NodeRuntime } from './runtime/flue-app.ts';

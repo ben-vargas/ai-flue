@@ -364,6 +364,23 @@ export class MongoSubmissionStore implements AgentSubmissionStore {
 			error instanceof Error ? error.message : String(error),
 		);
 	}
+	async settleQueuedSubmission(
+		submissionId: string,
+		_outcome: 'failed' | 'aborted',
+		error: unknown,
+	): Promise<boolean> {
+		const message = error instanceof Error ? error.message : String(error);
+		// A single queued-gated conditional update (atomic per document): no
+		// attempt is created and no joined-delivery fan-out is needed — joins
+		// attach to a RUNNING host, so a queued row can never have deliveries
+		// joined into it.
+		const result = await this.c('submissions').updateOne(
+			{ submissionId, status: 'queued' },
+			{ $set: { status: 'settled', settledAt: Date.now(), error: message } },
+		);
+		return result.matchedCount === 1;
+	}
+
 	private settleWithJoinedFanOut(
 		attempt: SubmissionAttemptRef,
 		error: string | null,

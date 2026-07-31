@@ -41,6 +41,7 @@ export function schema(prefix: string): MongoCollectionSpec[] {
 			{ name: 'joined_into', key: { joinedInto: 1 }, collation: simple },
 		]),
 		spec('conversation_streams'),
+		spec('conversation_fold_checkpoints'),
 		spec('conversation_batches', [
 			{ name: 'path_offset', key: { path: 1, offset: 1 }, unique: true, collation: simple },
 			{

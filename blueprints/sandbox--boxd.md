@@ -1,7 +1,7 @@
 ---
 {
   "kind": "sandbox",
-  "version": 2,
+  "version": 1,
   "website": "https://boxd.sh",
   "aliases": ["@boxd-sh/sdk"]
 }
@@ -45,7 +45,7 @@ Write this file verbatim. Do not "improve" it — it conforms to the published
 `SandboxApi` contract.
 
 ```ts
-// flue-blueprint: sandbox/boxd@2
+// flue-blueprint: sandbox/boxd@1
 /**
  * boxd adapter for Flue.
  *
@@ -155,18 +155,6 @@ const VM_PROBE_SILENCE_MS = 10_000;
  */
 const TERMINAL_VM_STATUSES = new Set(['destroyed', 'failed', 'stopped']);
 
-/** Build a standard `AbortError` carrying the signal's reason message. */
-function abortErrorFor(signal: AbortSignal): Error {
-	const reason: unknown = signal.reason;
-	const message =
-		reason instanceof Error && reason.message
-			? reason.message
-			: typeof reason === 'string' && reason
-				? reason
-				: 'The operation was aborted.';
-	return new DOMException(message, 'AbortError');
-}
-
 /**
  * Await a boxd SDK call while watching for VM death. boxd's exec rides a
  * bidi gRPC stream that only settles when the server ends it, and the SDK
@@ -181,43 +169,31 @@ function abortErrorFor(signal: AbortSignal): Error {
  * outside {@link TERMINAL_VM_STATUSES} — including transitional ones like
  * `booting` and `stopping`, the suspend states `standby` and `hibernated`,
  * and unrecognized future values — counts as alive, so a legitimately slow
- * command on a healthy VM is never interrupted. When `signal` is provided,
- * its abort joins the race and rejects immediately even though the
- * underlying call cannot be cancelled remotely.
+ * command on a healthy VM is never interrupted.
+ *
+ * Liveness only: this never races the caller's abort signal. Caller-facing
+ * cancellation is owned one layer up, by `createSandboxSessionEnv`'s `exec`
+ * abort race — it rejects promptly on abort and consumes this promise's
+ * eventual settlement once the caller has already been released.
  */
 function raceVmDeath<T>(
 	client: Compute,
 	vmId: string,
 	operation: string,
 	call: Promise<T>,
-	signal?: AbortSignal,
 ): Promise<T> {
-	if (signal?.aborted) {
-		// The call is already in flight; swallow its eventual settlement so
-		// the early rejection can't leave an unhandled rejection behind.
-		call.catch(() => {});
-		return Promise.reject(abortErrorFor(signal));
-	}
 	return new Promise<T>((resolve, reject) => {
 		let settled = false;
 		let pollTimer: ReturnType<typeof setTimeout> | undefined;
 		let silenceTimer: ReturnType<typeof setTimeout> | undefined;
-		let removeAbortListener = (): void => {};
 
 		const settle = (complete: () => void): void => {
 			if (settled) return;
 			settled = true;
 			clearTimeout(pollTimer);
 			clearTimeout(silenceTimer);
-			removeAbortListener();
 			complete();
 		};
-
-		if (signal) {
-			const onAbort = (): void => settle(() => reject(abortErrorFor(signal)));
-			signal.addEventListener('abort', onAbort, { once: true });
-			removeAbortListener = () => signal.removeEventListener('abort', onAbort);
-		}
 
 		const probe = (): void => {
 			silenceTimer = setTimeout(() => {
@@ -287,9 +263,9 @@ class BoxdSandboxApi implements SandboxApi {
 	 * client is available; bare await otherwise (accepted limitation —
 	 * see {@link BoxdAdapterOptions.client}).
 	 */
-	private guarded<T>(operation: string, call: Promise<T>, signal?: AbortSignal): Promise<T> {
+	private guarded<T>(operation: string, call: Promise<T>): Promise<T> {
 		if (!this.client) return call;
-		return raceVmDeath(this.client, this.box.id, operation, call, signal);
+		return raceVmDeath(this.client, this.box.id, operation, call);
 	}
 
 	async readFile(path: string): Promise<string> {
@@ -402,16 +378,16 @@ class BoxdSandboxApi implements SandboxApi {
 			? `cd ${shellQuote(options.cwd)} && ${command}`
 			: command;
 		// Flue and boxd both express command timeouts in milliseconds. boxd's
-		// exec does not accept an AbortSignal; the signal joins the death
-		// detector's race instead, so an abort rejects immediately even
-		// though the VM keeps running the command.
+		// exec does not accept an AbortSignal, so it is deliberately not
+		// forwarded here — createSandboxSessionEnv (which this adapter builds
+		// on) owns caller-facing abort and rejects promptly while the VM
+		// keeps running the command.
 		const result = await this.guarded(
 			operation,
 			this.box.exec(['bash', '-lc', wrapped], {
 				env: options?.env,
 				timeoutMs: options?.timeoutMs,
 			}),
-			options?.signal,
 		);
 		return {
 			stdout: result.stdout,
@@ -535,129 +511,3 @@ When updating an existing integration, inspect and compare it against this compl
 ### Version 1 — 2026-06-14
 
 Initial version.
-
-### Version 2 — 2026-07-22
-
-Death detection for in-flight calls. boxd's `exec` rides a bidi gRPC stream
-that only settles when the server ends it, and the SDK sets no request
-deadline — so a call that was in flight when the VM was destroyed, stopped,
-or failed could hang the agent forever. The adapter now accepts the boxd
-`Compute` client via a new `BoxdAdapterOptions.client` option and, while any
-call is pending, polls `client.box.get(<vm id>)` (a cheap unary
-control-plane read, every 5s) and rejects with `SandboxDiedError` (exported
-from `@flue/runtime`) once the VM reports a terminal status (`destroyed` /
-`failed` / `stopped` — the states the SDK's own `waitUntilReady` treats as
-terminal) or the VM record is authoritatively gone (`NotFoundError`). A
-probe that itself goes unanswered for 10s presumes the control plane dead
-with the VM. `exec()`'s `AbortSignal` also joins the race, so an abort
-rejects immediately even though boxd cannot cancel the remote command.
-Healthy-but-slow commands are never interrupted: transitional statuses
-(`booting`, `stopping`), suspend states (`standby`, `hibernated`), unknown
-future values, and rejecting probes all count as alive, and no polling
-happens while the sandbox is idle. Without a `client` the adapter behaves
-exactly as before (no liveness probing — a call in flight when the VM dies
-may hang).
-
-To upgrade, replace the adapter file with the current blueprint's version
-(the new `TERMINAL_VM_STATUSES` / `abortErrorFor` / `raceVmDeath` block and
-the `guarded()` plumbing are additive; your customizations to the shell
-commands carry over unchanged), then pass `{ client }` where you call
-`boxd(...)`. The key seams:
-
-```diff
---- a/src/sandboxes/boxd.ts
-+++ b/src/sandboxes/boxd.ts
-@@ -1,4 +1,4 @@
--// flue-blueprint: sandbox/boxd@1
-+// flue-blueprint: sandbox/boxd@2
-@@
--import { createSandboxSessionEnv } from '@flue/runtime';
-+import { createSandboxSessionEnv, SandboxDiedError } from '@flue/runtime';
- import type { SandboxApi, SandboxFactory, SessionEnv, FileStat } from '@flue/runtime';
--import type { Box as BoxdBox } from '@boxd-sh/sdk';
-+import { NotFoundError } from '@boxd-sh/sdk';
-+import type { Box as BoxdBox, Compute } from '@boxd-sh/sdk';
-@@ export interface BoxdAdapterOptions {
- 	readyTimeoutMs?: number;
-+	/**
-+	 * The boxd `Compute` client used to probe the VM's liveness. Strongly
-+	 * recommended: when provided, the adapter polls `client.box.get()`
-+	 * while a call is in flight and rejects with `SandboxDiedError` once
-+	 * the VM reports a terminal status. Without it the adapter cannot
-+	 * detect VM death, and a call that is in flight when the VM dies can
-+	 * hang forever — boxd's exec rides a gRPC stream that only settles
-+	 * when the server ends it, and the SDK sets no request deadline.
-+	 * Keep the client open while the sandbox is in use.
-+	 */
-+	client?: Compute;
- }
-@@ function shellQuote(value: string): string {
- 	return `'${value.replace(/'/g, `'\\''`)}'`;
- }
-
-+// … add the VM_STATUS_POLL_MS / VM_PROBE_SILENCE_MS constants and the
-+// TERMINAL_VM_STATUSES, abortErrorFor(), and raceVmDeath() definitions
-+// from the current blueprint here …
-+
- class BoxdSandboxApi implements SandboxApi {
--	constructor(private box: BoxdBox) {}
-+	constructor(
-+		private box: BoxdBox,
-+		private client?: Compute,
-+	) {}
-+
-+	private guarded<T>(operation: string, call: Promise<T>, signal?: AbortSignal): Promise<T> {
-+		if (!this.client) return call;
-+		return raceVmDeath(this.client, this.box.id, operation, call, signal);
-+	}
-
- 	async readFile(path: string): Promise<string> {
--		const bytes = await this.box.readFile(path);
-+		const bytes = await this.guarded('readFile', this.box.readFile(path));
- 		return new TextDecoder('utf-8').decode(bytes);
- 	}
-
- 	async readFileBuffer(path: string): Promise<Uint8Array> {
--		return this.box.readFile(path);
-+		return this.guarded('readFile', this.box.readFile(path));
- 	}
-
- 	async writeFile(path: string, content: string | Uint8Array): Promise<void> {
--		await this.box.writeFile(path, content);
-+		await this.guarded('writeFile', this.box.writeFile(path, content));
- 	}
-@@
- 	private async runShell(
-+		operation: string,
- 		command: string,
- 		options?: { … },
- 	): Promise<{ stdout: string; stderr: string; exitCode: number }> {
- 		const wrapped = options?.cwd
- 			? `cd ${shellQuote(options.cwd)} && ${command}`
- 			: command;
--		// Flue and boxd both express command timeouts in milliseconds.
--		const result = await this.box.exec(['bash', '-lc', wrapped], {
--			env: options?.env,
--			timeoutMs: options?.timeoutMs,
--		});
-+		// Flue and boxd both express command timeouts in milliseconds. boxd's
-+		// exec does not accept an AbortSignal; the signal joins the death
-+		// detector's race instead, so an abort rejects immediately even
-+		// though the VM keeps running the command.
-+		const result = await this.guarded(
-+			operation,
-+			this.box.exec(['bash', '-lc', wrapped], {
-+				env: options?.env,
-+				timeoutMs: options?.timeoutMs,
-+			}),
-+			options?.signal,
-+		);
-@@ export function boxd(box: BoxdBox, options?: BoxdAdapterOptions): SandboxFactory {
--			const api = new BoxdSandboxApi(box);
-+			const api = new BoxdSandboxApi(box, options?.client);
- 			return createSandboxSessionEnv(api, sandboxCwd);
-```
-
-Every internal `runShell(...)` call site (`stat`, `readdir`, `exists`,
-`mkdir`, `rm`, `exec`) also gains its operation name as the new first
-argument.

@@ -51,6 +51,13 @@ export interface ReducedMessageEntry extends ReducedEntryBase {
 	 * durable tool outcome. Absent on entries whose outcome predates the field.
 	 */
 	toolDurationMs?: number;
+	/**
+	 * The durable loop-ending flag for tool-result entries, carried from the
+	 * `tool_outcome` record so submission classification can reproduce the
+	 * engine's batch-termination verdict. Internal recovery metadata — never
+	 * projected into model context or public history/UI shapes.
+	 */
+	toolTerminate?: boolean;
 }
 
 export interface ReducedCompactionEntry extends ReducedEntryBase {
@@ -105,6 +112,19 @@ export interface InProgressAssistantMessage {
 	modelInfo: AssistantMessageStartedRecord['modelInfo'];
 	blocks: Map<string, ReducedAssistantBlock>;
 	blockIndexes: Set<number>;
+	/**
+	 * Ids of the streaming records applied to this message (block starts,
+	 * deltas, block completions, tool calls). Their `recordsById` stubs exist
+	 * only to detect id reuse while the message is in progress: streaming
+	 * records are transport, not conversation state — no legitimate path
+	 * re-appends one once the message has materialized (batch retry dedupe is
+	 * store-level, and the deterministic-id re-ensure paths never mint them).
+	 * Completion and the settle barrier release the stubs, so per-chunk
+	 * records stop costing resident memory once their message resolves; a
+	 * pathological replay after release fails loudly on the missing
+	 * in-progress message instead of the id-reuse compare.
+	 */
+	appliedRecordIds: string[];
 }
 
 interface ReducedConversationStateBase {
@@ -142,6 +162,17 @@ interface ReducedConversationStateBase {
 	responseDataParts: Map<string, ResponseDataPart[]>;
 	/** Last completed assistant entry per submission — the data-write anchor. */
 	lastAssistantEntryBySubmission: Map<string, string>;
+	/**
+	 * Retained record ids per submission whose bodies only the submission's
+	 * own live attempt reads (`agent_start_run` / `agent_finish_cycle`
+	 * presence and count scans, `assistant_message_completed` usage
+	 * re-aggregation on resume). The settle barrier downgrades them to digest
+	 * stubs — a settled submission never resumes, so the bodies have no
+	 * remaining reader. Deliberately NOT tracked: `tool_outcome` bodies and
+	 * `tool_step_settled` memos, which a later submission's repair of an
+	 * interrupted tool batch legitimately reads across the settlement.
+	 */
+	attemptScopedRecordIds: Map<string, string[]>;
 }
 
 interface ResponseDataPart {
@@ -238,7 +269,11 @@ export interface ReducedInstanceState {
 	 * with post-fold readers (settlement compares, durable step memos,
 	 * submission-scoped scans); everything else downgrades to a
 	 * {@link ConversationRecordStub} at application so resident state stays
-	 * an index over the log instead of a second copy of it.
+	 * an index over the log instead of a second copy of it. Streaming-record
+	 * stubs are released entirely once their message materializes (or its
+	 * submission settles) — see
+	 * {@link InProgressAssistantMessage.appliedRecordIds} — so the index is
+	 * bounded by non-streaming records, not by lifetime streaming volume.
 	 */
 	recordsById: Map<string, IndexedConversationRecord>;
 	/**
@@ -279,6 +314,24 @@ export interface ReducedContextEntry {
 	message: AgentMessage;
 	sourceEntry: ReducedEntry;
 }
+
+/**
+ * Version of the reduced-state shape AND of the fold semantics that produce
+ * it, stamped on every durable fold checkpoint
+ * (conversation-fold-checkpoint.ts). A checkpoint is a cache over the log —
+ * never authoritative — so a version mismatch is a cheap cache miss: the
+ * loader discards it and replays from the origin.
+ *
+ * BUMP THIS on every change to `ReducedInstanceState`'s shape (fields,
+ * container types, retention/downgrade behavior) or to
+ * `applyConversationRecord`'s semantics. A decoded old-format state folded
+ * forward would silently diverge from a from-scratch replay; the bump turns
+ * that into a rebuild. Enforcement is mechanical: the checkpoint equivalence
+ * suite deep-compares decode(encode(state)) and checkpoint-seeded loads
+ * against from-scratch folds at every batch boundary, so shape drift without
+ * a matching codec change fails CI.
+ */
+export const REDUCED_STATE_FORMAT = 1;
 
 export function createReducedInstanceState(): ReducedInstanceState {
 	return {
@@ -359,6 +412,7 @@ function cloneReducedInstanceState(state: ReducedInstanceState): ReducedInstance
 									]),
 								),
 								blockIndexes: new Set(message.blockIndexes),
+								appliedRecordIds: [...message.appliedRecordIds],
 							},
 						]),
 					),
@@ -373,6 +427,12 @@ function cloneReducedInstanceState(state: ReducedInstanceState): ReducedInstance
 						]),
 					),
 					lastAssistantEntryBySubmission: new Map(conversation.lastAssistantEntryBySubmission),
+					attemptScopedRecordIds: new Map(
+						[...conversation.attemptScopedRecordIds].map(([submissionId, recordIds]) => [
+							submissionId,
+							[...recordIds],
+						]),
+					),
 				},
 			]),
 		),
@@ -418,6 +478,7 @@ export function applyConversationRecord(
 			responseMetadata: new Map(),
 			responseDataParts: new Map(),
 			lastAssistantEntryBySubmission: new Map(),
+			attemptScopedRecordIds: new Map(),
 		});
 		state.conversationScopes.set(scopeKey, record.conversationId);
 		state.recordsById.set(record.id, indexConversationRecord(record));
@@ -497,6 +558,7 @@ export function applyConversationRecord(
 				modelInfo: record.modelInfo,
 				blocks: new Map(),
 				blockIndexes: new Set(),
+				appliedRecordIds: [],
 			});
 			if (record.responseMetadata) {
 				if (!record.submissionId) {
@@ -590,6 +652,14 @@ export function applyConversationRecord(
 			if (inProgress.submissionId) {
 				conversation.lastAssistantEntryBySubmission.set(inProgress.submissionId, record.messageId);
 			}
+			trackAttemptScopedRecord(conversation, record.submissionId, record.id);
+			// The message has materialized: release its streaming records'
+			// idempotency stubs (see InProgressAssistantMessage.appliedRecordIds).
+			// On a delta-heavy stream these dominate `recordsById`; without the
+			// release the index grows with lifetime streaming volume.
+			for (const recordId of inProgress.appliedRecordIds) {
+				state.recordsById.delete(recordId);
+			}
 			break;
 		}
 		case 'tool_outcome': {
@@ -603,6 +673,9 @@ export function applyConversationRecord(
 			);
 			if (!call || call.name !== record.toolName) {
 				fail(record, `Tool outcome does not match its assistant tool request.`);
+			}
+			if (record.terminate !== undefined && record.terminate !== true) {
+				fail(record, `A tool outcome's terminate flag is written only as true.`);
 			}
 			const outcomeKey = toolOutcomeKey(record.assistantMessageId, record.toolCallId);
 			if (conversation.toolOutcomes.has(outcomeKey)) {
@@ -670,6 +743,7 @@ export function applyConversationRecord(
 					attachmentRefs: attachmentRefs(outcome.content),
 					...(outcome.output !== undefined ? { toolOutput: { value: outcome.output } } : {}),
 					...(outcome.durationMs !== undefined ? { toolDurationMs: outcome.durationMs } : {}),
+					...(outcome.terminate === true ? { toolTerminate: true } : {}),
 				});
 				parentId = entryId;
 				// The commit consumes its batch: the result content now lives on
@@ -763,13 +837,35 @@ export function applyConversationRecord(
 			// job at the ownership seams; the barrier drops only bookkeeping.
 			// Undefined-owner in-progress messages (programmatic prompts, subagent
 			// children) are never dropped.
-			if (record.submissionId) {
-				for (const [messageId, message] of conversation.inProgressMessages) {
-					if (message.submissionId === record.submissionId) {
-						conversation.inProgressMessages.delete(messageId);
+			if (!record.submissionId) {
+				fail(record, `A submission settlement requires its submissionId.`);
+			}
+			for (const [messageId, message] of conversation.inProgressMessages) {
+				if (message.submissionId === record.submissionId) {
+					// A message the settlement abandoned never completes, so this
+					// barrier is also its streaming-stub release point — without it
+					// an interrupted stream's per-chunk records stay resident forever.
+					for (const recordId of message.appliedRecordIds) {
+						state.recordsById.delete(recordId);
 					}
+					conversation.inProgressMessages.delete(messageId);
 				}
 			}
+			// The barrier also ends the attempt's claim on its bookkeeping
+			// bodies (see attemptScopedRecordIds): downgrade them to digest
+			// stubs — id-reuse detection survives, the bytes don't. In-place
+			// set keeps the map's insertion order for stream-order scans. The
+			// data-write anchor goes with them: a late message_data_write for
+			// a settled submission fails loudly on the missing anchor, which
+			// is the barrier's intent.
+			for (const recordId of conversation.attemptScopedRecordIds.get(record.submissionId) ?? []) {
+				const retained = state.recordsById.get(recordId);
+				if (retained && !isConversationRecordStub(retained)) {
+					state.recordsById.set(recordId, { h: fnv1a64(JSON.stringify(retained)) });
+				}
+			}
+			conversation.attemptScopedRecordIds.delete(record.submissionId);
+			conversation.lastAssistantEntryBySubmission.delete(record.submissionId);
 			break;
 		case 'tool_step_settled':
 			// Durable-step memo: read back by deterministic id from
@@ -796,6 +892,7 @@ export function applyConversationRecord(
 		case 'agent_finish_cycle':
 			// Lifecycle-hook bookkeeping: the session reads these straight from
 			// `recordsById` (submission-scoped scans), no folded state needed.
+			trackAttemptScopedRecord(conversation, record.submissionId, record.id);
 			break;
 		case 'message_metadata': {
 			if (!record.submissionId) fail(record, `Response metadata requires a tracked submission.`);
@@ -864,6 +961,18 @@ function indexConversationRecord(record: ConversationRecord): IndexedConversatio
 		default:
 			return { h: fnv1a64(JSON.stringify(record)) };
 	}
+}
+
+/** Record one attempt-scoped retained body for the settle barrier's downgrade. */
+function trackAttemptScopedRecord(
+	conversation: ReducedConversationState,
+	submissionId: string | undefined,
+	recordId: string,
+): void {
+	if (!submissionId) return;
+	const tracked = conversation.attemptScopedRecordIds.get(submissionId);
+	if (tracked) tracked.push(recordId);
+	else conversation.attemptScopedRecordIds.set(submissionId, [recordId]);
 }
 
 function mergeResponseMetadata(
@@ -1222,6 +1331,7 @@ function startBlock(
 	}
 	message.blocks.set(block.blockId, block);
 	message.blockIndexes.add(block.blockIndex);
+	message.appliedRecordIds.push(record.id);
 }
 
 function appendDelta(
@@ -1240,6 +1350,7 @@ function appendDelta(
 		fail(record, `Expected delta sequence ${block.deltas.length}, received ${record.sequence}.`);
 	}
 	block.deltas.push(record.delta);
+	message.appliedRecordIds.push(record.id);
 }
 
 function completeBlock(
@@ -1277,6 +1388,7 @@ function completeBlock(
 		);
 	}
 	block.completed = true;
+	message.appliedRecordIds.push(record.id);
 	return block;
 }
 

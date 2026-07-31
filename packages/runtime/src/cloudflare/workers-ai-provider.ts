@@ -4,9 +4,13 @@
  * Binding access: `cloudflareBindingProvider()` captures `env.AI` (and the
  * resolved AI Gateway options) in the provider's stream-function closure.
  *
- * Wire format: the binding accepts multiple Cloudflare model families. Workers
- * AI and OpenAI-family models use the OpenAI-compatible shape; Anthropic AI
- * Gateway models use Anthropic Messages.
+ * Wire format: the binding accepts multiple Cloudflare model families, each
+ * with its own serialization. `anthropic/…` AI Gateway models use Anthropic
+ * Messages, `openai/…` AI Gateway models use OpenAI Responses, and everything
+ * else — Workers AI `@cf/…` ids and other gateway vendors — uses the
+ * OpenAI-compatible chat-completions shape. Catalogued gateway models dispatch
+ * by their pi-ai catalog `api`; uncatalogued ids fall back to their vendor
+ * prefix.
  */
 import type { Ai } from '@cloudflare/workers-types';
 import type {
@@ -24,6 +28,7 @@ import type {
 } from '@earendil-works/pi-ai';
 import {
 	type Api,
+	clampThinkingLevel,
 	createAssistantMessageEventStream,
 	createProvider,
 	parseStreamingJson,
@@ -32,6 +37,7 @@ import {
 // the worker entry imports this module in every isolate, but the ~90KB of
 // wire-protocol code should cost nothing until a binding model streams.
 import { anthropicMessagesApi } from '@earendil-works/pi-ai/api/anthropic-messages.lazy';
+import { cloudflareAIGatewayProvider } from '@earendil-works/pi-ai/providers/cloudflare-ai-gateway';
 import { cloudflareWorkersAIProvider } from '@earendil-works/pi-ai/providers/cloudflare-workers-ai';
 import { CloudflareAIBindingError, RETRYABLE_INTERRUPTION_MARKER } from '../errors.ts';
 import { attachProviderResponseDiagnostics } from '../provider-diagnostics.ts';
@@ -39,9 +45,9 @@ import { DYNAMIC_MODEL_TEMPLATE } from '../runtime/providers.ts';
 import type { CloudflareGatewayOptions } from './gateway.ts';
 
 /**
- * The `api` marker carried by this provider's models. Purely descriptive
- * since the provider dispatches every model through one stream pair — no
- * wire-protocol registry consults it.
+ * The `api` marker carried by Workers AI catalog models and zero-metadata
+ * dynamic ids. `bindingWireFormat` reads it (alongside the real gateway apis)
+ * to pick a serialization; no pi-ai wire-protocol registry consults it.
  */
 const CLOUDFLARE_AI_BINDING_API = 'cloudflare-ai-binding' as const;
 
@@ -80,6 +86,7 @@ const WORKERS_AI_COMPAT: Omit<
 	vercelGatewayRouting: {},
 	zaiToolStream: false,
 	supportsStrictMode: true,
+	supportsOpenAIGrammarTools: false,
 	cacheControlFormat: undefined,
 	sendSessionAffinityHeaders: true,
 	sessionAffinityFormat: 'openai',
@@ -302,8 +309,15 @@ function streamCloudflareWorkersAi(
 	context: Context,
 	options?: SimpleStreamOptions,
 ) {
-	if (isAnthropicGatewayModel(model)) {
-		return streamCloudflareAnthropicAi(ai, gateway, model, context, options);
+	switch (bindingWireFormat(model)) {
+		case 'anthropic-messages':
+			return streamCloudflareAnthropicAi(ai, gateway, model, context, options);
+		case 'openai-responses':
+			return streamCloudflareResponsesAi(ai, gateway, model, context, options);
+		case 'openai-completions':
+			break;
+		default:
+			return unsupportedWireFormatStream(model);
 	}
 
 	const stream = createAssistantMessageEventStream();
@@ -634,6 +648,7 @@ function streamCloudflareAnthropicAi(
 	context: Context,
 	options?: SimpleStreamOptions,
 ) {
+	warnZeroMetadataGatewayModel(model);
 	const anthropicModel = toAnthropicGatewayModel(model);
 	const client = createAnthropicBindingClient(ai, model, options, gateway);
 
@@ -655,6 +670,210 @@ function streamCloudflareAnthropicAi(
 	return anthropicMessagesApi().stream(anthropicModel, context, anthropicOptions);
 }
 
+// ─── OpenAI Responses stream (AI Gateway `openai/…` models) ─────────────────
+
+// OpenAI Responses rejects max_output_tokens below 16:
+// https://github.com/earendil-works/pi/issues/6265
+const OPENAI_RESPONSES_MIN_OUTPUT_TOKENS = 16;
+
+/**
+ * Providers whose tool-call ids carry OpenAI `call|item` pairing across turns.
+ * This provider is not one (ids are sanitized instead), matching pi-ai's own
+ * `cloudflare-ai-gateway` provider, whose id is likewise outside pi's set.
+ */
+const RESPONSES_TOOL_CALL_ID_PROVIDERS: ReadonlySet<string> = new Set();
+
+function streamCloudflareResponsesAi(
+	ai: Ai,
+	gateway: CloudflareGatewayOptions | undefined,
+	model: Model<Api>,
+	context: Context,
+	options?: SimpleStreamOptions,
+) {
+	warnZeroMetadataGatewayModel(model);
+	const stream = createAssistantMessageEventStream();
+	void (async () => {
+		const output: AssistantMessage = {
+			role: 'assistant',
+			content: [],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: emptyUsage(),
+			stopReason: 'stop',
+			timestamp: Date.now(),
+		};
+
+		let response: Response | undefined;
+		const observed = { sawTerminalEvent: false, endedCleanly: false };
+		try {
+			// Loaded on demand like the chat-completions converters above.
+			const [
+				{ convertResponsesMessages, convertResponsesTools, processResponsesStream },
+				{ clampOpenAIPromptCacheKey },
+			] = await Promise.all([
+				import('@earendil-works/pi-ai/api/openai-responses-shared'),
+				import('@earendil-works/pi-ai/api/openai-prompt-cache'),
+			]);
+
+			const responsesModel = toResponsesGatewayModel(model);
+			const payload: Record<string, unknown> = {
+				// `ai.run`'s model argument names the gateway target; like the
+				// chat-completions payload, the body carries no `model` field.
+				input: convertResponsesMessages(responsesModel, context, RESPONSES_TOOL_CALL_ID_PROVIDERS),
+				stream: true,
+				store: false,
+			};
+			if (context.tools && context.tools.length > 0) {
+				payload.tools = convertResponsesTools(context.tools);
+			}
+			if (options?.maxTokens) {
+				payload.max_output_tokens = Math.max(options.maxTokens, OPENAI_RESPONSES_MIN_OUTPUT_TOKENS);
+			}
+			if (options?.temperature !== undefined) {
+				payload.temperature = options.temperature;
+			}
+			if (options?.sessionId) {
+				payload.prompt_cache_key = clampOpenAIPromptCacheKey(options.sessionId);
+			}
+			applyResponsesReasoning(payload, responsesModel, options?.reasoning);
+
+			// `onPayload`: undefined keeps the payload, any other return replaces it.
+			const overridden = await options?.onPayload?.(payload, model);
+			const finalPayload = overridden === undefined ? payload : (overridden as typeof payload);
+
+			const extraHeaders = buildExtraHeaders(options);
+			response = (await (ai.run as unknown as RunOverload)(model.id, finalPayload, {
+				returnRawResponse: true,
+				...(options?.signal ? { signal: options.signal } : {}),
+				...(Object.keys(extraHeaders).length > 0 ? { extraHeaders } : {}),
+				...(gateway ? { gateway } : {}),
+			})) as Response;
+
+			await options?.onResponse?.(
+				{ status: response.status, headers: headersToRecord(response.headers) },
+				model,
+			);
+
+			// Response-level gateway correlation. This response's OWN header —
+			// never env.AI.aiGatewayLogId, which reflects the binding's most
+			// recent request and cross-attributes under concurrency.
+			const gatewayLogId = response.headers.get('cf-aig-log-id');
+			if (gatewayLogId) {
+				attachProviderResponseDiagnostics(output, { gatewayLogId });
+			}
+
+			await assertSuccessfulBindingResponse(response);
+
+			if (!response.body) {
+				throw new CloudflareAIBindingError({
+					message: 'Cloudflare AI binding returned empty response body.',
+				});
+			}
+
+			stream.push({ type: 'start', partial: output });
+
+			await processResponsesStream(
+				observeResponsesEvents(iterateSseChunks(response.body), observed) as Parameters<
+					typeof processResponsesStream
+				>[0],
+				output,
+				stream,
+				responsesModel,
+			);
+
+			if (options?.signal?.aborted) {
+				throw new Error('Request was aborted');
+			}
+			// `processResponsesStream` throws when the stream ends without a
+			// terminal `response.*` event, so a normal return has a real status.
+			if (output.stopReason === 'aborted' || output.stopReason === 'error') {
+				throw new Error(output.errorMessage ?? 'Provider returned an error stop reason');
+			}
+			// `pending` is the still-streaming stop reason: reaching it here means
+			// the stream ended cleanly without a terminal status, the same
+			// interruption the chat-completions path marks retryable.
+			if (output.stopReason === 'pending') {
+				throw new Error(`Stream ended without a terminal status ${RETRYABLE_INTERRUPTION_MARKER}`);
+			}
+
+			stream.push({ type: 'done', reason: output.stopReason, message: output });
+			stream.end();
+		} catch (error) {
+			// Cancel an unconsumed body so workerd doesn't keep the underlying AI
+			// request open (and the model generating) with no consumer.
+			if (response?.body && !response.body.locked) {
+				void response.body.cancel().catch(() => {});
+			}
+			// Match openai-responses: strip streaming scratch fields from
+			// in-flight blocks before they're exposed on the error event.
+			for (const block of output.content) {
+				delete (block as { index?: number }).index;
+				delete (block as { partialJson?: string }).partialJson;
+				delete (block as { customInput?: unknown }).customInput;
+			}
+			const aborted = options?.signal?.aborted || isAbortError(error);
+			output.stopReason = aborted ? 'aborted' : 'error';
+			const message = error instanceof Error ? error.message : JSON.stringify(error);
+			// A clean SSE end without a terminal `response.*` event is transit
+			// truncation (the Responses analogue of a missing finish_reason above)
+			// and safe to retry.
+			output.errorMessage =
+				!aborted && observed.endedCleanly && !observed.sawTerminalEvent
+					? `${message} ${RETRYABLE_INTERRUPTION_MARKER}`
+					: message;
+			stream.push({ type: 'error', reason: output.stopReason, error: output });
+			stream.end();
+		}
+	})();
+	return stream;
+}
+
+function toResponsesGatewayModel(model: Model<Api>): Model<'openai-responses'> {
+	return { ...model, api: 'openai-responses', baseUrl: '' };
+}
+
+function applyResponsesReasoning(
+	payload: Record<string, unknown>,
+	model: Model<'openai-responses'>,
+	level: SimpleStreamOptions['reasoning'] | undefined,
+): void {
+	if (!model.reasoning) return;
+	const clamped = level ? clampThinkingLevel(model, level) : undefined;
+	if (clamped && clamped !== 'off') {
+		const effort = model.thinkingLevelMap?.[clamped] ?? clamped;
+		payload.reasoning = { effort, summary: 'auto' };
+		// Encrypted reasoning items make `store: false` multi-turn replay
+		// stateless, mirroring pi's openai-responses request shape.
+		payload.include = ['reasoning.encrypted_content'];
+	} else if (model.thinkingLevelMap?.off !== null) {
+		payload.reasoning = { effort: model.thinkingLevelMap?.off ?? 'none' };
+	}
+}
+
+/**
+ * Pass-through that records whether the SSE stream reached a terminal
+ * `response.*` event and whether it ended cleanly, so the catch handler can
+ * tell transit truncation apart from provider-reported errors.
+ */
+async function* observeResponsesEvents(
+	events: AsyncIterable<unknown>,
+	observed: { sawTerminalEvent: boolean; endedCleanly: boolean },
+): AsyncIterable<unknown> {
+	for await (const event of events) {
+		const type = (event as { type?: unknown } | null)?.type;
+		if (
+			type === 'response.completed' ||
+			type === 'response.incomplete' ||
+			type === 'response.failed'
+		) {
+			observed.sawTerminalEvent = true;
+		}
+		yield event;
+	}
+	observed.endedCleanly = true;
+}
+
 // ─── Internal helpers ───────────────────────────────────────────────────────
 
 /** Narrowed `Ai.run` shape for the unknown-model overload. */
@@ -669,8 +888,70 @@ type RunOverload = (
 	},
 ) => Promise<Response | Record<string, unknown>>;
 
-function isAnthropicGatewayModel(model: Model<Api>): boolean {
-	return model.id.startsWith('anthropic/');
+type BindingWireFormat = 'anthropic-messages' | 'openai-completions' | 'openai-responses';
+
+/**
+ * The serialization a binding model speaks. Hydrated gateway models dispatch
+ * by their catalog `api`; ids no catalog knows fall back to their gateway
+ * vendor prefix. Everything else — `@cf/…` ids and unknown gateway vendors —
+ * speaks OpenAI-compatible chat completions. An api with no wire format here
+ * (possible if pi-ai's gateway catalog grows a new family) yields `undefined`
+ * so the caller can error instead of serializing the wrong shape.
+ */
+function bindingWireFormat(model: Model<Api>): BindingWireFormat | undefined {
+	if (model.api === 'anthropic-messages' || model.id.startsWith('anthropic/')) {
+		return 'anthropic-messages';
+	}
+	if (model.api === 'openai-responses' || model.id.startsWith('openai/')) {
+		return 'openai-responses';
+	}
+	if (model.api === 'openai-completions' || model.api === CLOUDFLARE_AI_BINDING_API) {
+		return 'openai-completions';
+	}
+	return undefined;
+}
+
+const warnedZeroMetadataGatewayModels = new Set<string>();
+
+/**
+ * A gateway-prefixed id that reached a gateway branch with the binding's own
+ * api marker resolved through the zero-metadata dynamic fallback: the wire
+ * format is right (it came from the vendor prefix), but pi-ai's catalog
+ * doesn't know the model, so image input degrades to text placeholders and
+ * cost/context-window data is absent. Text conversations behave correctly,
+ * which is exactly why the degradation deserves a log line — nothing else
+ * surfaces it. `@cf/…` ids stay silent: chat completions needs no catalog
+ * entry to serialize correctly.
+ */
+function warnZeroMetadataGatewayModel(model: Model<Api>): void {
+	if (model.api !== CLOUDFLARE_AI_BINDING_API) return;
+	if (warnedZeroMetadataGatewayModels.has(model.id)) return;
+	warnedZeroMetadataGatewayModels.add(model.id);
+	console.warn(
+		`[flue] Model "cloudflare/${model.id}" is not in pi-ai's AI Gateway catalog; ` +
+			`resolving with zero metadata. Image input is replaced with text placeholders, ` +
+			`and cost and context-window data are unavailable. ` +
+			`A newer @earendil-works/pi-ai release may include this model.`,
+	);
+}
+
+function unsupportedWireFormatStream(model: Model<Api>) {
+	const stream = createAssistantMessageEventStream();
+	const output: AssistantMessage = {
+		role: 'assistant',
+		content: [],
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		usage: emptyUsage(),
+		stopReason: 'error',
+		errorMessage:
+			`Cloudflare AI binding has no wire format for api "${model.api}" ` + `(model "${model.id}").`,
+		timestamp: Date.now(),
+	};
+	stream.push({ type: 'error', reason: 'error', error: output });
+	stream.end();
+	return stream;
 }
 
 function toAnthropicGatewayModel(model: Model<Api>): Model<'anthropic-messages'> {
@@ -849,8 +1130,10 @@ export interface CloudflareBindingProviderOptions {
 /**
  * The `cloudflare` provider: pi-ai models dispatched through the Workers AI
  * binding (`env.AI.run()`) instead of HTTP. Model metadata hydrates from
- * pi-ai's `cloudflare-workers-ai` catalog; IDs the catalog doesn't know
- * resolve with zero metadata, since the binding accepts arbitrary model IDs.
+ * pi-ai's `cloudflare-workers-ai` catalog (`@cf/…` ids) and its
+ * `cloudflare-ai-gateway` catalog (`anthropic/…` and `openai/…` ids); IDs
+ * neither catalog knows resolve with zero metadata, since the binding accepts
+ * arbitrary model IDs.
  *
  * The generated worker entry registers it when the `providers` config is
  * omitted or lists `'cloudflare'`; call `setProvider()` with this factory in
@@ -872,7 +1155,7 @@ export function cloudflareBindingProvider(options: CloudflareBindingProviderOpti
 		name: 'Cloudflare Workers AI',
 		// Keyless: the binding itself is the credential.
 		auth: { apiKey: { name: 'Cloudflare AI binding', resolve: async () => ({ auth: {} }) } },
-		models: bindingCatalogModels(),
+		models: [...bindingCatalogModels(), ...gatewayCatalogModels()],
 		api: streams,
 	});
 	return Object.assign(provider, {
@@ -894,4 +1177,32 @@ function bindingCatalogModels(): Model<Api>[] {
 			baseUrl: '',
 			compat: undefined,
 		}));
+}
+
+/**
+ * pi-ai's `cloudflare-ai-gateway` catalog re-tagged for the binding. A gateway
+ * catalog id is bare (`gpt-5.6-terra`) and names its vendor in the entry's
+ * gateway-URL path segment (`…/{CLOUDFLARE_GATEWAY_ID}/openai`); the binding
+ * addresses the same model as `openai/gpt-5.6-terra`. Models keep the
+ * catalog's `api`, capabilities, and cost data. `/compat` entries are skipped:
+ * they alias `@cf/…` ids the Workers AI catalog already declares.
+ */
+function gatewayCatalogModels(): Model<Api>[] {
+	return cloudflareAIGatewayProvider()
+		.getModels()
+		.flatMap((model) => {
+			const vendor = model.baseUrl.slice(model.baseUrl.lastIndexOf('/') + 1);
+			if (vendor.length === 0 || vendor === 'compat') return [];
+			return [
+				{
+					...model,
+					id: `${vendor}/${model.id}`,
+					provider: 'cloudflare',
+					baseUrl: '',
+					// The gateway branches own compat: `toAnthropicGatewayModel`
+					// replaces it, and the binding applies session affinity itself.
+					compat: undefined,
+				},
+			];
+		});
 }

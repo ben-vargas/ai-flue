@@ -7,6 +7,8 @@ import type {
 	SubmissionDurability,
 	SubmissionSettlementObligation,
 } from '../agent-execution-store.ts';
+import { DURABILITY_DEFAULT_TIMEOUT_MS } from '../agent-execution-store.ts';
+import { assertDurability } from '../agent-tuning.ts';
 import { decodeBase64 } from '../base64.ts';
 import type { FlueContextInternal } from '../client.ts';
 import type { ConversationRecordWriter } from '../conversation-writer.ts';
@@ -17,6 +19,7 @@ import {
 	FlueError,
 	InvalidRequestError,
 	SubmissionAbortedError,
+	SubmissionConflictError,
 	SubmissionInterruptedError,
 	SubmissionRetryExhaustedError,
 	SubmissionTimeoutError,
@@ -26,8 +29,10 @@ import { getInternalSession } from '../session.ts';
 import type { Agent, CallHandle, DeliveredMessage } from '../types.ts';
 import { type AttachmentStore, createAttachmentRef } from './attachment-store.ts';
 import type { DispatchInput } from './dispatch-queue.ts';
+import type { CoordinatorEventEmitter } from './events.ts';
 import {
 	createConversationIdentity,
+	deriveKeyedSubmissionId,
 	generateAttemptId,
 	generateInstanceUid,
 	generateSubmissionId,
@@ -134,9 +139,12 @@ export interface AgentSubmissionSession {
 
 interface AttachedAgentSubmissionReceipt {
 	readonly submissionId: string;
+	/** Admission-time stream offset; the origin `'-1'` on a deduplicated replay. */
 	readonly offset: string;
 	/** The instance uid: minted when this submission created, echoed when it continued. */
 	readonly uid: string;
+	/** Present when this admission converged on an existing keyed submission. */
+	readonly deduplicated?: true;
 }
 
 /** Options accompanying one attached (direct) submission admission. */
@@ -151,6 +159,12 @@ export interface AttachedAgentSubmissionOptions {
 	 * send unconditionally.
 	 */
 	readonly uid?: string | null;
+	/**
+	 * Caller-chosen delivery name: the submission id is derived from it, so a
+	 * retried send converges on the original submission instead of admitting
+	 * a duplicate.
+	 */
+	readonly idempotencyKey?: string;
 }
 
 export type AttachedAgentSubmissionAdmission = (
@@ -315,16 +329,21 @@ export function createDispatchAgentSubmissionInput(input: DispatchInput): AgentS
 	};
 }
 
-export function createDirectAgentSubmissionInput(options: {
+export async function createDirectAgentSubmissionInput(options: {
 	agent: string;
 	id: string;
 	message: DeliveredMessage;
 	initialData?: unknown;
 	traceCarrier?: FlueTraceCarrier;
-}): AgentSubmissionInput {
+	/** When present, the submission id is derived from it instead of minted. */
+	idempotencyKey?: string;
+}): Promise<AgentSubmissionInput> {
 	return {
 		kind: 'direct',
-		submissionId: generateSubmissionId(),
+		submissionId:
+			options.idempotencyKey !== undefined
+				? await deriveKeyedSubmissionId(options.agent, options.id, options.idempotencyKey)
+				: generateSubmissionId(),
 		agent: options.agent,
 		id: options.id,
 		message: options.message,
@@ -332,6 +351,81 @@ export function createDirectAgentSubmissionInput(options: {
 		acceptedAt: new Date().toISOString(),
 		...(options.traceCarrier ? { traceCarrier: options.traceCarrier } : {}),
 	};
+}
+
+// ─── Keyed-replay adoption (above the store) ─────────────────────────────────
+
+/**
+ * A gate rejection a keyed retry may adopt through: `admitInstanceContact`
+ * runs before store admission, so a retry whose ORIGINAL send already changed
+ * the world can fail its own condition — e.g. a create-only send
+ * (`uid: null`) whose first attempt created the instance throws
+ * {@link AgentInstanceExistsError} on redelivery. Validation errors are
+ * excluded: they reject identically on every attempt.
+ */
+export function isInstanceContactRejection(
+	error: unknown,
+): error is AgentInstanceExistsError | AgentInstanceNotFoundError {
+	return error instanceof AgentInstanceExistsError || error instanceof AgentInstanceNotFoundError;
+}
+
+/**
+ * Converge a keyed admission on the submission its key already names.
+ *
+ * The store's byte-exact payload compare is deliberately untouched (it stays
+ * the corruption tripwire for internal crash/retry replays); a caller retry
+ * re-stamps `acceptedAt`/`traceCarrier`, so it lands in the store's
+ * `conflict` branch even when it redelivers the same payload. This helper is
+ * the keyed-admission escape hatch both coordinators run above the store:
+ * compare SUBMISSION IDENTITY — `kind`, `agent`, `id`, deep-equal `message`
+ * (against the hydrated stored input; the store re-hydrates attachment
+ * bytes), deep-equal `initialData` — ignoring the server-stamped fields.
+ *
+ * Matching identity → return the stored row to adopt (the durable input, and
+ * therefore the executed message, remains the original's). Divergent →
+ * {@link SubmissionConflictError}: the key names a different delivery.
+ * No row → `undefined`; the caller falls back to its own failure (rethrowing
+ * a gate rejection, or treating a rowless store conflict as the conflict).
+ */
+export async function adoptKeyedSubmissionReplay(
+	submissions: AgentSubmissionStore,
+	input: AgentSubmissionInput,
+): Promise<AgentSubmission | undefined> {
+	const existing = await submissions.getSubmission(input.submissionId);
+	if (!existing) return undefined;
+	if (!sameSubmissionIdentity(input, existing.input)) {
+		throw new SubmissionConflictError({ submissionId: input.submissionId });
+	}
+	return existing;
+}
+
+function sameSubmissionIdentity(
+	incoming: AgentSubmissionInput,
+	stored: AgentSubmissionInput,
+): boolean {
+	return (
+		incoming.kind === stored.kind &&
+		incoming.agent === stored.agent &&
+		incoming.id === stored.id &&
+		deepEquals(incoming.message, stored.message) &&
+		deepEquals(incoming.initialData, stored.initialData)
+	);
+}
+
+/** Structural equality; explicitly-`undefined` properties count as absent. */
+function deepEquals(a: unknown, b: unknown): boolean {
+	if (a === b) return true;
+	if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
+	if (Array.isArray(a) || Array.isArray(b)) {
+		if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+		return a.every((value, index) => deepEquals(value, b[index]));
+	}
+	const left = a as Record<string, unknown>;
+	const right = b as Record<string, unknown>;
+	const leftKeys = Object.keys(left).filter((key) => left[key] !== undefined);
+	const rightKeys = Object.keys(right).filter((key) => right[key] !== undefined);
+	if (leftKeys.length !== rightKeys.length) return false;
+	return leftKeys.every((key) => deepEquals(left[key], right[key]));
 }
 
 /**
@@ -399,6 +493,7 @@ export async function reconcileInterruptedSubmission(
 	createContext: (submissionId: string) => FlueContextInternal,
 	lease?: { ownerId: string; leaseExpiresAt: number },
 	conversationWriter?: ConversationRecordWriter,
+	emitCoordinatorEvent?: CoordinatorEventEmitter,
 ): Promise<AgentSubmission | undefined> {
 	const { input } = submission;
 	const attempt = submissionAttemptRef(submission);
@@ -449,6 +544,7 @@ export async function reconcileInterruptedSubmission(
 			agent,
 			abortCtx,
 			conversationWriter,
+			emitCoordinatorEvent,
 		);
 		return undefined;
 	}
@@ -481,6 +577,7 @@ export async function reconcileInterruptedSubmission(
 						}),
 			createContext,
 			conversationWriter,
+			emitCoordinatorEvent,
 		);
 		return undefined;
 	}
@@ -496,6 +593,7 @@ export async function reconcileInterruptedSubmission(
 			() => new SubmissionTimeoutError(),
 			createContext,
 			conversationWriter,
+			emitCoordinatorEvent,
 		);
 		return undefined;
 	}
@@ -567,6 +665,86 @@ export async function reconcileInterruptedSubmission(
 	return undefined;
 }
 
+// ─── Unready-row terminalization ─────────────────────────────────────────────
+
+/**
+ * The wall-clock deadline after which a queued submission that never became
+ * claimable (materialization permanently failing, agent definition
+ * unavailable) is auto-failed by the coordinators' unready passes. Mirrors
+ * the durability budget philosophy for claimed work: the agent's
+ * `durability.timeoutMs` static when readable without a render (an invalid
+ * static falls back rather than stalling termination), else the store default
+ * (1h) — anchored at admission (`acceptedAt`), so it is computed entirely
+ * from existing columns.
+ */
+export function unreadySubmissionDeadline(
+	submission: AgentSubmission,
+	agent: Agent | undefined,
+): number {
+	let timeoutMs = DURABILITY_DEFAULT_TIMEOUT_MS;
+	if (agent) {
+		try {
+			assertDurability(agent.durability, `[agent "${submission.input.agent}"]`);
+			timeoutMs = agent.durability?.timeoutMs ?? DURABILITY_DEFAULT_TIMEOUT_MS;
+		} catch {
+			// An invalid durability static must not keep the row un-terminable;
+			// the store default applies (the static is validated loudly at claim
+			// time by the session's own resolution).
+		}
+	}
+	return submission.acceptedAt + timeoutMs;
+}
+
+/**
+ * Settle a queued submission that can never be claimed — a durable abort on
+ * an unready row, or materialization failing past
+ * {@link unreadySubmissionDeadline}. Settles through
+ * {@link AgentSubmissionStore.settleQueuedSubmission} (first terminal state
+ * wins; no attempt, no canonical settlement record) and publishes the live
+ * `submission_settled` — plus, for a failed outcome, the `terminated`
+ * `submission_recovery` — only when this call won the terminal transition, so
+ * recovery convergence (two coordinators re-running the unready pass) emits
+ * once per settlement. Returns whether this call settled the row.
+ */
+export async function settleUnclaimableSubmission(
+	submissions: AgentSubmissionStore,
+	submission: AgentSubmission,
+	outcome: 'failed' | 'aborted',
+	error: unknown,
+	emitCoordinatorEvent: CoordinatorEventEmitter,
+): Promise<boolean> {
+	const settled = await submissions.settleQueuedSubmission(
+		submission.submissionId,
+		outcome,
+		error,
+	);
+	if (!settled) return false;
+	const errorInfo = { errorInfo: classifyError(error) };
+	emitCoordinatorEvent(
+		{
+			type: 'submission_settled',
+			submissionId: submission.submissionId,
+			outcome,
+			error: serializeSubmissionError(error),
+		},
+		errorInfo,
+	);
+	if (outcome === 'failed') {
+		emitCoordinatorEvent(
+			{
+				type: 'submission_recovery',
+				submissionId: submission.submissionId,
+				kind: submission.kind,
+				operation: 'materialize_submission',
+				outcome: 'terminated',
+				error: serializeSubmissionError(error),
+			},
+			errorInfo,
+		);
+	}
+	return true;
+}
+
 /** Synthetic request for the submission's kind: an agent route for direct prompts, the dispatch path for dispatches. */
 export function submissionSyntheticRequest(input: AgentSubmissionInput): Request {
 	if (input.kind === 'direct') {
@@ -590,12 +768,12 @@ export interface ProcessSubmissionOptions {
 	/** Build a context for this submission. */
 	createContext: (submissionId: string) => FlueContextInternal;
 	conversationWriter?: ConversationRecordWriter;
-	onInteractionStart?: (interaction: {
-		agentName: string;
-		instanceId: string;
-		kind: AgentSubmission['kind'];
-		submissionId: string;
-	}) => void;
+	/**
+	 * Context-free coordinator emitter for `submission_recovery` signals from
+	 * the best-effort catches inside settlement (terminal record, abort
+	 * advisory) — failures that are swallowed so settlement can proceed.
+	 */
+	emitCoordinatorEvent?: CoordinatorEventEmitter;
 	/**
 	 * Optional abort signal. When aborted, the session finishes the current
 	 * turn and throws AbortError. Used by the Node coordinator for graceful
@@ -625,21 +803,22 @@ export async function processSubmission(opts: ProcessSubmissionOptions): Promise
 	};
 	const persisted = await submissions.getSubmission(submission.submissionId);
 	if (persisted?.status !== 'running' || persisted.attemptId !== attempt.attemptId) return;
-	if (submission.attemptCount === 1 && opts.onInteractionStart) {
-		try {
-			opts.onInteractionStart({
-				agentName: input.agent,
-				instanceId: input.id,
-				kind: submission.kind,
-				submissionId: submission.submissionId,
-			});
-		} catch (error) {
-			console.error('[flue:submission-processing] interaction start callback failed:', error);
-		}
-	}
 
 	const agent = opts.resolveAgent(input.agent);
 	const ctx = opts.createContext(input.submissionId);
+
+	// The claim edge on the live stream, emitted through the submission's real
+	// context so its correlation fields and eventIndex sequence align with the
+	// session events that follow. Every attempt re-emits it — recovery
+	// replacements carry the incremented attemptCount — so a fresh isolate's
+	// observers re-learn the busy set. Live-only: no conversation record.
+	ctx.emitEvent({
+		type: 'submission_running',
+		submissionId: submission.submissionId,
+		kind: submission.kind,
+		attemptCount: submission.attemptCount,
+		maxAttempts: submission.maxAttempts,
+	});
 
 	// Bound to this attempt: the store fences every join operation on the
 	// host still running under it, so a replaced attempt's session goes inert.
@@ -712,6 +891,7 @@ export async function processSubmission(opts: ProcessSubmissionOptions): Promise
 			agent,
 			ctx,
 			opts.conversationWriter,
+			opts.emitCoordinatorEvent,
 		);
 		return;
 	}
@@ -750,6 +930,7 @@ export async function processSubmission(opts: ProcessSubmissionOptions): Promise
 				agent,
 				ctx,
 				opts.conversationWriter,
+				opts.emitCoordinatorEvent,
 			);
 			return;
 		}
@@ -802,6 +983,7 @@ async function failInterruptedSubmission(
 	createError: (interruptedTools?: ReadonlyArray<InterruptedToolCallRef>) => Error,
 	createContext: (submissionId: string) => FlueContextInternal,
 	conversationWriter?: ConversationRecordWriter,
+	emitCoordinatorEvent?: CoordinatorEventEmitter,
 ): Promise<void> {
 	const { input } = submission;
 	const ctx = createContext(input.submissionId);
@@ -827,6 +1009,19 @@ async function failInterruptedSubmission(
 			'[flue:submission-reconciliation] Failed to record terminal message for submission',
 			submission.submissionId,
 			terminalError,
+		);
+		emitCoordinatorEvent?.(
+			{
+				type: 'submission_recovery',
+				submissionId: submission.submissionId,
+				kind: submission.kind,
+				operation: 'reconcile_submission',
+				outcome: 'terminated',
+				attemptCount: submission.attemptCount,
+				maxAttempts: submission.maxAttempts,
+				error: serializeSubmissionError(terminalError),
+			},
+			{ errorInfo: classifyError(terminalError) },
 		);
 	}
 	const error = createError(interruptedTools?.length ? interruptedTools : undefined);
@@ -860,6 +1055,7 @@ async function settleAbortedWithContext(
 	agent: Agent,
 	ctx: FlueContextInternal,
 	conversationWriter?: ConversationRecordWriter,
+	emitCoordinatorEvent?: CoordinatorEventEmitter,
 ): Promise<void> {
 	const error = new SubmissionAbortedError();
 	// Visible timeline advisory for both kinds.
@@ -877,6 +1073,19 @@ async function settleAbortedWithContext(
 			'[flue:submission-abort] Failed to record abort advisory for submission',
 			submission.submissionId,
 			advisoryError,
+		);
+		emitCoordinatorEvent?.(
+			{
+				type: 'submission_recovery',
+				submissionId: submission.submissionId,
+				kind: submission.kind,
+				operation: 'process_submission',
+				outcome: 'terminated',
+				attemptCount: submission.attemptCount,
+				maxAttempts: submission.maxAttempts,
+				error: serializeSubmissionError(advisoryError),
+			},
+			{ errorInfo: classifyError(advisoryError) },
 		);
 	}
 	await settleJoinedSubmissions(submissions, attempt, ctx, 'aborted', error, conversationWriter);
@@ -936,6 +1145,9 @@ async function settleSubmissionWithRecord(
 	error?: unknown,
 	conversationWriter?: ConversationRecordWriter,
 ): Promise<void> {
+	// Payload-wins decoration (see createFlueContext's createEvent) keeps this
+	// submissionId intact even when a joined delivery settles under the host's
+	// context.
 	const event = ctx.createEvent({
 		type: 'submission_settled',
 		submissionId: attempt.submissionId,
@@ -1042,11 +1254,17 @@ async function settleSubmissionWithRecord(
  * canonical record is the client-visible authority, and refusing would wedge
  * reconciliation). Here a mismatch fails loud: the caller leaves the row
  * pending and the next pass retries.
+ *
+ * `emitCoordinatorEvent` publishes the live `submission_settled` event for
+ * the recovered settlement — the process that reserved it died before its own
+ * publish, and this crash-window path has no submission context of its own.
+ * At-least-once: a finalize retried after a partial failure re-emits.
  */
 export async function finalizePendingSettlement(
 	submissions: AgentSubmissionStore,
 	writer: ConversationRecordWriter,
 	pending: SubmissionSettlementObligation,
+	emitCoordinatorEvent?: CoordinatorEventEmitter,
 ): Promise<void> {
 	const attempt = { submissionId: pending.submissionId, attemptId: pending.attemptId };
 	const canonical = await writer.getRecord(pending.recordId);
@@ -1056,10 +1274,26 @@ export async function finalizePendingSettlement(
 			'[flue] Pending settlement does not match its canonical record. Clear incompatible beta persistence.',
 		);
 	}
+	emitCoordinatorEvent?.({
+		type: 'submission_settled',
+		submissionId: pending.submissionId,
+		outcome: pending.record.outcome,
+		...(pending.record.outcome === 'completed' || pending.record.error === undefined
+			? {}
+			: { error: pending.record.error as ReturnType<typeof serializeSubmissionError> }),
+	});
 	await submissions.finalizeSubmissionSettlement(attempt, pending.recordId);
 }
 
-function serializeSubmissionError(error: unknown): {
+/**
+ * The durable-shaped, stackless error projection shared by the settlement
+ * record, the live `submission_settled` event, and `submission_recovery`
+ * payloads. Non-`FlueError` failures are replaced wholesale — internal
+ * messages never ride event or record error fields; the live observation's
+ * `errorInfo` detail carries the classified error (with throw-site stack)
+ * instead.
+ */
+export function serializeSubmissionError(error: unknown): {
 	name?: string;
 	message: string;
 	type?: string;
@@ -1080,7 +1314,9 @@ function serializeSubmissionError(error: unknown): {
 		name: 'Error',
 		message: 'The agent submission failed because of an internal error.',
 		type: 'internal_error',
-		details: 'The server encountered an unexpected error while processing the agent submission.',
+		details:
+			'The server encountered an unexpected error while processing the agent submission. ' +
+			'When reporting this failure, quote the settlement submissionId — server-side logs carry the same id.',
 	};
 }
 

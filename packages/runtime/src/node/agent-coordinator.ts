@@ -2,28 +2,42 @@ import { SUBMISSION_HARNESS_NAME, SUBMISSION_SESSION_NAME } from '../adapter-hel
 import type { AgentSubmission, AgentSubmissionStore } from '../agent-execution-store.ts';
 import { LEASE_DURATION_MS } from '../agent-execution-store.ts';
 import { ConversationRecordWriter } from '../conversation-writer.ts';
-import { RuntimeUnavailableError, SubmissionAbortedError } from '../errors.ts';
+import {
+	classifyError,
+	RuntimeUnavailableError,
+	SubmissionAbortedError,
+	SubmissionConflictError,
+} from '../errors.ts';
 import { createMcpConnectionCache, type McpConnectionCache } from '../mcp.ts';
 import {
 	type AgentSubmissionInput,
 	type AttachedAgentSubmissionAdmission,
 	admitInstanceContact,
+	adoptKeyedSubmissionReplay,
 	createDirectAgentSubmissionInput,
 	createDispatchAgentSubmissionInput,
 	ensureInstanceIdentity,
 	finalizePendingSettlement,
+	type InstanceContactAdmission,
 	type InstanceIdentity,
+	isInstanceContactRejection,
 	materializeSubmissionAttachments,
 	processSubmission,
 	reconcileInterruptedSubmission,
+	serializeSubmissionError,
+	settleUnclaimableSubmission,
 	submissionSyntheticRequest,
+	unreadySubmissionDeadline,
 } from '../runtime/agent-submissions.ts';
 import type { AttachmentStore } from '../runtime/attachment-store.ts';
 import type { ConversationStreamStore } from '../runtime/conversation-stream-store.ts';
-import type { AgentInteractionStart } from '../runtime/dev-lifecycle-logger.ts';
 import type { DispatchInput, DispatchQueue } from '../runtime/dispatch-queue.ts';
+import {
+	type CoordinatorEventEmitter,
+	createCoordinatorEventEmitter,
+} from '../runtime/events.ts';
 import type { CreateAgentContextFn } from '../runtime/handle-agent.ts';
-import { generateAttemptId, generateOwnerId } from '../runtime/ids.ts';
+import { generateAttemptId, generateOwnerId, isKeyDerivedSubmissionId } from '../runtime/ids.ts';
 import type { RuntimeActivityGate } from '../runtime/runtime-activity-gate.ts';
 import { agentStreamPath } from '../runtime/stream-offsets.ts';
 import { createSessionStorageKey } from '../session-identity.ts';
@@ -35,12 +49,19 @@ export interface NodeAgentCoordinator {
 	/**
 	 * Admit a dispatch. The submission is persisted durably; processing is
 	 * asynchronous. `uid` is the contacted instance's uid (recorded at birth
-	 * for a creating send, read back for the receipt).
+	 * for a creating send, read back for the receipt). `deduplicated` is set
+	 * when a keyed admission converged on the submission its key already
+	 * names instead of admitting a new one.
 	 */
 	admitDispatch(
 		input: DispatchInput,
 	): Promise<
-		| { readonly kind: 'submission'; readonly submission: AgentSubmission; readonly uid: string }
+		| {
+				readonly kind: 'submission';
+				readonly submission: AgentSubmission;
+				readonly uid: string;
+				readonly deduplicated?: true;
+		  }
 		| { readonly kind: 'conflict' }
 	>;
 	/**
@@ -91,14 +112,15 @@ export function createNodeDispatchQueue(coordinator: NodeAgentCoordinator): Disp
 			// the original stored submission and a conflicting replay throws.
 			const admission = await coordinator.admitDispatch(input);
 			if (admission.kind === 'conflict') {
-				throw new Error(
-					`[flue] dispatch() target agent "${input.agent}" rejected a conflicting dispatch replay.`,
-				);
+				throw new SubmissionConflictError({ submissionId: input.submissionId });
 			}
 			return {
 				submissionId: admission.submission.submissionId,
-				acceptedAt: input.acceptedAt,
+				// The stored row's timestamp, so a deduplicated replay echoes the
+				// ORIGINAL admission's receipt (identical on a fresh admission).
+				acceptedAt: admission.submission.input.acceptedAt,
 				uid: admission.uid,
+				...(admission.deduplicated ? { deduplicated: true as const } : {}),
 			};
 		},
 	};
@@ -110,7 +132,8 @@ export function createNodeAgentCoordinator(options: {
 	createContext: CreateAgentContextFn;
 	conversationStreamStore?: ConversationStreamStore;
 	attachmentStore?: AttachmentStore;
-	onInteractionStart?: (interaction: AgentInteractionStart) => void;
+	/** Runtime environment stamped on coordinator-emitted events' contexts. */
+	env?: Record<string, unknown>;
 	activityGate?: RuntimeActivityGate;
 }): NodeAgentCoordinator {
 	const {
@@ -119,15 +142,42 @@ export function createNodeAgentCoordinator(options: {
 		createContext,
 		conversationStreamStore,
 		attachmentStore,
-		onInteractionStart,
 		activityGate,
 	} = options;
+	const coordinatorEnv = options.env ?? {};
 	const conversationWriters = new Map<string, Promise<ConversationRecordWriter>>();
 	const conversationMaterializations = new Map<string, Promise<unknown>>();
 	// Live MCP connections, keyed per instance stream path like the writers
 	// above: submissions reuse an instance's connections for the process
 	// lifetime, and shutdown closes them all.
 	const mcpConnectionCaches = new Map<string, McpConnectionCache>();
+
+	// ── Coordinator event emitters ───────────────────────────────────────
+	// Context-free live emitters for coordinator signals (`submission_queued`,
+	// `submission_recovery`, recovered settlements): one per instance the
+	// coordinator touches (the Node coordinator is process-wide), plus a
+	// scope-less one for pass-wide failures with no submission in hand.
+	// Independent of context/writer creation — among the failures reported —
+	// and infallible by contract.
+	const passEventEmitter = createCoordinatorEventEmitter({ env: coordinatorEnv });
+	const instanceEventEmitters = new Map<string, CoordinatorEventEmitter>();
+	function coordinatorEventEmitter(input?: {
+		agent: string;
+		id: string;
+	}): CoordinatorEventEmitter {
+		if (!input) return passEventEmitter;
+		const key = agentStreamPath(input.agent, input.id);
+		let emitter = instanceEventEmitters.get(key);
+		if (!emitter) {
+			emitter = createCoordinatorEventEmitter({
+				agentName: input.agent,
+				instanceId: input.id,
+				env: coordinatorEnv,
+			});
+			instanceEventEmitters.set(key, emitter);
+		}
+		return emitter;
+	}
 
 	// ── Lease ownership ──────────────────────────────────────────────────
 
@@ -301,6 +351,7 @@ export function createNodeAgentCoordinator(options: {
 	 */
 	function spawnSubmissionTask(claimed: AgentSubmission): void {
 		const controller = new AbortController();
+		const emitCoordinatorEvent = coordinatorEventEmitter(claimed.input);
 		const task = (async () => {
 			const conversationWriter = await getConversationWriter(claimed.input);
 			return processSubmission({
@@ -309,7 +360,7 @@ export function createNodeAgentCoordinator(options: {
 				resolveAgent,
 				createContext: makeSubmissionContext(claimed.input, conversationWriter),
 				conversationWriter,
-				onInteractionStart,
+				emitCoordinatorEvent,
 				signal: controller.signal,
 				isShutdownAbort: (error) =>
 					stopping && error instanceof DOMException && error.name === 'AbortError',
@@ -326,6 +377,21 @@ export function createNodeAgentCoordinator(options: {
 						outcome: 'failed',
 					},
 					error,
+				);
+				// Usually post-settlement (processSubmission settles failed
+				// durably and emits the live submission_settled before
+				// rethrowing); when the failure struck settlement itself the row
+				// is still unsettled and reconciliation owns it.
+				emitCoordinatorEvent(
+					{
+						type: 'submission_recovery',
+						submissionId: claimed.submissionId,
+						kind: claimed.kind,
+						operation: 'process_submission',
+						outcome: 'deferred',
+						error: serializeSubmissionError(error),
+					},
+					{ errorInfo: classifyError(error) },
 				);
 			})
 			.finally(() => {
@@ -405,6 +471,15 @@ export function createNodeAgentCoordinator(options: {
 				// shutdown, skip the backoff — the loop is about to exit and
 				// `shutdown()` is awaiting it.
 				console.error('[flue:claim-loop] Error in claim pass, retrying:', error);
+				passEventEmitter(
+					{
+						type: 'submission_recovery',
+						operation: 'reconcile_pass',
+						outcome: 'deferred',
+						error: serializeSubmissionError(error),
+					},
+					{ errorInfo: classifyError(error) },
+				);
 				if (!stopping) {
 					await new Promise<void>((r) => {
 						const timer = setTimeout(r, 1000);
@@ -441,6 +516,15 @@ export function createNodeAgentCoordinator(options: {
 		// Unexpected errors in the loop itself are fatal and logged.
 		claimLoopDone = claimLoop().catch((error) => {
 			console.error('[flue:claim-loop] Fatal error in claim loop:', error);
+			passEventEmitter(
+				{
+					type: 'submission_recovery',
+					operation: 'reconcile_pass',
+					outcome: 'deferred',
+					error: serializeSubmissionError(error),
+				},
+				{ errorInfo: classifyError(error) },
+			);
 			loopRunning = false;
 		});
 		// Start lease heartbeat: periodically renew leases for all active
@@ -452,6 +536,15 @@ export function createNodeAgentCoordinator(options: {
 				if (ids.length === 0) return;
 				submissions.renewLeases(ownerId, ids).catch((error) => {
 					console.error('[flue:lease-heartbeat] Failed to renew leases:', error);
+					passEventEmitter(
+						{
+							type: 'submission_recovery',
+							operation: 'process_submission',
+							outcome: 'deferred',
+							error: serializeSubmissionError(error),
+						},
+						{ errorInfo: classifyError(error) },
+					);
 				});
 			}, HEARTBEAT_INTERVAL_MS);
 			// Don't let the heartbeat prevent process exit.
@@ -512,12 +605,75 @@ export function createNodeAgentCoordinator(options: {
 		return reconcilePassInFlight;
 	}
 
+	/**
+	 * Auto-fail a queued row whose materialization can never succeed, past its
+	 * admission-anchored durability bound (see `unreadySubmissionDeadline`).
+	 * Returns whether this coordinator won the terminal transition — a `false`
+	 * (another coordinator settled first, or a racing pass made the row
+	 * runnable) falls back to the deferral logging so nothing is silently
+	 * dropped.
+	 */
+	async function terminalizeUnreadySubmission(
+		submission: AgentSubmission,
+		error: unknown,
+	): Promise<boolean> {
+		const settled = await settleUnclaimableSubmission(
+			submissions,
+			submission,
+			'failed',
+			error,
+			coordinatorEventEmitter(submission.input),
+		);
+		if (!settled) return false;
+		console.error(
+			'[flue:submission-reconciliation]',
+			{
+				submissionId: submission.submissionId,
+				operation: 'materialize_submission',
+				outcome: 'terminated',
+			},
+			error,
+		);
+		return true;
+	}
+
 	async function reconcileUnreadySubmissions(): Promise<void> {
 		for (const submission of await submissions.listUnreadySubmissions()) {
+			// A durable abort on an unready row settles here: the row is never
+			// claimable, so the attempt-based abort settle can never run — this is
+			// the guaranteed escape hatch for every stuck-unready class.
+			if (submission.abortRequestedAt !== undefined) {
+				await settleUnclaimableSubmission(
+					submissions,
+					submission,
+					'aborted',
+					new SubmissionAbortedError(),
+					coordinatorEventEmitter(submission.input),
+				);
+				continue;
+			}
 			const agent = agents.find((record) => record.name === submission.input.agent)?.agent;
 			if (!agent) {
+				if (
+					Date.now() >= unreadySubmissionDeadline(submission, undefined) &&
+					(await terminalizeUnreadySubmission(
+						submission,
+						new Error(
+							`[flue] Submission target agent "${submission.input.agent}" has no registered definition, so the submission could never start.`,
+						),
+					))
+				) {
+					continue;
+				}
 				console.error('[flue:submission-reconciliation]', {
 					submissionId: submission.submissionId,
+					operation: 'materialize_submission',
+					outcome: 'agent_unavailable',
+				});
+				coordinatorEventEmitter(submission.input)({
+					type: 'submission_recovery',
+					submissionId: submission.submissionId,
+					kind: submission.kind,
 					operation: 'materialize_submission',
 					outcome: 'agent_unavailable',
 				});
@@ -527,6 +683,12 @@ export function createNodeAgentCoordinator(options: {
 				await materializeSubmissionConversation(submission.input, agent);
 				await submissions.markSubmissionCanonicalReady(submission.submissionId);
 			} catch (error) {
+				if (
+					Date.now() >= unreadySubmissionDeadline(submission, agent) &&
+					(await terminalizeUnreadySubmission(submission, error))
+				) {
+					continue;
+				}
 				console.error(
 					'[flue:submission-reconciliation]',
 					{
@@ -535,6 +697,17 @@ export function createNodeAgentCoordinator(options: {
 						outcome: 'failed',
 					},
 					error,
+				);
+				coordinatorEventEmitter(submission.input)(
+					{
+						type: 'submission_recovery',
+						submissionId: submission.submissionId,
+						kind: submission.kind,
+						operation: 'materialize_submission',
+						outcome: 'deferred',
+						error: serializeSubmissionError(error),
+					},
+					{ errorInfo: classifyError(error) },
 				);
 			}
 		}
@@ -558,7 +731,12 @@ export function createNodeAgentCoordinator(options: {
 				}
 				const writer = await getConversationWriter(submission.input);
 				if (!writer) continue;
-				await finalizePendingSettlement(submissions, writer, settlement);
+				await finalizePendingSettlement(
+					submissions,
+					writer,
+					settlement,
+					coordinatorEventEmitter(submission.input),
+				);
 			} catch (error) {
 				console.error(
 					'[flue:submission-reconciliation]',
@@ -568,6 +746,16 @@ export function createNodeAgentCoordinator(options: {
 						outcome: 'failed',
 					},
 					error,
+				);
+				passEventEmitter(
+					{
+						type: 'submission_recovery',
+						submissionId: settlement.submissionId,
+						operation: 'finalize_settlement',
+						outcome: 'deferred',
+						error: serializeSubmissionError(error),
+					},
+					{ errorInfo: classifyError(error) },
 				);
 			}
 		}
@@ -589,6 +777,15 @@ export function createNodeAgentCoordinator(options: {
 					operation: 'reconcile_submission',
 					outcome: 'agent_unavailable',
 				});
+				coordinatorEventEmitter(submission.input)({
+					type: 'submission_recovery',
+					submissionId: submission.submissionId,
+					kind: submission.kind,
+					operation: 'reconcile_submission',
+					outcome: 'agent_unavailable',
+					attemptCount: submission.attemptCount,
+					maxAttempts: submission.maxAttempts,
+				});
 				continue;
 			}
 			try {
@@ -600,6 +797,7 @@ export function createNodeAgentCoordinator(options: {
 					makeSubmissionContext(submission.input, conversationWriter),
 					{ ownerId, leaseExpiresAt: Date.now() + LEASE_DURATION_MS },
 					conversationWriter,
+					coordinatorEventEmitter(submission.input),
 				);
 				if (replacement) {
 					spawnSubmissionTask(replacement);
@@ -613,6 +811,19 @@ export function createNodeAgentCoordinator(options: {
 						outcome: 'failed',
 					},
 					error,
+				);
+				coordinatorEventEmitter(submission.input)(
+					{
+						type: 'submission_recovery',
+						submissionId: submission.submissionId,
+						kind: submission.kind,
+						operation: 'reconcile_submission',
+						outcome: 'deferred',
+						attemptCount: submission.attemptCount,
+						maxAttempts: submission.maxAttempts,
+						error: serializeSubmissionError(error),
+					},
+					{ errorInfo: classifyError(error) },
 				);
 			}
 		}
@@ -650,19 +861,59 @@ export function createNodeAgentCoordinator(options: {
 					throw new Error(`[flue] dispatch target agent "${input.agent}" has no agent definition.`);
 				}
 
+				const submissionInput = createDispatchAgentSubmissionInput(input);
+				const keyed = isKeyDerivedSubmissionId(input.submissionId);
 				const loadReducedState = async () => {
-					const writer = await getConversationWriter(createDispatchAgentSubmissionInput(input));
+					const writer = await getConversationWriter(submissionInput);
 					return writer?.loadReducedState();
 				};
-				const contact = await admitInstanceContact({
-					agent,
-					id: input.id,
-					initialData: input.initialData,
-					uid: input.uid,
-					loadReducedState,
+				let contact: InstanceContactAdmission;
+				try {
+					contact = await admitInstanceContact({
+						agent,
+						id: input.id,
+						initialData: input.initialData,
+						uid: input.uid,
+						loadReducedState,
+					});
+				} catch (error) {
+					// Keyed retries can trip their own send condition (a create-only
+					// send whose first attempt created the instance): adopt the
+					// submission the key already names — the condition was consumed
+					// by the original admission — and echo the recorded uid. A fresh
+					// keyed send (no matching row) keeps today's exact semantics.
+					if (keyed && isInstanceContactRejection(error)) {
+						const adopted = await adoptKeyedSubmissionReplay(submissions, submissionInput);
+						const uid = adopted ? (await loadReducedState())?.uid : undefined;
+						if (adopted && uid !== undefined) {
+							ensureClaimLoop();
+							wake();
+							return { kind: 'submission', submission: adopted, uid, deduplicated: true };
+						}
+					}
+					throw error;
+				}
+				let admission = await submissions.admitDispatch(input);
+				let deduplicated = false;
+				if (admission.kind !== 'submission') {
+					// The store's byte-exact compare rejects a caller retry (it
+					// re-stamps acceptedAt); a keyed conflict converges on identity
+					// instead. Unkeyed conflicts keep today's meaning: an internal
+					// invariant violation the caller surfaces loudly.
+					if (!keyed) return admission;
+					const adopted = await adoptKeyedSubmissionReplay(submissions, submissionInput);
+					if (!adopted) throw new SubmissionConflictError({ submissionId: input.submissionId });
+					admission = { kind: 'submission', submission: adopted };
+					deduplicated = true;
+				}
+				// Live queue signal, emitted immediately after durable admission.
+				// At-least-once: admission cannot distinguish an idempotent
+				// replay, so replays (keyed dedup included) re-emit.
+				coordinatorEventEmitter(input)({
+					type: 'submission_queued',
+					submissionId: admission.submission.submissionId,
+					kind: 'dispatch',
 				});
-				const admission = await submissions.admitDispatch(input);
-				if (admission.kind !== 'submission') return admission;
 				// The durable row exists from here on: the wake must fire even if
 				// materialization/readiness/uid below throws, or the queued row
 				// would strand with nothing to ever claim it.
@@ -670,10 +921,7 @@ export function createNodeAgentCoordinator(options: {
 					let submission = admission.submission;
 					let identity: InstanceIdentity | undefined;
 					if (submission.canonicalReadyAt === null) {
-						identity = await materializeSubmissionConversation(
-							createDispatchAgentSubmissionInput(input),
-							agent,
-						);
+						identity = await materializeSubmissionConversation(submissionInput, agent);
 						// Tolerate a null return (a concurrent readiness pass may have
 						// advanced this row already): keep the admitted submission rather
 						// than treat null as a lost submission.
@@ -682,15 +930,24 @@ export function createNodeAgentCoordinator(options: {
 							submission;
 					}
 					// The uid rides every receipt: echoed for a continuing send, minted
-					// by materialization's identity ensure for a creating one.
-					const uid = contact.uid ?? identity?.uid;
+					// by materialization's identity ensure for a creating one. An
+					// adopted replay may hold neither (its gate ran before the winning
+					// admission materialized) — the birth record is durable by then,
+					// so read the recorded identity back.
+					let uid = contact.uid ?? identity?.uid;
+					if (uid === undefined && deduplicated) uid = (await loadReducedState())?.uid;
 					if (uid === undefined) {
 						throw new Error(
 							"[flue] invariant: a materialized instance's birth record must carry a uid.",
 						);
 					}
 
-					return { kind: 'submission', submission, uid };
+					return {
+						kind: 'submission',
+						submission,
+						uid,
+						...(deduplicated ? { deduplicated: true as const } : {}),
+					};
 				} finally {
 					ensureClaimLoop();
 					wake();
@@ -729,6 +986,15 @@ export function createNodeAgentCoordinator(options: {
 			if (hasInactive) {
 				void reconcileRunningSubmissions().catch((error) => {
 					console.error('[flue:submission-abort] reconcile after abort failed:', error);
+					passEventEmitter(
+						{
+							type: 'submission_recovery',
+							operation: 'reconcile_pass',
+							outcome: 'deferred',
+							error: serializeSubmissionError(error),
+						},
+						{ errorInfo: classifyError(error) },
+					);
 				});
 			}
 			return true;
@@ -736,7 +1002,7 @@ export function createNodeAgentCoordinator(options: {
 
 		createAdmission(agentName: string, instanceId: string): AttachedAgentSubmissionAdmission {
 			return async (message: DeliveredMessage, options = {}) => {
-				const { traceCarrier, initialData, uid } = options;
+				const { traceCarrier, initialData, uid, idempotencyKey } = options;
 				if (stopping) throw new RuntimeUnavailableError({ state: 'draining' });
 				// Same admission-scoped lease as admitDispatch: released when the
 				// admission call returns, not when the submission settles.
@@ -749,25 +1015,76 @@ export function createNodeAgentCoordinator(options: {
 						);
 					}
 
-					const input = createDirectAgentSubmissionInput({
+					const input = await createDirectAgentSubmissionInput({
 						agent: agentName,
 						id: instanceId,
 						message,
 						initialData,
 						traceCarrier,
+						...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
 					});
+					const keyed = idempotencyKey !== undefined;
 					const loadReducedState = async () => {
 						const writer = await getConversationWriter(input);
 						return writer?.loadReducedState();
 					};
-					const contact = await admitInstanceContact({
-						agent,
-						id: instanceId,
-						initialData,
-						uid,
-						loadReducedState,
+					// A deduplicated replay re-attaches from the stream origin: the
+					// original admission-time offset is not persisted, and settlement
+					// records are observable from the origin indefinitely.
+					const adoptedReceipt = async (submissionId: string) => {
+						const reducedUid = (await loadReducedState())?.uid;
+						if (reducedUid === undefined) return undefined;
+						ensureClaimLoop();
+						wake();
+						return {
+							submissionId,
+							offset: '-1',
+							uid: reducedUid,
+							deduplicated: true as const,
+						};
+					};
+					let contact: InstanceContactAdmission;
+					try {
+						contact = await admitInstanceContact({
+							agent,
+							id: instanceId,
+							initialData,
+							uid,
+							loadReducedState,
+						});
+					} catch (error) {
+						// Keyed retries can trip their own send condition (see the
+						// dispatch path): adopt the submission the key already names.
+						if (keyed && isInstanceContactRejection(error)) {
+							const adopted = await adoptKeyedSubmissionReplay(submissions, input);
+							const receipt = adopted && (await adoptedReceipt(adopted.submissionId));
+							if (receipt) return receipt;
+						}
+						throw error;
+					}
+					let admitted: AgentSubmission;
+					let deduplicated = false;
+					try {
+						admitted = await submissions.admitDirect(input);
+					} catch (error) {
+						// The store rejects a caller retry byte-exactly (it re-stamps
+						// acceptedAt/traceCarrier); a keyed admission converges on
+						// identity above the store instead. Adoption only ever
+						// swallows the failure when a matching-identity row exists.
+						if (!keyed) throw error;
+						const adopted = await adoptKeyedSubmissionReplay(submissions, input);
+						if (!adopted) throw error;
+						admitted = adopted;
+						deduplicated = true;
+					}
+					// Live queue signal, emitted immediately after durable
+					// admission. At-least-once: admission cannot distinguish an
+					// idempotent replay, so replays (keyed dedup included) re-emit.
+					coordinatorEventEmitter(input)({
+						type: 'submission_queued',
+						submissionId: admitted.submissionId,
+						kind: 'direct',
 					});
-					const admitted = await submissions.admitDirect(input);
 					// The durable row exists from here on: the wake must fire even if
 					// materialization/readiness/uid below throws, or the queued row
 					// would strand with nothing to ever claim it.
@@ -782,8 +1099,14 @@ export function createNodeAgentCoordinator(options: {
 							await submissions.markSubmissionCanonicalReady(input.submissionId);
 						}
 						const writer = await getConversationWriter(input);
-						const offset = writer?.offset ?? '-1';
-						const instanceUid = contact.uid ?? identity?.uid;
+						const offset = deduplicated ? '-1' : (writer?.offset ?? '-1');
+						// An adopted replay may hold neither the contact uid nor a fresh
+						// identity (its gate ran before the winning admission
+						// materialized) — read the recorded identity back instead.
+						let instanceUid = contact.uid ?? identity?.uid;
+						if (instanceUid === undefined && deduplicated) {
+							instanceUid = (await loadReducedState())?.uid;
+						}
 						if (instanceUid === undefined) {
 							throw new Error(
 								"[flue] invariant: a materialized instance's birth record must carry a uid.",
@@ -793,6 +1116,7 @@ export function createNodeAgentCoordinator(options: {
 							submissionId: input.submissionId,
 							offset,
 							uid: instanceUid,
+							...(deduplicated ? { deduplicated: true as const } : {}),
 						};
 					} finally {
 						ensureClaimLoop();
@@ -885,6 +1209,14 @@ export function createNodeAgentCoordinator(options: {
 					`[flue:shutdown] ${abandoned.length} submission(s) did not settle within ${timeoutMs}ms and will be reclaimed on next startup:`,
 					abandoned,
 				);
+				for (const submissionId of abandoned) {
+					passEventEmitter({
+						type: 'submission_recovery',
+						submissionId,
+						operation: 'process_submission',
+						outcome: 'deferred',
+					});
+				}
 			}
 
 			// Close cached MCP connections last: settled submissions no longer

@@ -291,7 +291,7 @@ export function retrieveCallback(ref: SalesforceMarketingCloudEmailRef) {
     name: 'retrieve_salesforce_marketing_cloud_callback',
     description: 'Retrieve the Marketing Cloud ENS callback bound to this agent.',
     async run() {
-      return (await client.getCallback(callbackId)) as unknown as JsonValue;
+      return { output: (await client.getCallback(callbackId)) as unknown as JsonValue };
     },
   });
 }

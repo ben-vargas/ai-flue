@@ -119,7 +119,7 @@ export function postMessage(ref: TelegramConversationRef) {
 					? {}
 					: { direct_messages_topic_id: ref.directMessagesTopicId }),
 			});
-			return { messageId: message.message_id };
+			return { output: { messageId: message.message_id } };
 		},
 	});
 }

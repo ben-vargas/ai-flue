@@ -1,3 +1,4 @@
+import { seedReducedConversationState } from './conversation-fold-checkpoint.ts';
 import {
 	createReducedInstanceState,
 	type ReducedInstanceState,
@@ -6,16 +7,16 @@ import {
 import type { ConversationStreamStore } from './runtime/conversation-stream-store.ts';
 
 // Both loaders fold in place: they build a state nothing else references yet
-// and discard it wholesale when a record throws, so the per-batch
-// failure-atomicity clone the incremental writer needs would cost
-// O(batches x state size) here for nothing.
+// (fresh or freshly decoded from a checkpoint) and discard it wholesale when
+// a record throws, so the per-batch failure-atomicity clone the incremental
+// writer needs would cost O(batches x state size) here for nothing.
 
 export async function loadReducedConversationState(options: {
 	store: ConversationStreamStore;
 	path: string;
 }): Promise<ReducedInstanceState> {
-	const state = createReducedInstanceState();
-	let offset = '-1';
+	const state = await seedReducedConversationState(options.store, options.path);
+	let offset = state.recordsThroughOffset;
 	while (true) {
 		const read = await options.store.read(options.path, { offset, limit: 1000 });
 		for (const batch of read.batches) {
@@ -31,9 +32,13 @@ export async function loadReducedConversationPrefix(options: {
 	path: string;
 	offset: string;
 }): Promise<ReducedInstanceState> {
-	const state = createReducedInstanceState();
-	if (options.offset === '-1') return state;
-	let offset = '-1';
+	if (options.offset === '-1') return createReducedInstanceState();
+	// Offsets compare as strings: a checkpoint offset is a batch offset the
+	// same store minted, so an exact hit is exact string equality — the same
+	// comparison the fold loop below uses for the boundary.
+	const state = await seedReducedConversationState(options.store, options.path, options.offset);
+	if (state.recordsThroughOffset === options.offset) return state;
+	let offset = state.recordsThroughOffset;
 	while (true) {
 		const read = await options.store.read(options.path, { offset, limit: 1000 });
 		for (const batch of read.batches) {

@@ -171,7 +171,7 @@ export function retrieveConversation(ref: IntercomConversationRef) {
         conversation_id: ref.conversationId,
         display_as: 'plaintext',
       });
-      return conversation;
+      return { output: conversation };
     },
   });
 }

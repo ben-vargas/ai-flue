@@ -196,7 +196,7 @@ export function PrRedirect() {
 			await removeLabelIfPresent(prNumber, TRIAGE_LABEL);
 
 			log.info('pr-redirect: done', { prNumber, action: decision.action, destinationUrl });
-			return { action: decision.action, destinationUrl, prNumber };
+			return { output: { action: decision.action, destinationUrl, prNumber } };
 		},
 	});
 

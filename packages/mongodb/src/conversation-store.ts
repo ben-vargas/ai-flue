@@ -1,4 +1,5 @@
 import type {
+	ConversationFoldCheckpoint,
 	ConversationRecord,
 	ConversationStreamIdentity,
 	ConversationStreamMeta,
@@ -202,11 +203,54 @@ export class MongoConversationStreamStore implements ConversationStreamStore {
 		return this.listeners.subscribe(path, listener);
 	}
 
+	async putFoldCheckpoint(path: string, checkpoint: ConversationFoldCheckpoint): Promise<void> {
+		// One replacing upsert is atomic per document. A checkpoint past the
+		// 16MB document cap fails the write — the runtime treats checkpoint
+		// writes as best-effort (warn once, keep appending), which is the
+		// correct degradation for a cache.
+		await this.foldCheckpoints().updateOne(
+			{ _id: path },
+			{
+				$set: {
+					headOffset: checkpoint.offset,
+					incarnation: checkpoint.incarnation,
+					formatVersion: checkpoint.formatVersion,
+					data: checkpoint.data,
+				},
+			},
+			{ upsert: true },
+		);
+	}
+
+	async getFoldCheckpoint(
+		path: string,
+		options?: { atOrBefore?: string },
+	): Promise<ConversationFoldCheckpoint | null> {
+		const row = await this.foldCheckpoints().findOne({ _id: path });
+		if (!row) return null;
+		const offset = String(row.headOffset);
+		if (
+			options?.atOrBefore !== undefined &&
+			parseOffset(offset) > parseOffset(options.atOrBefore)
+		) {
+			return null;
+		}
+		return {
+			offset,
+			incarnation: String(row.incarnation),
+			formatVersion: Number(row.formatVersion),
+			data: String(row.data),
+		};
+	}
+
 	private streams() {
 		return this.runner.collection(collectionName(this.prefix, 'conversation_streams'));
 	}
 	private batches() {
 		return this.runner.collection(collectionName(this.prefix, 'conversation_batches'));
+	}
+	private foldCheckpoints() {
+		return this.runner.collection(collectionName(this.prefix, 'conversation_fold_checkpoints'));
 	}
 }
 

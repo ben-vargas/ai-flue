@@ -1,7 +1,7 @@
 ---
 title: Errors
 description: The Flue Agent SDK error classes, the HTTP error envelope, and how to discriminate failures.
-lastReviewedAt: 2026-07-21
+lastReviewedAt: 2026-07-30
 ---
 
 The Flue Agent SDK (`@flue/sdk`) exports two error classes of its own — `FlueApiError` (a failed HTTP request) and `FlueExecutionError` (an admitted submission that settled failed or aborted) — plus four re-exported stream error classes owned by `@durable-streams/client`. The wire shapes those errors carry (the HTTP error envelope and the serialized settlement error) are documented on this page.
@@ -33,18 +33,20 @@ try {
 class FlueApiError extends Error {
   readonly status: number;
   readonly body: unknown;
-  constructor(status: number, body: unknown);
+  readonly ref: string | undefined;
+  constructor(status: number, body: unknown, headerRef?: string);
 }
 ```
 
 Rejection value of every SDK JSON request that returns a non-2xx response: [`send()`, `abort()`, and `history()`](/docs/sdk/flue-client/). The SDK performs exactly one fetch per JSON request — no retries — so a `FlueApiError` reflects a single server response.
 
-| Field    | Description                                                                                                                                                                                                                                                             |
-| -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `status` | The HTTP response status.                                                                                                                                                                                                                                               |
-| `body`   | The parsed JSON response body when it parses; the raw response text when it does not; the empty string when the response had no body. Deliberately `unknown`: proxies and gateways in front of a deployment can return arbitrary bodies, so the SDK does not normalize. |
+| Field    | Description                                                                                                                                                                                                                                                                                                                                                                                                    |
+| -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `status` | The HTTP response status.                                                                                                                                                                                                                                                                                                                                                                                      |
+| `body`   | The parsed JSON response body when it parses; the raw response text when it does not; the empty string when the response had no body. Deliberately `unknown`: proxies and gateways in front of a deployment can return arbitrary bodies, so the SDK does not normalize.                                                                                                                                        |
+| `ref`    | The server's error correlation ref (`err_…`), present when the runtime logged the failure server-side (500-class internal errors). Read from the envelope's `error.ref`, with the `flue-error-ref` response header as fallback. Quote it when reporting a production 500 — it names the exact server-side log line (see [correlating a production 500](/docs/reference/errors/#correlating-a-production-500)). |
 
-The `message` is composed from the status and, when the body carries the Flue error envelope, the envelope's `type` and `message` (for example `Flue API error 404 [agent_instance_not_found]: Agent instance "123456" was not found.`). Match on `status` and `body`, not on the string.
+The `message` is composed from the status, the envelope's `type` and `message` when the body carries the Flue error envelope, and the ref when the response carried one — for example `Flue API error 404 [agent_instance_not_found]: Agent instance "123456" was not found.` or `Flue API error 500 [internal_error] (ref err_…): An internal error occurred.` — so logging a caught `FlueApiError` lands the ref in your own logs with no extra code. Match on `status` and `body`, not on the string.
 
 Two methods never produce `FlueApiError`:
 

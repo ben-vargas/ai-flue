@@ -228,7 +228,7 @@ export function commentOnIssue(ref: { owner: string; repo: string; issueNumber: 
         issue_number: ref.issueNumber,
         body,
       });
-      return { commentId: result.data.id };
+      return { output: { commentId: result.data.id } };
     },
   });
 }

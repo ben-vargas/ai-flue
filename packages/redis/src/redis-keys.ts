@@ -32,6 +32,7 @@ export class RedisKeys {
 	conversationBatches = (path: string) => this.encoded('conversation-batches', path);
 	conversationOrder = (path: string) => this.encoded('conversation-order', path);
 	conversationRetries = (path: string) => this.encoded('conversation-retries', path);
+	conversationFoldCheckpoint = (path: string) => this.encoded('conversation-fold-checkpoint', path);
 	attachment = (path: string, attachmentId: string) =>
 		this.encoded('attachment', path, attachmentId);
 	attachments = (path: string) => this.encoded('attachments', path);

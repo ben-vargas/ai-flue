@@ -27,7 +27,7 @@ export function FsTest() {
 			await harness.sandbox.exec('echo "shell content" > shell-created.txt');
 			results['shell write file'] =
 				(await harness.sandbox.exec('cat shell-created.txt')).stdout.trim() === 'shell content';
-			return { results, allPassed: Object.values(results).every(Boolean) };
+			return { output: { results, allPassed: Object.values(results).every(Boolean) } };
 		},
 	});
 	return 'When asked to run a demo, call the `fs-test` tool and report its result.';

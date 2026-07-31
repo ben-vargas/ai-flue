@@ -14,11 +14,16 @@ export {
 	CONTENT_BUDGET_BYTES,
 	type ContentAttributeOptions,
 	type ContentAttributeResult,
+	type ContentDrawOptions,
+	type ContentLedger,
 	type ContentOption,
 	type ContentTransform,
 	contentAttribute,
+	createContentLedger,
+	drawContentAttribute,
 	type GenAIContentScope,
 	type GenAIContentType,
+	OUTPUT_CONTENT_RESERVE_BYTES,
 } from './content.ts';
 export {
 	agentInputMessage,
@@ -34,7 +39,6 @@ export {
 	CONTENT_ATTR,
 	FLUE_TELEMETRY_EXTENSION_REVISION,
 	GEN_AI_PROJECTION_REVISION,
-	GEN_AI_SCHEMA_URL,
 	GEN_AI_SEMCONV_REVISION,
 } from './semconv.ts';
 export {

@@ -25,7 +25,7 @@ export function CompactionTest() {
 				'What Wikipedia article did you just read? What were the key points? Return a structured result.',
 				{ result: v.object({ article: v.string(), keyPoints: v.array(v.string()) }) },
 			);
-			return data;
+			return { output: data };
 		},
 	});
 	return 'When asked to run a demo, call the `compaction-test` tool and report its result.';

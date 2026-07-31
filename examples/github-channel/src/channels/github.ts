@@ -105,7 +105,7 @@ export function commentOnIssue(ref: { owner: string; repo: string; issueNumber: 
 				issue_number: ref.issueNumber,
 				body: data.body,
 			});
-			return { commentId: result.data.id, url: result.data.html_url };
+			return { output: { commentId: result.data.id, url: result.data.html_url } };
 		},
 	});
 }

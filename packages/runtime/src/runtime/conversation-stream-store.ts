@@ -2,7 +2,7 @@ import { clampLimit } from '../adapter-helpers.ts';
 import type { AgentSubmissionStore } from '../agent-execution-store.ts';
 import type { ConversationRecord } from '../conversation-records.ts';
 import { ConversationStreamStoreError } from '../errors.ts';
-import { migrateFlueSqlSchema } from '../schema-version.ts';
+import { migrateFlueSqlSchema } from '../format-version.ts';
 import { parseSessionStorageKey } from '../session-identity.ts';
 import type { SqlStorage } from '../sql-storage.ts';
 import { generateIncarnationId } from './ids.ts';
@@ -41,6 +41,25 @@ export interface ConversationStreamMeta {
 	nextProducerSequence: number;
 }
 
+/**
+ * A durable fold checkpoint: the serialized reduced state of one stream at a
+ * batch offset (conversation-fold-checkpoint.ts). Strictly a cache over the
+ * log — never authoritative, safe to discard, rebuilt by replay when absent.
+ * Loads seed from the nearest checkpoint and fold only the suffix, which
+ * bounds cold-start CPU by activity since the checkpoint instead of stream
+ * lifetime.
+ */
+export interface ConversationFoldCheckpoint {
+	/** Batch offset the state reflects (`recordsThroughOffset`). */
+	offset: string;
+	/** Stream incarnation the checkpoint was cut from. */
+	incarnation: string;
+	/** `REDUCED_STATE_FORMAT` — codec + fold-semantics version. */
+	formatVersion: number;
+	/** Canonical JSON codec output (`encodeReducedInstanceState`). */
+	data: string;
+}
+
 export interface ConversationStreamStore {
 	createStream(path: string, identity: ConversationStreamIdentity): Promise<void>;
 	acquireProducer(path: string, producerId: string): Promise<ConversationProducerClaim>;
@@ -75,6 +94,24 @@ export interface ConversationStreamStore {
 	): Promise<ConversationStreamReadResult>;
 	getMeta(path: string): Promise<ConversationStreamMeta | null>;
 	subscribe(path: string, listener: () => void): () => void;
+	/**
+	 * Optional fold-checkpoint capability (presence-checked like
+	 * `PersistenceAdapter.migrate?()`). One head slot per path — each write
+	 * supersedes the last. Stores lacking the pair degrade to full replay,
+	 * which is correct and warned once per path. Implementations must be
+	 * torn-write safe: a partially persisted checkpoint must read back as
+	 * absent or fail the read, never as a plausible blob.
+	 */
+	putFoldCheckpoint?(path: string, checkpoint: ConversationFoldCheckpoint): Promise<void>;
+	/**
+	 * Newest stored checkpoint for the path, `null` when none. With
+	 * `atOrBefore`, only a checkpoint at or before that offset qualifies —
+	 * the caller needs a state it can fold *forward* to the target.
+	 */
+	getFoldCheckpoint?(
+		path: string,
+		options?: { atOrBefore?: string },
+	): Promise<ConversationFoldCheckpoint | null>;
 }
 
 const CREATE_STREAMS_TABLE = `
@@ -121,6 +158,24 @@ export const CONVERSATION_BATCH_SPILL_THRESHOLD = 1024 * 1024;
 
 /** Code units per spilled chunk row; every cell stays far under the value cap. */
 const BATCH_CHUNK_LENGTH = 512 * 1024;
+
+/**
+ * Split serialized data into spill-chunk parts. A boundary never splits a
+ * surrogate pair: serialized JSON carries astral characters unescaped, and a
+ * lone surrogate does not survive the backend's TEXT encoding.
+ */
+function splitChunks(data: string): string[] {
+	const parts: string[] = [];
+	let start = 0;
+	while (start < data.length) {
+		let end = Math.min(start + BATCH_CHUNK_LENGTH, data.length);
+		const last = data.charCodeAt(end - 1);
+		if (end < data.length && last >= 0xd800 && last <= 0xdbff) end += 1;
+		parts.push(data.slice(start, end));
+		start = end;
+	}
+	return parts;
+}
 
 /**
  * Ceiling on one serialized batch, generous by an order of magnitude: a 2MB
@@ -178,11 +233,36 @@ export class StreamListenerRegistry {
 	}
 }
 
+// Fold checkpoints are additive tables under the current format version:
+// they are a discardable cache whose validity is self-governed (checkpoint
+// formatVersion + incarnation), so their presence or absence never makes a
+// store unreadable and needs no version event. An older runtime ignores
+// them; a newer one lazily creates them at open.
+const CREATE_FOLD_CHECKPOINTS_TABLE = `
+CREATE TABLE IF NOT EXISTS flue_conversation_fold_checkpoints (
+  path TEXT PRIMARY KEY,
+  head_offset TEXT NOT NULL,
+  incarnation TEXT NOT NULL,
+  format_version INTEGER NOT NULL,
+  data TEXT,
+  chunk_count INTEGER
+)`;
+
+const CREATE_FOLD_CHECKPOINT_CHUNKS_TABLE = `
+CREATE TABLE IF NOT EXISTS flue_conversation_fold_checkpoint_chunks (
+  path TEXT NOT NULL,
+  chunk_index INTEGER NOT NULL CHECK (chunk_index >= 0),
+  data TEXT NOT NULL,
+  PRIMARY KEY (path, chunk_index)
+)`;
+
 export function ensureSqlConversationStreamTables(sql: SqlStorage): void {
 	migrateFlueSqlSchema(sql, () => {
 		sql.exec(CREATE_STREAMS_TABLE);
 		sql.exec(CREATE_BATCHES_TABLE);
 		sql.exec(CREATE_BATCH_CHUNKS_TABLE);
+		sql.exec(CREATE_FOLD_CHECKPOINTS_TABLE);
+		sql.exec(CREATE_FOLD_CHECKPOINT_CHUNKS_TABLE);
 	});
 }
 
@@ -373,6 +453,27 @@ export class InMemoryConversationStreamStore implements ConversationStreamStore 
 
 	subscribe(path: string, listener: () => void): () => void {
 		return this.listeners.subscribe(path, listener);
+	}
+
+	private foldCheckpoints = new Map<string, ConversationFoldCheckpoint>();
+
+	async putFoldCheckpoint(path: string, checkpoint: ConversationFoldCheckpoint): Promise<void> {
+		this.foldCheckpoints.set(path, { ...checkpoint });
+	}
+
+	async getFoldCheckpoint(
+		path: string,
+		options?: { atOrBefore?: string },
+	): Promise<ConversationFoldCheckpoint | null> {
+		const checkpoint = this.foldCheckpoints.get(path);
+		if (!checkpoint) return null;
+		if (
+			options?.atOrBefore !== undefined &&
+			parseOffset(checkpoint.offset) > parseOffset(options.atOrBefore)
+		) {
+			return null;
+		}
+		return { ...checkpoint };
 	}
 
 	private async assertSubmissionAuthorization(
@@ -642,18 +743,7 @@ export class SqliteConversationStreamStore implements ConversationStreamStore {
 	 * sentinel to store in the batch row's `data` column.
 	 */
 	private spillBatchData(path: string, seq: number, data: string): string {
-		const parts: string[] = [];
-		let start = 0;
-		while (start < data.length) {
-			let end = Math.min(start + BATCH_CHUNK_LENGTH, data.length);
-			// A boundary never splits a surrogate pair: serialized JSON carries
-			// astral characters unescaped, and a lone surrogate does not survive
-			// the backend's TEXT encoding.
-			const last = data.charCodeAt(end - 1);
-			if (end < data.length && last >= 0xd800 && last <= 0xdbff) end += 1;
-			parts.push(data.slice(start, end));
-			start = end;
-		}
+		const parts = splitChunks(data);
 		for (const [index, part] of parts.entries()) {
 			this.sql.exec(
 				`INSERT INTO flue_conversation_stream_batch_chunks
@@ -728,6 +818,104 @@ export class SqliteConversationStreamStore implements ConversationStreamStore {
 
 	subscribe(path: string, listener: () => void): () => void {
 		return this.listeners.subscribe(path, listener);
+	}
+
+	async putFoldCheckpoint(path: string, checkpoint: ConversationFoldCheckpoint): Promise<void> {
+		// One transaction replaces chunks and head row together, so a reader
+		// (or a crash) never observes a half-written checkpoint: the head row
+		// is the commit point, exactly like a spilled batch's row.
+		this.runTransaction(() => {
+			this.sql.exec('DELETE FROM flue_conversation_fold_checkpoint_chunks WHERE path = ?', path);
+			const spill = checkpoint.data.length > CONVERSATION_BATCH_SPILL_THRESHOLD;
+			let chunkCount: number | null = null;
+			if (spill) {
+				const parts = splitChunks(checkpoint.data);
+				for (const [index, part] of parts.entries()) {
+					this.sql.exec(
+						`INSERT INTO flue_conversation_fold_checkpoint_chunks (path, chunk_index, data)
+						 VALUES (?, ?, ?)`,
+						path,
+						index,
+						part,
+					);
+				}
+				chunkCount = parts.length;
+			}
+			this.sql.exec(
+				`INSERT INTO flue_conversation_fold_checkpoints
+				 (path, head_offset, incarnation, format_version, data, chunk_count)
+				 VALUES (?, ?, ?, ?, ?, ?)
+				 ON CONFLICT(path) DO UPDATE SET
+				   head_offset = excluded.head_offset,
+				   incarnation = excluded.incarnation,
+				   format_version = excluded.format_version,
+				   data = excluded.data,
+				   chunk_count = excluded.chunk_count`,
+				path,
+				checkpoint.offset,
+				checkpoint.incarnation,
+				checkpoint.formatVersion,
+				spill ? null : checkpoint.data,
+				chunkCount,
+			);
+		});
+	}
+
+	async getFoldCheckpoint(
+		path: string,
+		options?: { atOrBefore?: string },
+	): Promise<ConversationFoldCheckpoint | null> {
+		return this.runTransaction(() => {
+			const row = this.sql
+				.exec(
+					`SELECT head_offset, incarnation, format_version, data, chunk_count
+					 FROM flue_conversation_fold_checkpoints WHERE path = ?`,
+					path,
+				)
+				.toArray()[0];
+			if (!row) return null;
+			if (
+				options?.atOrBefore !== undefined &&
+				parseOffset(row.head_offset as string) > parseOffset(options.atOrBefore)
+			) {
+				return null;
+			}
+			let data = row.data as string | null;
+			if (data === null) {
+				const chunkCount = row.chunk_count as number | null;
+				if (chunkCount === null || chunkCount <= 0) {
+					this.fail('get_fold_checkpoint', path, 'Checkpoint row has neither data nor chunks.');
+				}
+				const chunks = this.sql
+					.exec(
+						`SELECT chunk_index, data FROM flue_conversation_fold_checkpoint_chunks
+						 WHERE path = ? ORDER BY chunk_index`,
+						path,
+					)
+					.toArray();
+				if (chunks.length !== chunkCount) {
+					this.fail(
+						'get_fold_checkpoint',
+						path,
+						'Checkpoint chunk rows do not match the recorded count.',
+					);
+				}
+				const parts: string[] = [];
+				for (const [index, chunk] of chunks.entries()) {
+					if ((chunk.chunk_index as number) !== index) {
+						this.fail('get_fold_checkpoint', path, 'Checkpoint chunk rows are not contiguous.');
+					}
+					parts.push(chunk.data as string);
+				}
+				data = parts.join('');
+			}
+			return {
+				offset: row.head_offset as string,
+				incarnation: row.incarnation as string,
+				formatVersion: row.format_version as number,
+				data,
+			};
+		});
 	}
 
 	private assertSubmissionAuthorization(

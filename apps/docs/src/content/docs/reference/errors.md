@@ -1,7 +1,7 @@
 ---
 title: Errors Reference
 description: The FlueError hierarchy, stable error type codes, the HTTP error envelope, settlement errors, and error classification on live observations.
-lastReviewedAt: 2026-07-21
+lastReviewedAt: 2026-07-30
 ---
 
 Typed framework failures are `FlueError` subclasses with a stable machine-readable `type` code, plus two plain-`Error` classes documented below (`AgentRunError` and `ResultUnavailableError`). Cancellation rejects with a `DOMException` named `AbortError`. Misuse of programmatic entry points (calling `dispatch()` or `init()` before the runtime is configured, an empty instance id) throws plain `Error`s whose `[flue]`-prefixed messages are prose, not API. Error classes are exported from `@flue/runtime`, with two exceptions: the Cloudflare binding surface lives on `@flue/runtime/cloudflare`, and the persistence store classes live on `@flue/runtime/adapter`.
@@ -51,17 +51,22 @@ Every error response from an agent route, a mounted `createAgentRouter()` app, o
 - `type`, `message`, `details` — always present.
 - `dev` — present only when the server runs in local development (`flue dev`, `flue run`) and the error class populated it. Its presence is not a reliable mode signal: errors whose class set `dev: ''` omit the field in every mode.
 - `meta` — present whenever the error class set it, in development and production alike.
+- `ref` — a server-minted correlation ref (`err_` + ULID), present exactly when the server logged the error (the two 500-class renders below). The same value is sent as a `flue-error-ref` response header and prefixes the matching server-side log line. Never present on unlogged caller-mistake (4xx) responses.
 - `cause` and stack traces — never present.
 
 Status resolution:
 
 - An HTTP-typed `FlueError` renders with its class-owned status (listed per type below) plus any class-owned headers (`Allow` on 405, `Retry-After: 1` on 503).
-- A non-HTTP `FlueError` that escapes to a route renders its typed envelope with status 500 and is logged server-side.
-- Any non-`FlueError` thrown value renders as a generic 500 `internal_error` envelope. The original error is logged server-side in full and nothing about it reaches the wire.
+- A non-HTTP `FlueError` that escapes to a route renders its typed envelope with status 500 and is logged server-side, with a fresh `ref` joining the response to the log line.
+- Any non-`FlueError` thrown value renders as a generic 500 `internal_error` envelope. The original error is logged server-side in full and nothing about it reaches the wire beyond the `ref`.
 
 Every error response also carries `content-type: application/json`, `x-content-type-options: nosniff`, and `cross-origin-resource-policy: cross-origin`.
 
-Two route responses deliberately omit the envelope: `HEAD` conversation reads answer errors with status and headers only (no body), and a long-poll read aborted by the client returns status 499 with an empty body.
+Two route responses deliberately omit the envelope: `HEAD` conversation reads answer errors with status and headers only (no body — the `flue-error-ref` header would still be present on a logged render), and a long-poll read aborted by the client returns status 499 with an empty body. Mid-stream failures after SSE or long-poll headers are sent terminate the stream without an envelope.
+
+### Correlating a production 500
+
+Quote the `ref` (from `error.ref` or the `flue-error-ref` header — the header survives body-less responses and intermediaries that swallow bodies). The matching server-side log line begins `[flue] [err_…]` and carries the full error with its cause chain and stacks; because refs are ULIDs, the ref alone also brackets the time window to search. When the failing request carried a W3C `traceparent`, the log line records it beside the ref, so callers propagating trace context can join the failure into their own tracing. The ref exists only for the synchronous render: a submission that fails _after_ its 202 admission has no ref — its handle is the `submissionId`, shared by the `submission_settled` record, the SDK's `FlueExecutionError.targetId`, and the corresponding `[flue:submission-…]` log lines.
 
 ## Route error types
 
@@ -81,7 +86,7 @@ The wire `type` codes agent routes produce, with their status. Only `agent_insta
 
 Admission of a send — over HTTP or through `dispatch()` and `init().dispatch()` — also rejects with `type: 'invalid_request'` for payload misuse: a `uid` string condition combined with `initialData`, creation data failing the agent's `initialDataSchema`, or a non-function `agent` argument. That class (`InvalidRequestError`) is not exported; match it with `instanceof FlueError` and the `type` field.
 
-Internal invariant and persistence failures have their own codes, which can appear in a 500 envelope or a settlement error: `conversation_record_invariant` (no importable class), the store codes carried by the `@flue/runtime/adapter` classes ([`AttachmentConflictError`](#attachmentconflicterror), [`AttachmentIntegrityError`](#attachmentintegrityerror), [`ConversationStreamStoreError`](#conversationstreamstoreerror), [`PersistedSchemaVersionError`](#persistedschemaversionerror)), and `cloudflare_ai_binding_error` ([`CloudflareAIBindingError`](#cloudflareaibindingerror) on `@flue/runtime/cloudflare`).
+Internal invariant and persistence failures have their own codes, which can appear in a 500 envelope or a settlement error: `conversation_record_invariant` (no importable class), the store codes carried by the `@flue/runtime/adapter` classes ([`AttachmentConflictError`](#attachmentconflicterror), [`AttachmentIntegrityError`](#attachmentintegrityerror), [`ConversationStreamStoreError`](#conversationstreamstoreerror), [`PersistedFormatVersionError`](#persistedformatversionerror)), and `cloudflare_ai_binding_error` ([`CloudflareAIBindingError`](#cloudflareaibindingerror) on `@flue/runtime/cloudflare`).
 
 Authored routes and middleware in an [`app.ts`](/docs/guide/routing/) own their responses; the envelope and status vocabulary above apply only to framework-owned routes.
 
@@ -198,14 +203,14 @@ class OperationFailedError extends FlueError // type: 'operation_failed'
 
 A harness operation — `prompt()`, `skill()`, `task()`, `shell()`, or `compact()` on `FlueHarness` and `FlueSession` — ran but did not complete: the underlying model call errored, or a durable input could not be persisted or recovered. `meta` carries `operation` and `reason` (the unwrapped failure text, also embedded in `message`; both are prose, not API).
 
-## `PersistedSchemaVersionError`
+## `PersistedFormatVersionError`
 
 ```ts
 // from '@flue/runtime/adapter'
-class PersistedSchemaVersionError extends FlueError // type: 'persisted_schema_version_unsupported'
+class PersistedFormatVersionError extends FlueError // type: 'persisted_format_version_unsupported'
 ```
 
-The database records a schema version this runtime does not support: stamped by a newer Flue version (after a rollback) or carrying an unrecognized version marker. Thrown when the store is opened, at startup. Exported from `@flue/runtime/adapter`, alongside the store contracts it guards; see the [Data Persistence API](/docs/reference/data-persistence-api/). `meta` carries `storedVersion` and `supportedVersion`.
+The database records a format version this runtime does not support: stamped by a newer Flue version (after a rollback) or carrying an unrecognized version marker. Thrown when the store is opened, at startup. Exported from `@flue/runtime/adapter`, alongside the store contracts it guards; see the [Data Persistence API](/docs/reference/data-persistence-api/). `meta` carries `storedVersion` and `supportedVersion`.
 
 ## `ResultUnavailableError`
 

@@ -1,4 +1,5 @@
-import { loadReducedConversationState } from './conversation-reader.ts';
+import { FOLD_CHECKPOINT_INTERVAL, writeFoldCheckpoint } from './conversation-fold-checkpoint.ts';
+import { type ConversationFoldHost, getConversationFoldHost } from './conversation-fold-host.ts';
 import type {
 	CanonicalChildSessionRef,
 	ConversationCreatedRecord,
@@ -52,6 +53,9 @@ export class ConversationRecordWriter {
 	private resolvePending: ((result: { offset: string }) => void) | undefined;
 	private rejectPending: ((error: unknown) => void) | undefined;
 
+	private readonly foldHost: ConversationFoldHost;
+	private batchesSinceFoldCheckpoint = 0;
+
 	private constructor(
 		private readonly store: ConversationStreamStore,
 		readonly path: string,
@@ -59,6 +63,8 @@ export class ConversationRecordWriter {
 		private readonly onFailed?: (writer: ConversationRecordWriter) => void,
 	) {
 		this.nextProducerSequence = claim.nextProducerSequence;
+		this.foldHost = getConversationFoldHost(store, path);
+		this.foldHost.pin();
 	}
 
 	static async create(options: {
@@ -75,14 +81,20 @@ export class ConversationRecordWriter {
 
 	async loadReducedState(): Promise<ReducedInstanceState> {
 		this.assertActive();
-		if (!this.reducedState) {
-			const loaded = await loadReducedConversationState({
-				store: this.store,
-				path: this.path,
-			});
-			this.reducedState ??= loaded;
-		}
+		if (this.reducedState) return this.reducedState;
+		// The shared fold host serves the same state a from-scratch load
+		// produces — and reuses a fold a read already paid for. The producer
+		// fence guarantees no other writer can append behind this claim, so
+		// the host's head is this writer's head.
+		const sequenceBefore = this.nextProducerSequence;
+		const loaded = await this.foldHost.getStateAtHead();
 		this.assertActive();
+		// A first append racing this load would make the loaded state stale —
+		// and, once memoized, every later append would fold onto it and publish
+		// the gap to the shared host. No live path appends before loading;
+		// re-loading keeps the host safe if one ever does.
+		if (this.nextProducerSequence !== sequenceBefore) return this.loadReducedState();
+		this.reducedState ??= loaded;
 		return this.reducedState;
 	}
 
@@ -248,6 +260,18 @@ export class ConversationRecordWriter {
 				if (reduced) {
 					reduced.recordsThroughOffset = result.offset;
 					this.reducedState = reduced;
+					this.foldHost.adoptState(reduced, this.claim.incarnation);
+					// Durable fold checkpoint. The encode is synchronous (states
+					// are never mutated after publication, so it reads a stable
+					// snapshot); the store write floats off the append's critical
+					// path — the batch is durable either way, and a lost
+					// checkpoint just means the next cold load folds a longer
+					// suffix.
+					this.batchesSinceFoldCheckpoint += 1;
+					if (this.batchesSinceFoldCheckpoint >= FOLD_CHECKPOINT_INTERVAL) {
+						this.batchesSinceFoldCheckpoint = 0;
+						writeFoldCheckpoint(this.store, this.path, reduced, this.claim.incarnation);
+					}
 				}
 				return result;
 			} catch (error) {
@@ -268,6 +292,7 @@ export class ConversationRecordWriter {
 	private fail(error: unknown): unknown {
 		if (this.lifecycle.status === 'failed') return this.lifecycle.error;
 		this.lifecycle = { status: 'failed', error };
+		this.foldHost.unpin();
 		this.onFailed?.(this);
 		if (this.pendingTimer) clearTimeout(this.pendingTimer);
 		this.pendingTimer = undefined;

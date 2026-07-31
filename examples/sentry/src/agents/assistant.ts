@@ -9,10 +9,12 @@ const lookupOrder = defineTool({
 	run({ data, log }) {
 		log.info('looking up order', { orderId: data.orderId });
 		return {
-			orderId: data.orderId,
-			status: 'shipped',
-			eta: 'tomorrow',
-			carrier: 'Flue Parcel Service',
+			output: {
+				orderId: data.orderId,
+				status: 'shipped',
+				eta: 'tomorrow',
+				carrier: 'Flue Parcel Service',
+			},
 		};
 	},
 });

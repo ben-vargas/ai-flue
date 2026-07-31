@@ -1,8 +1,8 @@
 import type { DeliveredMessage, DispatchReceipt, NamedAgentDispatchRequest } from '../types.ts';
 import type { DispatchQueue } from './dispatch-queue.ts';
-import { generateSubmissionId } from './ids.ts';
+import { deriveKeyedSubmissionId, generateSubmissionId } from './ids.ts';
 import { isRegisteredAgentIdentity } from './registration.ts';
-import { parseDeliveredMessage } from './schemas.ts';
+import { parseDeliveredMessage, parseIdempotencyKey } from './schemas.ts';
 
 export async function enqueueDispatch(options: {
 	request: NamedAgentDispatchRequest;
@@ -15,8 +15,19 @@ export async function enqueueDispatch(options: {
 			'[flue] dispatch() cannot combine a continue condition (`uid`) with `initialData` — the condition forbids creation, so the seed could never apply.',
 		);
 	}
+	// A keyed dispatch derives its submission id from the caller's key, so a
+	// redelivery re-derives the same id and converges on the original
+	// admission; an unkeyed one mints a fresh identity per call.
+	const idempotencyKey = options.request.idempotencyKey;
 	return options.dispatchQueue.enqueue({
-		submissionId: generateSubmissionId(),
+		submissionId:
+			idempotencyKey !== undefined
+				? await deriveKeyedSubmissionId(
+						agent,
+						options.request.id,
+						parseIdempotencyKey(idempotencyKey),
+					)
+				: generateSubmissionId(),
 		agent,
 		id: options.request.id,
 		message,

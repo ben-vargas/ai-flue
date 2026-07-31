@@ -98,6 +98,9 @@
  * The structured-constructor pattern below is what prevents that drift.
  */
 
+import { extractTraceCarrier } from './execution-interceptor.ts';
+import { generateErrorRef } from './runtime/ids.ts';
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 /**
@@ -326,6 +329,34 @@ export class AttachmentNotFoundError extends FlueHttpError {
 	}
 }
 
+/**
+ * An updates read requested an offset strictly beyond the stream's current
+ * head — a resume checkpoint that no longer exists, typically because the
+ * store was reset and regrown shorter (a dev-server restart on the in-memory
+ * store). 416 is deliberate: it sits outside the durable-stream client's
+ * internal retry set (429/503/5xx) and outside the SDK's fatal set
+ * (400/401/403), so a following client surfaces it immediately and recovers
+ * through its ordinary retry → re-hydrate path instead of silently retrying
+ * a 500 forever. Thrown before the response commits — the SSE path validates
+ * before opening the event stream. The store-level beyond-head throw
+ * (`ConversationStreamStoreError`) remains the internal invariant guard.
+ */
+export class StreamOffsetGoneError extends FlueHttpError {
+	constructor({ path, offset, nextOffset }: { path: string; offset: string; nextOffset: string }) {
+		super({
+			type: 'stream_offset_gone',
+			message: `Stream offset "${offset}" is beyond the current head of "${path}".`,
+			details:
+				'The stream is shorter than the requested resume offset — it was likely reset since the offset was checkpointed. Re-read the conversation history and resume from its offset.',
+			dev: '',
+			status: 416,
+			// Machine-readable resume context: the offset the caller asked for
+			// and the stream's current head offset.
+			meta: { offset, nextOffset },
+		});
+	}
+}
+
 export class InvalidRequestError extends FlueHttpError {
 	constructor({ reason }: { reason: string }) {
 		super({
@@ -388,6 +419,35 @@ export class AgentInstanceExistsError extends FlueHttpError {
 
 	/** The existing instance's uid. */
 	readonly uid: string;
+}
+
+/**
+ * An idempotency key was reused with a different payload: a keyed send
+ * derived the submission id of an existing submission whose identity (kind,
+ * agent, instance, message, creation data) does not match. Raised
+ * synchronously at admission on both transports; nothing durable is written
+ * by the conflicting attempt. `meta.submissionId` names the existing
+ * submission the key already belongs to.
+ */
+export class SubmissionConflictError extends FlueHttpError {
+	constructor({ submissionId }: { submissionId: string }) {
+		super({
+			type: 'submission_conflict',
+			message: 'This idempotency key already names a different submission.',
+			details:
+				'The key names the delivery, not the outcome: retry the identical payload to converge ' +
+				'on the existing submission, or use a fresh key to deliver something new.',
+			dev: '',
+			status: 409,
+			// HTTP callers read the existing submission's id from
+			// `error.meta.submissionId` — the details prose is not machine-readable.
+			meta: { submissionId },
+		});
+		this.submissionId = submissionId;
+	}
+
+	/** The existing submission's id (the one the key derives). */
+	readonly submissionId: string;
 }
 
 // ─── Persistence error vocabulary ───────────────────────────────────────────
@@ -458,7 +518,7 @@ export class AttachmentIntegrityError extends FlueError {
 	}
 }
 
-export class PersistedSchemaVersionError extends FlueError {
+export class PersistedFormatVersionError extends FlueError {
 	constructor({
 		storedVersion,
 		supportedVersion,
@@ -469,14 +529,14 @@ export class PersistedSchemaVersionError extends FlueError {
 		const numeric = /^[0-9]+$/.test(storedVersion) ? Number(storedVersion) : undefined;
 		const newer = numeric !== undefined && numeric > supportedVersion;
 		super({
-			type: 'persisted_schema_version_unsupported',
+			type: 'persisted_format_version_unsupported',
 			message: newer
-				? `This database was created by a newer Flue version (schema version ${storedVersion}; this runtime supports version ${supportedVersion}).`
-				: `This database records an unrecognized schema version ("${storedVersion}"; this runtime supports version ${supportedVersion}).`,
+				? `This database was created by a newer Flue version (format version ${storedVersion}; this runtime supports version ${supportedVersion}).`
+				: `This database records an unrecognized format version ("${storedVersion}"; this runtime supports version ${supportedVersion}).`,
 			details: 'The persisted data cannot be read safely by this runtime.',
 			dev: newer
-				? `Upgrade Flue to a version that supports schema version ${storedVersion}, or point the runtime at a different database.`
-				: `The "schema_version" row in the flue_meta table is not a version this runtime recognizes. ` +
+				? `Upgrade Flue to a version that supports format version ${storedVersion}, or point the runtime at a different database.`
+				: `The "format_version" row in the flue_meta table is not a version this runtime recognizes. ` +
 					`Restore the database, or point the runtime at a different one.`,
 			meta: { storedVersion, supportedVersion },
 		});
@@ -1069,6 +1129,10 @@ export class SubmissionAbortedError extends FlueError {
  *     See the error classes above for the two-audience rationale.
  *   - `meta` is included on the wire only when an error subclass sets it
  *     (rare).
+ *   - `ref` is included exactly when the renderer logged the error
+ *     server-side (500-class internal renders) — the log line carries the
+ *     same `err_…` value, so the ref is the correlation handle between a
+ *     caller-visible failure and its server-side diagnosis.
  *   - `cause` is never included on the wire (it's logged server-side only).
  */
 
@@ -1077,16 +1141,38 @@ function isFlueError(value: unknown): value is FlueError {
 }
 
 /**
- * Module-private for now: when an external call site appears we can promote
- * to `export` and decide the right shape for `warn`/`info` (FlueError
- * subclasses with severity? plain strings? structured data?) — rather than
- * committing to a shape now without any usage to validate it.
+ * Wrapped failures are precisely the ones worth diagnosing, so both log
+ * formatting and message flattening walk the full `cause` chain — bounded so
+ * a pathological (or cyclic) chain can never wedge the renderer.
  */
+const CAUSE_CHAIN_DEPTH_LIMIT = 8;
+
+/**
+ * Flatten an error's message chain into a single string:
+ * `msg (caused by: msg2 (caused by: msg3))`. For errors whose only surviving
+ * field is `message` — most importantly errors thrown out of a Cloudflare
+ * Durable Object, which workerd tunnels to the calling Worker message-only
+ * (no stack, no `cause`, no class identity). Putting the chain *in* the
+ * message is the only way the far side ever sees it.
+ */
+export function describeErrorChain(err: unknown): string {
+	return describeChainLevel(err, 1, new Set([err]));
+}
+
+function describeChainLevel(err: unknown, depth: number, seen: Set<unknown>): string {
+	const message = err instanceof Error ? err.message : String(err);
+	if (!(err instanceof Error) || err.cause === undefined) return message;
+	if (depth >= CAUSE_CHAIN_DEPTH_LIMIT || seen.has(err.cause)) return message;
+	seen.add(err.cause);
+	return `${message} (caused by: ${describeChainLevel(err.cause, depth + 1, seen)})`;
+}
+
 function formatForLog(prefix: string, err: unknown): string {
+	const lines: string[] = [];
 	if (isFlueError(err)) {
 		// Server-side logs always show every audience's prose. Mode gating
 		// only applies to the wire envelope.
-		const lines: string[] = [`${prefix} [${err.type}] ${err.message}`];
+		lines.push(`${prefix} [${err.type}] ${err.message}`);
 		if (err.details) {
 			for (const line of err.details.split('\n')) {
 				lines.push(`  ${line}`);
@@ -1097,22 +1183,74 @@ function formatForLog(prefix: string, err: unknown): string {
 				lines.push(`  ${line}`);
 			}
 		}
-		if (err.cause !== undefined) {
-			lines.push(
-				`  cause: ${err.cause instanceof Error ? (err.cause.stack ?? err.cause.message) : String(err.cause)}`,
-			);
+	} else if (err instanceof Error) {
+		lines.push(`${prefix} ${err.stack ?? err.message}`);
+	} else {
+		return `${prefix} ${String(err)}`;
+	}
+	appendCauseChain(lines, err, '  ', 1, new Set([err]));
+	return lines.join('\n');
+}
+
+/**
+ * Append every level of an error's diagnostic tail: the `cause` chain plus
+ * `AggregateError` members (the Node bootstrap throws those), each printed as
+ * an indented `caused by: <stack ?? message>` block.
+ */
+function appendCauseChain(
+	lines: string[],
+	err: unknown,
+	indent: string,
+	depth: number,
+	seen: Set<unknown>,
+): void {
+	if (!(err instanceof Error)) return;
+	const nested: unknown[] = err instanceof AggregateError ? [...err.errors] : [];
+	if (err.cause !== undefined) nested.push(err.cause);
+	for (const cause of nested) {
+		if (seen.has(cause)) {
+			lines.push(`${indent}caused by: [circular]`);
+			continue;
 		}
-		return lines.join('\n');
+		if (depth >= CAUSE_CHAIN_DEPTH_LIMIT) {
+			lines.push(`${indent}caused by: [depth limit reached]`);
+			return;
+		}
+		seen.add(cause);
+		const described = cause instanceof Error ? (cause.stack ?? cause.message) : String(cause);
+		const [first = '', ...rest] = described.split('\n');
+		lines.push(`${indent}caused by: ${first}`);
+		for (const line of rest) {
+			lines.push(`${indent}${line}`);
+		}
+		appendCauseChain(lines, cause, `${indent}  `, depth + 1, seen);
 	}
-	if (err instanceof Error) {
-		return `${prefix} ${err.stack ?? err.message}`;
-	}
-	return `${prefix} ${String(err)}`;
+}
+
+/**
+ * Render one error the way the renderer's log path does — `[flue]` prefix,
+ * full prose, complete cause chain with stacks. Exported for sites that must
+ * log a full-fidelity error themselves because no renderer will ever hold it
+ * (a Durable Object constructor failure crosses the workerd tunnel
+ * message-only, and alarm-driven wakes have no HTTP render at all).
+ */
+export function formatErrorForLog(err: unknown): string {
+	return formatForLog('[flue]', err);
 }
 
 const flueLog = {
-	error(err: unknown): void {
-		console.error(formatForLog('[flue]', err));
+	error(err: unknown, render?: { ref?: string; traceparent?: string }): void {
+		// The renderer is the last line of defense and must never throw:
+		// chain walking reads `cause` getters on foreign errors, so the
+		// formatted path is guarded with a raw-console fallback.
+		try {
+			const prefix = render?.ref ? `[flue] [${render.ref}]` : '[flue]';
+			const lines = [formatForLog(prefix, err)];
+			if (render?.traceparent) lines.push(`  traceparent: ${render.traceparent}`);
+			console.error(lines.join('\n'));
+		} catch {
+			console.error('[flue]', err);
+		}
 	},
 };
 
@@ -1123,6 +1261,13 @@ interface WireEnvelope {
 		details: string;
 		dev?: string;
 		meta?: Record<string, unknown>;
+		/**
+		 * Correlation ref (`err_…`), present exactly when the renderer wrote a
+		 * server-side log line carrying the same value ("ref iff logged").
+		 * Also mirrored on the `flue-error-ref` response header so body-less
+		 * responses (HEAD) and body-swallowing intermediaries keep it.
+		 */
+		ref?: string;
 	};
 }
 
@@ -1142,7 +1287,7 @@ export function isDevMode(): boolean {
 	return devMode;
 }
 
-function envelope(err: FlueError): WireEnvelope {
+function envelope(err: FlueError, ref?: string): WireEnvelope {
 	const out: WireEnvelope = {
 		error: {
 			type: err.type,
@@ -1158,23 +1303,58 @@ function envelope(err: FlueError): WireEnvelope {
 	// it just means "this error has dev-only guidance to share."
 	if (devMode && err.dev) out.error.dev = err.dev;
 	if (err.meta) out.error.meta = err.meta;
+	if (ref) out.error.ref = ref;
 	return out;
 }
 
-const GENERIC_INTERNAL: WireEnvelope = {
-	error: {
-		type: 'internal_error',
-		message: 'An internal error occurred.',
-		details: 'The server encountered an unexpected error while handling this request.',
-	},
-};
+/** Per-response factory: each render gets its own envelope to carry its ref. */
+function genericInternalEnvelope(ref: string | undefined): WireEnvelope {
+	const out: WireEnvelope = {
+		error: {
+			type: 'internal_error',
+			message: 'An internal error occurred.',
+			details: 'The server encountered an unexpected error while handling this request.',
+		},
+	};
+	if (ref) out.error.ref = ref;
+	return out;
+}
+
+/**
+ * Log a renderer-owned error under a freshly minted correlation ref, and
+ * return the ref so the render stamps the same value on the envelope and the
+ * `flue-error-ref` header. When the request carries a W3C `traceparent`, it
+ * is logged beside the ref (never echoed on the response), joining the log
+ * line into the caller's own tracing. Ref minting and traceparent extraction
+ * are individually guarded: the renderer must never throw, so a failure in
+ * either degrades the log line, never the response.
+ */
+function logRenderedError(err: unknown, request: Request | undefined): string | undefined {
+	let ref: string | undefined;
+	try {
+		ref = generateErrorRef();
+	} catch {
+		// Keep rendering; the error still logs, just uncorrelated.
+	}
+	let traceparent: string | undefined;
+	try {
+		traceparent = request ? extractTraceCarrier(request.headers)?.traceparent : undefined;
+	} catch {
+		// Keep rendering; foreign Request/Headers shapes must not break the render.
+	}
+	flueLog.error(err, { ref, traceparent });
+	return ref;
+}
 
 /**
  * Render any thrown value into a `Response` with the canonical Flue error
  * envelope. Unknown / non-Flue errors are logged in full and rendered as a
- * generic 500 with no message leaked.
+ * generic 500 with no message leaked. Every logged render carries a fresh
+ * `error.ref` (envelope, `flue-error-ref` header, and log-line prefix — the
+ * same value in all three places) so callers can point operators at the
+ * exact server-side log line; unlogged caller-mistake renders stay ref-free.
  */
-export function toHttpResponse(err: unknown): Response {
+export function toHttpResponse(err: unknown, options?: { request?: Request }): Response {
 	// Browser security headers (DS protocol §12.7) — set on every error
 	// response so stream-endpoint errors thrown before the protocol layer
 	// (e.g. run lookups) still carry them.
@@ -1193,16 +1373,17 @@ export function toHttpResponse(err: unknown): Response {
 		// Log non-HTTP FlueErrors that bubbled up to the HTTP layer — they
 		// weren't constructed with HTTP semantics in mind, so it's worth
 		// surfacing them in logs even though we render their message.
-		if (!isHttp) {
-			flueLog.error(err);
-		}
-		return new Response(JSON.stringify(envelope(err)), { status, headers });
+		const ref = isHttp ? undefined : logRenderedError(err, options?.request);
+		if (ref) headers['flue-error-ref'] = ref;
+		return new Response(JSON.stringify(envelope(err, ref)), { status, headers });
 	}
-	// Non-FlueError: log everything, leak nothing.
-	flueLog.error(err);
-	return new Response(JSON.stringify(GENERIC_INTERNAL), {
+	// Non-FlueError: log everything, leak nothing beyond the correlation ref.
+	const ref = logRenderedError(err, options?.request);
+	const headers = { ...baseHeaders };
+	if (ref) headers['flue-error-ref'] = ref;
+	return new Response(JSON.stringify(genericInternalEnvelope(ref)), {
 		status: 500,
-		headers: baseHeaders,
+		headers,
 	});
 }
 

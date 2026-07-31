@@ -79,7 +79,7 @@ export const provisionWorkspace = defineTool({
     for (const project of DEFAULT_PROJECTS) {
       await step.do(`seed:${project.name}`, () => projects.seed(tenant.id, project));
     }
-    return { tenantId: tenant.id };
+    return { output: { tenantId: tenant.id } };
   },
 });
 ```

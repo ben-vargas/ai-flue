@@ -6,4 +6,5 @@ export type {
 	ToolInputSchema,
 	ToolOutput,
 	ToolOutputSchema,
+	ToolRunEnvelope,
 } from './tool-types.ts';

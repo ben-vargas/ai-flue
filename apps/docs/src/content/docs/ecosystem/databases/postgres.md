@@ -107,7 +107,7 @@ implement this callback transaction contract.
 
 The adapter's `migrate()` hook runs automatically when the generated Node
 server starts. It creates Flue's `flue_*` tables idempotently and stamps a
-schema version, so a fresh database is provisioned on first boot and an existing
+format version, so a fresh database is provisioned on first boot and an existing
 one is reused on restart. There is no separate migration command to run, and a
 database written by a newer Flue refuses to start rather than corrupting state.
 

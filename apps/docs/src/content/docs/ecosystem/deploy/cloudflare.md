@@ -485,9 +485,9 @@ Flue does not automatically propagate a trace carrier with dispatched input or p
 
 For jobs that require durable step-level continuation, implement those steps with [Cloudflare Workflows](https://developers.cloudflare.com/workflows/).
 
-### Persisted-schema boundary
+### Persisted-format boundary
 
-Flue stamps every Durable Object database with its persisted schema version in a one-row `flue_meta` table the first time it opens it, and refuses to open a database stamped by an unknown or newer schema version (for example, after rolling back a deploy). There is no in-place schema migration: state stamped by a different schema version must be cleared, or its class retired. KV-backed Durable Object classes remain outside this boundary because Cloudflare cannot convert them to SQLite in place — generated Flue agent classes must be introduced with `new_sqlite_classes`.
+Flue stamps every Durable Object database with its persisted format version in a one-row `flue_meta` table the first time it opens it, and refuses to open a database stamped by an unknown or newer format version (for example, after rolling back a deploy). There is no in-place format migration: state stamped by a different format version must be cleared, or its class retired. KV-backed Durable Object classes remain outside this boundary because Cloudflare cannot convert them to SQLite in place — generated Flue agent classes must be introduced with `new_sqlite_classes`.
 
 ## Sandbox context
 
@@ -568,6 +568,6 @@ Enable Cloudflare's observability products for the deployed Worker in `wrangler.
 
 With logs enabled, tool and hook logs from agent work appear in the [Workers Observability](https://developers.cloudflare.com/workers/observability/) dashboard, attributed to the work that wrote them. With traces enabled (open beta), each agent response produces one trace — the Durable Object invocation that ran the response end to end, with Workers AI calls and other subrequests as spans inside it.
 
-Installing [`createCloudflareTracing()`](/docs/guide/cloudflare-target/#createcloudflaretracing) in `app.ts` adds agent-level spans to those traces — `invoke_agent`, `chat` per model turn, and `execute_tool` per tool call — carrying conversation content by default (the target guide covers `content: false` and the redaction hook). See Cloudflare's [Workers Logs](https://developers.cloudflare.com/workers/observability/logs/workers-logs/) and [Traces](https://developers.cloudflare.com/workers/observability/traces/) documentation for sampling, retention, and pricing.
+With traces enabled, each trace also carries agent-level spans — `invoke_agent`, `chat` per model turn, `execute_tool` per tool call — with conversation content included; [`createCloudflareTracing()`](/docs/guide/cloudflare-target/#createcloudflaretracing) covers customizing content capture, and [`tracing: false`](/docs/reference/configuration/#tracing) opts out. See Cloudflare's [Workers Logs](https://developers.cloudflare.com/workers/observability/logs/workers-logs/) and [Traces](https://developers.cloudflare.com/workers/observability/traces/) documentation for sampling, retention, and pricing.
 
 For the runtime-level view — token usage, tool payloads, settlements, and exporters like Sentry and OpenTelemetry — see [Observability](/docs/guide/observability/#cloudflare). For how agent execution maps onto platform invocations, see the [Cloudflare target guide](/docs/guide/cloudflare-target/#durable-agent-execution).

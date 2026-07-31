@@ -74,15 +74,15 @@ export {
 
 export { createSessionStorageKey, parseSessionStorageKey } from './session-identity.ts';
 
-// ─── Schema versioning ──────────────────────────────────────────────────────
+// ─── Format versioning ──────────────────────────────────────────────────────
 
 export {
 	AttachmentConflictError,
 	AttachmentIntegrityError,
 	ConversationStreamStoreError,
-	PersistedSchemaVersionError,
+	PersistedFormatVersionError,
 } from './errors.ts';
-export { assertSupportedFlueSchemaVersion, FLUE_SCHEMA_VERSION } from './schema-version.ts';
+export { assertSupportedFlueFormatVersion, FLUE_FORMAT_VERSION } from './format-version.ts';
 
 // ─── Submission payload chunking ─────────────────────────────────────────────
 
@@ -116,6 +116,7 @@ export {
 	verifyAttachmentBytes,
 } from './runtime/attachment-store.ts';
 export type {
+	ConversationFoldCheckpoint,
 	ConversationProducerClaim,
 	ConversationStreamBatch,
 	ConversationStreamIdentity,

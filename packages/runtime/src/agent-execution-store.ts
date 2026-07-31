@@ -308,6 +308,23 @@ export interface AgentSubmissionStore {
 	 * same joined-delivery fan-out.
 	 */
 	failSubmission(attempt: SubmissionAttemptRef, error: unknown): Promise<boolean>;
+	/**
+	 * Terminal settlement for a QUEUED submission that can never be claimed
+	 * (materialization permanently failing, agent definition gone, or a durable
+	 * abort on an unready row). Atomically settles the row with the outcome and
+	 * error; the first terminal state wins; no attempt is created and no
+	 * canonical settlement record exists for it — an already-tolerated class
+	 * (the SQL stores' malformed-row termination creates the same shape): the
+	 * row's outcome is authoritative when no stream record exists, and
+	 * stream-following waiters never observe these settlements durably.
+	 * Returns `false` when the row is not queued — running, terminalizing,
+	 * settled, joining, and joined rows are left untouched.
+	 */
+	settleQueuedSubmission(
+		submissionId: string,
+		outcome: 'failed' | 'aborted',
+		error: unknown,
+	): Promise<boolean>;
 
 	// Turn-boundary joins (dispatch-while-busy)
 	/**
@@ -386,31 +403,31 @@ export interface PersistenceStores {
  * The built-in `sqlite()` adapter is available from `@flue/runtime/node`.
  *
  * Lifecycle: the framework calls `migrate()` (if present) once at startup
- * to bring the store to the current schema/format version, then awaits
+ * to bring the store to the current format version, then awaits
  * `connect()` once to obtain every store — an unreachable or misconfigured
  * database fails at boot, not inside the first request. On shutdown,
  * `close()` is called to release resources.
  *
  * Versioning obligation (storage-agnostic): an adapter durably records its
- * schema/format version when it first creates the store, and fails loudly —
+ * format version when it first creates the store, and fails loudly —
  * before reading or writing any data — when opened against a store recorded
  * with an unknown or newer version (e.g. throw
- * `PersistedSchemaVersionError`, exported from `@flue/runtime/adapter`).
+ * `PersistedFormatVersionError`, exported from `@flue/runtime/adapter`).
  * The built-in SQL adapters implement this with a one-row `flue_meta`
- * key/value table (key `'schema_version'`); non-SQL adapters implement the
+ * key/value table (key `'format_version'`); non-SQL adapters implement the
  * same obligation natively (a key, a meta document, etc.).
  */
 export interface PersistenceAdapter {
 	/**
 	 * Open the database and return every store. Awaited once at startup, so
 	 * async pool setup, remote handshakes, and — for adapters without
-	 * {@link migrate} — the schema-version check belong here.
+	 * {@link migrate} — the format-version check belong here.
 	 */
 	connect(): PersistenceStores | Promise<PersistenceStores>;
 	/**
-	 * Bring the store to the current schema/format version.
+	 * Bring the store to the current format version.
 	 * Called once at startup before {@link connect}. Creates any missing
-	 * schema, durably records the schema/format version when the store is
+	 * schema, durably records the format version when the store is
 	 * first created, and fails loudly when the store records an unknown or
 	 * newer version. Adapters that create schema implicitly (e.g. LMDB) may
 	 * omit this method, but must still uphold the versioning obligation in

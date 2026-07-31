@@ -43,8 +43,14 @@ export function useTool<
 	 */
 	durable?: TDurable;
 	run: ToolDefinition<TInput, TOutput, THarness, TDurable>['run'];
-}): void {
+}): void;
+// A definition whose schema generics are already erased to the defaults
+// (adapter-produced tools, `ToolDefinition`-typed collections): its `run`
+// return unions both envelope branches, which no single inferred
+// instantiation of the literal overload above accepts.
+export function useTool(tool: ToolDefinition): void;
+export function useTool(tool: object): void {
 	const frame = requireRenderFrame('useTool');
 	assertToolDefinition(tool, 'useTool()');
-	frame.tools.push(tool as unknown as ToolDefinition);
+	frame.tools.push(tool);
 }

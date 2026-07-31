@@ -135,6 +135,7 @@ interface FlueConversationMessage {
   submissionId?: string;
   turnId?: string;
   signal?: { tagName?: string; attributes?: Record<string, string> };
+  settlement?: { outcome: 'failed' | 'aborted' };
   parts: FlueConversationPart[];
   metadata?: Record<string, unknown>;
 }
@@ -177,6 +178,7 @@ type FlueConversationPart =
 - `settlements` — the terminal outcome of every settled submission on this conversation. `error` carries the caller-safe error value for `failed`/`aborted` outcomes.
 - `role`/`purpose`/`display` — `role` is the coarse render lane; `purpose` classifies semantics (`dispatch` = delivered signals, `advisory` = runtime advisories); `display` is the visibility hint (`visible` primary chat, `diagnostic` activity-panel material, `hidden` plumbing).
 - `signal` — present only on `system`-role messages projected from signal deliveries; carries the delivered `tagName` and `attributes`.
+- `settlement` — present only on the terminal advisory the runtime appends when a submission settles `failed` or `aborted`; the message's `submissionId` names the settled submission. Completed submissions get no timeline marker (the assistant reply is the marker); `settlements` remains the programmatic outcome index.
 - `metadata` — entirely agent-authored (response-metadata hooks). The runtime stamps nothing; keys like `usage` or `model` are application conventions.
 - `parts` — `text`/`reasoning` carry `state: 'streaming'` while a live response is mid-stream and `'done'` once complete. `data-<name>` parts are named client data writes, one part per write, in emit order. `file` parts reference attachments by `id`; `url` is never set by the server (the runtime does not know the public mount — the SDK resolves it client-side, and `GET /:id/attachments/:attachmentId` is the underlying route). `dynamic-tool` parts progress `input-available` → `output-available`/`output-error`; `durationMs` is the tool-handler execution time, absent on outcomes recorded before the field existed.
 

@@ -23,7 +23,7 @@ The value passed to `useSandbox(...)` or composed into an agent's `sandbox:` con
 - `options.id` — the agent instance id (`ctx.id`). Multiple harnesses initialized in the same context receive the same `id`, so an adapter that keys provider resources on `id` must tolerate repeated calls with the same value. Keying a provider workspace on `id` is how a conversation gets a durable filesystem across messages and restarts.
 - `tools` — optional. When present, replaces the framework's default model-facing tool set for this sandbox. See [`SessionToolFactory`](#sessiontoolfactory).
 
-A minimal adapter over a provider SDK, using [`createSandboxSessionEnv`](#createsandboxsessionenvapi-cwd) to supply the generic path and abort plumbing:
+A minimal adapter over a provider SDK, using [`createSandboxSessionEnv`](#createsandboxsessionenvapi-cwd-options) to supply the generic path and abort plumbing:
 
 ```ts
 import { createSandboxSessionEnv, type SandboxApi, type SandboxFactory } from '@flue/runtime';
@@ -83,7 +83,7 @@ interface SessionEnv {
 
 The universal environment interface. Every sandbox mode — virtual, local, remote — implements it, so core logic never branches on mode. The same object is exposed to application code as [`harness.sandbox`](/docs/reference/agent-api/#harnesssandbox), and the standard model-facing tools operate through it. Operations on it are never recorded in the conversation.
 
-Most adapters should not implement this interface by hand: [`createSandboxSessionEnv`](#createsandboxsessionenvapi-cwd) (over a provider SDK) and [`bash()`](#bashfactory) (over a just-bash instance) produce conforming envs from smaller surfaces. The contract below is what those wrappers guarantee, and what a hand-written implementation must reproduce.
+Most adapters should not implement this interface by hand: [`createSandboxSessionEnv`](#createsandboxsessionenvapi-cwd-options) (over a provider SDK) and [`bash()`](#bashfactory) (over a just-bash instance) produce conforming envs from smaller surfaces. The contract below is what those wrappers guarantee, and what a hand-written implementation must reproduce.
 
 ### Path semantics
 
@@ -100,7 +100,7 @@ Runs a shell command and resolves with its output.
 - `options.cwd` — working directory for this command. A relative value resolves against `env.cwd`; when omitted, the command runs in `env.cwd`.
 - `options.env` — environment variables supplied to the command, layered on top of whatever base environment the adapter defines.
 - `options.timeoutMs` — wall-clock deadline hint in milliseconds, and the primary cancellation contract. Forward it to the provider's native timeout option (E2B `timeoutMs`, Daytona `timeout`, Modal `timeout`, and so on) so signal-blind providers still observe the deadline. Providers with coarser granularity may round the value up, never down.
-- `options.signal` — mid-flight cancellation for adapters whose SDK supports it. Aborting rejects with an `AbortError` (`DOMException`) carrying the signal's reason as `cause`. Adapters that cannot honor it mid-flight may ignore it; the wrappers below still check the signal before and after the remote call, so a pre-aborted call never executes and a completed-during-abort call still rejects.
+- `options.signal` — cancellation. Aborting rejects the returned promise promptly with an `AbortError` (`DOMException`) carrying the signal's reason as `cause` — never gated on the remote command's settlement. An adapter whose provider can cancel mid-flight does so, so the rejection is exact; one that can't leaves the command running as an **orphan** that keeps executing (and mutating the workspace) after the rejection, its eventual result discarded rather than surfacing later. The `AbortError` message says so. See [`createSandboxSessionEnv`](#createsandboxsessionenvapi-cwd-options) for how the wrapper implements this and how to observe an orphan's settlement.
 - `timeoutMs` and `signal` are independent. Callers with a deadline that also want ad-hoc cancellation pass both; adapters that support both should observe whichever fires first. The standard `bash` tool passes both whenever the model requests a timeout.
 
 ### File verbs
@@ -148,17 +148,40 @@ An adapter may return an env with additional properties — a native surface bey
 - A `cwd` override on `useSandbox` wraps the env and drops extra properties ([above](#usesandbox-cwd-scoping)).
 - An env that cannot execute commands should still ship all file verbs and throw from `exec` — and pair the sandbox with a [`tools`](#sessiontoolfactory) list that omits the exec-backed standard tools.
 
-## `createSandboxSessionEnv(api, cwd)`
+## `createSandboxSessionEnv(api, cwd, options?)`
 
 ```ts
-function createSandboxSessionEnv(api: SandboxApi, cwd: string): SessionEnv;
+function createSandboxSessionEnv(
+  api: SandboxApi,
+  cwd: string,
+  options?: { onOrphanSettled?: (settlement: OrphanedExecSettlement) => void },
+): SessionEnv;
 ```
 
 Wraps a `SandboxApi` — the minimal surface a remote provider adapter implements — into a conforming `SessionEnv`. The wrapper supplies:
 
 - Path resolution: relative file paths and relative/absent `exec` working directories resolve against `cwd`, POSIX-normalized. The `api` methods always receive absolute paths.
 - The `writeFile` parent-creation guarantee: a failed write is retried once after `api.mkdir(parent, { recursive: true })`; when the retry still fails, the retried write's error propagates.
-- Abort checks around `exec`: an already-aborted signal rejects with `AbortError` before `api.exec` is called, and an abort that fires during a signal-blind remote command rejects after it returns instead of surfacing a stale success. The adapter only needs to wire `signal` into its SDK when the SDK supports mid-flight cancellation.
+- The `exec` abort race: an already-aborted signal rejects with `AbortError` before `api.exec` is called. An abort that fires mid-flight rejects promptly too — the wrapper never waits on `api.exec`'s own settlement to decide the caller's outcome, whether or not the adapter wired `signal` into its SDK. The adapter only needs to forward `signal` when its SDK has a real cancellation primitive; the abort race and the promise-consumption below apply either way.
+
+### Orphaned commands
+
+When an abort fires before `api.exec`'s promise has settled, that promise becomes an **orphaned command**: the caller has already been released with an `AbortError`, but the provider call keeps running until it settles on its own. A cancel-capable adapter that forwards `signal` still produces one of these — the window just shrinks from the command's remaining duration down to the SDK's cancellation latency, since the wrapper's rejection always races ahead of that confirmation.
+
+An orphan's eventual settlement — fulfillment or rejection — is never appended to the conversation; the abort already stands as the command's terminal result, and a second outcome arriving later would violate reducer invariants. It's consumed here so it can't surface as an unhandled rejection, and reported only through `options.onOrphanSettled`:
+
+```ts
+interface OrphanedExecSettlement {
+  command: string;
+  startedAt: Date;
+  abortedAt: Date;
+  settledAt: Date;
+  result?: ShellResult;
+  error?: unknown;
+}
+```
+
+`error` carries whatever the orphaned call eventually rejected with — a late `SandboxDiedError` included. Without `onOrphanSettled`, the settlement is simply discarded; adapters that want to log, bill, or reap an orphaned remote process out-of-band use the callback to do so.
 
 ### `SandboxApi`
 
@@ -196,9 +219,9 @@ File-verb implementation notes:
 
 `exec` implementation contract:
 
-- Honor `timeoutMs` by forwarding it to the provider SDK's native timeout option, converting units and rounding up — never down — when the provider is coarser (a whole-seconds provider forwards `Math.ceil(timeoutMs / 1000)`).
+- Honor `timeoutMs` by forwarding it to the provider SDK's native timeout option, converting units and rounding up — never down — when the provider is coarser (a whole-seconds provider forwards `Math.ceil(timeoutMs / 1000)`). It stays the provider-primary deadline regardless of `signal`: it's what protects a signal-blind caller, and a caller that never aborts at all.
 - An adapter that enforces the deadline itself resolves an expired command as a `ShellResult` with `exitCode: 124` and the timeout details on `stderr` — the `timeout(1)` convention the shipped adapters follow. Rejection stays reserved for `signal` aborts.
-- Forward `signal` only when the SDK has a real cancellation primitive (an `AbortSignal` option, a process kill, a cancel token). Do not simulate mid-flight cancellation with `Promise.race` — the remote process keeps running. The wrapper's pre- and post-call abort checks already cover signal-blind SDKs.
+- Forward `signal` when the SDK has a real cancellation primitive (an `AbortSignal` option, a process kill, a cancel token) — doing so shrinks the orphan window from the command's remaining duration down to the SDK's cancellation latency. Confirm the cancellation actually takes effect; a `signal` that's accepted but not honored is worse than not forwarding it, since it advertises a kill the command never receives. Don't implement a second abort race around the call (a local `Promise.race`, or the adapter's own pre/post `signal.aborted` checks) — `createSandboxSessionEnv` already races `signal` against `api.exec`'s promise and owns the caller-facing rejection; a second race only duplicates it while leaving the orphan bookkeeping unable to tell which one fired.
 - When the provider does not expose `stderr` separately, return `''` for it. Report `exitCode: 0` only for a clearly successful call.
 
 Liveness contract (all `SandboxApi` methods):
@@ -207,6 +230,7 @@ Liveness contract (all `SandboxApi` methods):
 - An adapter with no such mechanism carries an accepted limitation: when the provider transport never settles a call after the sandbox dies, that call may hang until the surrounding operation is aborted.
 - There is deliberately no per-command deadline in this contract. Agent commands are legitimately unbounded; `timeoutMs` is the command's own deadline, not an infrastructure liveness bound.
 - An adapter that detects sandbox death should reject with `SandboxDiedError` (`type: 'sandbox_died'`, exported from `@flue/runtime`), so shell classification reports an infrastructure failure rather than caller cancellation.
+- Liveness detection and caller abort are separate concerns implemented at different layers, and a death detector must not blur them: it races the sandbox's liveness signal against the in-flight provider call and nothing else. `createSandboxSessionEnv` already races `signal` one layer up and consumes the provider promise's eventual settlement once the caller has been released, so a death detector that also listens for `signal` produces two rejections competing for the same promise. The first-party Cloudflare adapter's death detector follows this split — liveness-only, with the caller-abort race left entirely to the wrapper it builds on.
 
 ## `bash(factory)`
 
@@ -394,10 +418,10 @@ Environment allowlist: the model's shell does not inherit `process.env`. Only `P
 `exec` behavior:
 
 - Commands run through real `bash` when present (probed once per process, resolved to an absolute path), falling back to the platform default shell (`/bin/sh` or, on Windows, the system shell) when it is not.
-- On POSIX the child leads its own process group; abort and timeout signal the whole group — `SIGTERM`, escalating to `SIGKILL` after a 2-second grace — so compound commands cannot orphan grandchildren.
-- Non-zero exits, signal deaths, and spawn failures all resolve as `ShellResult` (spawn failures as `exitCode: 1` with the error message on stderr). Aborts reject with `AbortError`.
+- On POSIX the child leads its own process group; abort and timeout signal the whole group — `SIGTERM`, escalating to `SIGKILL` after a 2-second grace — so compound commands cannot orphan grandchildren. The kill is real, so `local()` has no orphaned-command window beyond that grace period.
+- Non-zero exits and spawn failures resolve as `ShellResult` (spawn failures as `exitCode: 1` with the error message on stderr). A `timeoutMs` expiry also resolves as a `ShellResult`, with `exitCode: 124` — the `timeout(1)` convention. A caller-initiated `signal` abort instead rejects with `AbortError`, even though the kill takes the same process-group path and produces that same 124 exit internally — the rejection wins and the caller never observes the `ShellResult`. A signal death `local()` did not itself initiate keeps the generic `exitCode: 1`.
 - Captured output is capped at 64 MiB; exceeding it kills the process tree and resolves with `exitCode: 1` and a truncation note on stderr.
-- `timeoutMs` is composed into the abort signal (there is no separate native timeout).
+- `timeoutMs` is composed into the caller's `signal` (there is no separate native timeout), so a pure deadline expiry and a caller abort are both delivered through the same kill path and only diverge at the point above.
 
 `stat` reports `isFile`/`isDirectory`/`size`/`mtime` for the symlink target and `isSymbolicLink` for the path itself. All `FileStat` fields are populated.
 

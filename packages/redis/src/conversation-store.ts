@@ -1,4 +1,5 @@
 import type {
+	ConversationFoldCheckpoint,
 	ConversationRecord,
 	ConversationStreamIdentity,
 	ConversationStreamMeta,
@@ -236,6 +237,44 @@ export class RedisConversationStreamStore implements ConversationStreamStore {
 
 	subscribe(path: string, listener: () => void): () => void {
 		return this.listeners.subscribe(path, listener);
+	}
+
+	async putFoldCheckpoint(path: string, checkpoint: ConversationFoldCheckpoint): Promise<void> {
+		// One multi-field HSET is atomic and writes the full fixed field set,
+		// so supersession can never leave a reader a mix of two checkpoints.
+		await this.runner.command('HSET', [
+			this.keys.conversationFoldCheckpoint(path),
+			'head_offset',
+			checkpoint.offset,
+			'incarnation',
+			checkpoint.incarnation,
+			'format_version',
+			String(checkpoint.formatVersion),
+			'data',
+			checkpoint.data,
+		]);
+	}
+
+	async getFoldCheckpoint(
+		path: string,
+		options?: { atOrBefore?: string },
+	): Promise<ConversationFoldCheckpoint | null> {
+		const row = hash(
+			await this.runner.command('HGETALL', [this.keys.conversationFoldCheckpoint(path)]),
+		);
+		if (row.head_offset === undefined || row.data === undefined) return null;
+		if (
+			options?.atOrBefore !== undefined &&
+			parseOffset(row.head_offset) > parseOffset(options.atOrBefore)
+		) {
+			return null;
+		}
+		return {
+			offset: row.head_offset,
+			incarnation: row.incarnation ?? '',
+			formatVersion: integer(row.format_version),
+			data: row.data,
+		};
 	}
 }
 

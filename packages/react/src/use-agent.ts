@@ -9,6 +9,7 @@ const emptySnapshot: AgentSnapshot = {
 	historyReady: false,
 	error: undefined,
 	failedSends: emptyAgentState.failedSends,
+	settlements: emptyAgentState.settlements,
 };
 const emptySubscribe = () => () => {};
 

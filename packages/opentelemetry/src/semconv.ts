@@ -9,7 +9,6 @@ import { CONTENT_ATTR } from '@flue/runtime/telemetry';
 export {
 	FLUE_TELEMETRY_EXTENSION_REVISION,
 	GEN_AI_PROJECTION_REVISION,
-	GEN_AI_SCHEMA_URL,
 	GEN_AI_SEMCONV_REVISION,
 } from '@flue/runtime/telemetry';
 

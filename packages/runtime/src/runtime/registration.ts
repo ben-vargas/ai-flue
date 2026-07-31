@@ -329,7 +329,7 @@ export function createAgentRouter(agent: Agent): Hono {
 		});
 	});
 
-	app.onError((err) => toHttpResponse(err));
+	app.onError((err, c) => toHttpResponse(err, { request: c.req.raw }));
 
 	return app;
 }

@@ -32,7 +32,7 @@ export function FsSurfaceTest() {
 			results['stat returns FileStat'] = stat.isFile && stat.size === 5;
 			const buffer = await harness.sandbox.readFileBuffer('/tmp/stat-target.txt');
 			results['readFileBuffer returns bytes'] = new TextDecoder().decode(buffer) === 'hello';
-			return { results, allPassed: Object.values(results).every(Boolean) };
+			return { output: { results, allPassed: Object.values(results).every(Boolean) } };
 		},
 	});
 	return 'When asked to run a demo, call the `fs-surface-test` tool and report its result.';

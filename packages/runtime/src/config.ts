@@ -78,6 +78,16 @@ export interface FlueConfig {
 	 * those with `setProvider()` in `app.ts`.
 	 */
 	providers?: string[];
+	/**
+	 * Cloudflare target only: whether the generated Worker entry installs
+	 * Cloudflare tracing by default. Defaults to `true` — deployed agents are
+	 * pre-instrumented, and spans flow once Workers Traces is enabled on the
+	 * account (wrangler `observability.traces` or the dashboard). `false`
+	 * omits the default from the build entirely; an explicit
+	 * `instrument(createCloudflareTracing(...))` in `app.ts` is unaffected
+	 * (and always takes precedence over the default when both are present).
+	 */
+	tracing?: boolean;
 }
 
 /**
@@ -114,6 +124,7 @@ const FlueConfigSchema = v.strictObject({
 	cloudflare: v.optional(NonEmptyPathSchema),
 	agents: v.optional(NonEmptyPathSchema),
 	providers: v.optional(v.array(ProviderIdSchema)),
+	tracing: v.optional(v.boolean()),
 });
 
 /**
@@ -149,6 +160,7 @@ export function mergeFlueConfig(file: FlueConfig, inline: FlueConfig): FlueConfi
 		cloudflare: inline.cloudflare ?? file.cloudflare,
 		agents: inline.agents ?? file.agents,
 		providers: inline.providers ?? file.providers,
+		tracing: inline.tracing ?? file.tracing,
 	};
 }
 
@@ -329,6 +341,8 @@ export interface ResolvedFlueProject {
 	agents: string | undefined;
 	/** Built-in provider IDs to register, or `undefined` for all built-ins. */
 	providers: string[] | undefined;
+	/** Cloudflare default-tracing injection; `undefined` means on. */
+	tracing: boolean | undefined;
 }
 
 /**
@@ -355,6 +369,7 @@ export function resolveFlueProject(opts: ResolveFlueProjectOptions): ResolvedFlu
 		cloudflare: resolveEntry('cloudflare', config.cloudflare, baseDir, sourceRoot),
 		agents: config.agents,
 		providers: config.providers,
+		tracing: config.tracing,
 	};
 }
 

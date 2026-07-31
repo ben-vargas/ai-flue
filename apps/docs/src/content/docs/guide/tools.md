@@ -23,7 +23,7 @@ export const lookupOrder = defineTool({
   input: v.object({ orderId: v.string() }),
   async run({ data }) {
     const order = await orders.get(data.orderId);
-    return { status: order.status, eta: order.eta };
+    return { output: { status: order.status, eta: order.eta } };
   },
 });
 ```
@@ -52,7 +52,7 @@ The model reads the tool's name, description, and input schema; when it decides 
 
 **Input.** The `input` schema is a [Valibot](https://valibot.dev) schema and must be a top-level object schema. Model-supplied arguments are parsed by it before `run` executes, and `run` receives the parsed value as `data`, fully typed. When validation fails, `run` is never called — the failure goes back to the model as a tool error so it can correct its arguments and retry.
 
-**Output.** `run` returns JSON-compatible data (an object, array, string, number — anything JSON-serializable), which is JSON-stringified for the model. Returning `undefined` sends `null`. Add an optional `output` schema when the returned shape should be typed and validated too:
+**Output.** `run` returns a result envelope, `{ output?, terminate? }`, not a bare value. `output` is the JSON-compatible data (an object, array, string, number — anything JSON-serializable) that's JSON-stringified for the model, and a bare `string` return is shorthand for `{ output: <string> }`. Returning nothing is allowed only when no `output` schema is declared; any other bare return throws. `terminate: true` ends the agent's turn once the current tool batch settles, the same contract `finish`/`give_up` use. Add an optional `output` schema when the returned shape should be typed and validated too:
 
 ```ts
 const checkInventory = defineTool({
@@ -61,7 +61,7 @@ const checkInventory = defineTool({
   input: v.object({ sku: v.string() }),
   output: v.object({ inStock: v.number(), warehouse: v.string() }),
   async run({ data }) {
-    return inventory.lookup(data.sku);
+    return { output: await inventory.lookup(data.sku) };
   },
 });
 ```
@@ -119,7 +119,7 @@ export const reviewContract = defineTool({
       'Review contract.md for non-standard terms and assess the risk.',
       { result: Report },
     );
-    return report;
+    return { output: report };
   },
 });
 ```
@@ -147,7 +147,7 @@ export const provisionWorkspace = defineTool({
     for (const project of DEFAULT_PROJECTS) {
       await step.do(`seed:${project.name}`, () => projects.seed(tenant.id, project));
     }
-    return { tenantId: tenant.id, projects: DEFAULT_PROJECTS.length };
+    return { output: { tenantId: tenant.id, projects: DEFAULT_PROJECTS.length } };
   },
 });
 ```

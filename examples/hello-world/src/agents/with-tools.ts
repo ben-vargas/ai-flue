@@ -36,7 +36,7 @@ export function WithTools() {
 				'Use the task tool with cwd /home/user/task-workspace to ask: "What is 100 + 23?"',
 			);
 			results['task tool works'] = taskResponse.text.includes('123');
-			return { results, allPassed: Object.values(results).every(Boolean) };
+			return { output: { results, allPassed: Object.values(results).every(Boolean) } };
 		},
 	});
 	return 'When asked to run a demo, call the `tools-test` tool and report its result.';

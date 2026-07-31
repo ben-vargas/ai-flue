@@ -178,7 +178,7 @@ export function postMessage(ref: WhatsAppSendRef) {
       const { text } = data;
       const result = await sendTextMessage(ref, text);
       const messageId = result.messages[0]?.id;
-      return { ...(messageId === undefined ? {} : { messageId }) };
+      return { output: { ...(messageId === undefined ? {} : { messageId }) } };
     },
   });
 }

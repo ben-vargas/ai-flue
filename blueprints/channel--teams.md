@@ -113,7 +113,7 @@ export function postMessage(ref: TeamsMessageRef) {
     async run({ data }) {
       const { text } = data;
       const result = await client.postMessage(ref, text);
-      return { activityId: result.id };
+      return { output: { activityId: result.id } };
     },
   });
 }

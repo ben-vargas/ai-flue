@@ -1,7 +1,7 @@
 ---
 title: Events Reference
 description: The runtime event vocabulary — the observe() and instrument() registration contracts, the event envelope, every event type and its payload, and the live-only observation fields.
-lastReviewedAt: 2026-07-21
+lastReviewedAt: 2026-07-30
 ---
 
 This page documents the runtime event surface of `@flue/runtime`: the `observe()` and `instrument()` registration contracts, the `FlueEvent` envelope, every event type and its payload, and the live-only fields a `FlueObservation` adds. For the consumer-oriented walkthrough — subscribing, metering usage, exporting telemetry — see [Observability](/docs/guide/observability/). The per-conversation message stream a chat UI reads is a different surface with a different schema; see the [Streaming Protocol Reference](/docs/reference/streaming-protocol/) and the [Flue Agent SDK events page](/docs/sdk/events/).
@@ -108,14 +108,15 @@ Ids are opaque generated strings; correlate by equality only.
 Two content guarantees hold for every event surface:
 
 - **No raw image bytes.** Recognized image content blocks in event payloads carry the [`IMAGE_DATA_OMITTED`](#image_data_omitted) sentinel in place of their base64 data. Session history (model context) keeps the real bytes.
-- **No throw-site stacks on durable-shaped error fields.** Errors serialized onto `operation`, `compaction`, `log`, and `submission_settled` payloads never include stacks. The classified error shape with an optional `stack` appears in two live-only places: `turn.response.error` and the observation's [`errorInfo`](#flueobservation).
+- **No throw-site stacks on durable-shaped error fields.** Errors serialized onto `operation`, `compaction`, `log`, `submission_recovery`, and `submission_settled` payloads never include stacks. The classified error shape with an optional `stack` appears in two live-only places: `turn.response.error` and the observation's [`errorInfo`](#flueobservation).
 
 ## Event types
 
-The v3 vocabulary contains 24 event types:
+The v3 vocabulary contains 27 event types:
 
 - Agent lifecycle — [`agent_start`, `agent_end`, `idle`](#agent_start-agent_end-idle)
-- Settlement — [`submission_settled`](#submission_settled)
+- Submission lifecycle — [`submission_queued`, `submission_running`](#submission_queued-submission_running), [`submission_settled`](#submission_settled)
+- Recovery — [`submission_recovery`](#submission_recovery)
 - Operations — [`operation_start`, `operation`](#operation_start-operation)
 - Model turns — [`turn_start`, `turn_request`, `turn`, `turn_messages`](#turn_start-turn_request-turn-turn_messages)
 - Messages and deltas — [`message_start`, `message_end`, `text_delta`, `thinking_start`, `thinking_delta`, `thinking_end`, `toolcall_delta`](#message-and-delta-events)
@@ -138,6 +139,102 @@ Nested errors do not necessarily fail the work that contains them: an agent can 
 - `agent_end` — the loop run ended. `messages` contains the messages that run produced (not the whole transcript). `AgentMessage` is the harness-level message shape (roles `user`, `assistant`, `toolResult`, plus Flue's internal `signal` messages); it is not exported from `@flue/runtime` and is not a stable payload contract — see [Stability](#stable-contract-versus-internal-shapes).
 - `idle` — the session finished an operation and returned to idle. Emitted after every terminal `operation` event, on success and failure alike. No payload fields.
 
+### `submission_queued`, `submission_running`
+
+```ts
+{
+  type: 'submission_queued';
+  submissionId: string;
+  kind: 'dispatch' | 'direct';
+}
+{
+  type: 'submission_running';
+  submissionId: string;
+  kind: 'dispatch' | 'direct';
+  attemptCount: number;
+  maxAttempts: number;
+}
+```
+
+The queue-lifecycle vocabulary, completed by [`submission_settled`](#submission_settled): `queued → running → settled`. `kind` records how the submission arrived — `dispatch` via `dispatch()`, `direct` via the agent HTTP route.
+
+- `submission_queued` — a durable submission was admitted. Emitted immediately after durable admission, before any attempt, execution context, or render exists. Delivery is **at-least-once**: admission cannot distinguish an idempotent replay, so replays — including `idempotencyKey`-deduplicated retries — re-emit it for the same `submissionId`.
+- `submission_running` — an attempt began processing a claimed submission, before any model work. Emitted on **every** attempt: a recovery replacement re-emits it with the incremented `attemptCount`. That re-emission is deliberate — it is what lets a fresh process or Durable Object isolate re-learn the busy set (see the derivation below) without any durable observer state.
+
+A delivery that joins an already-busy conversation (dispatch-while-busy) emits `submission_queued` at admission and `submission_settled` when its host response settles — but never `submission_running`, because it never runs an attempt of its own.
+
+`submission_queued` is emitted outside any execution context: its envelope carries `agentName`/`instanceId` (and its own `eventIndex` sequence) but no `conversationId`/`session`. `submission_running` is emitted from the attempt's own context, so its correlation fields and `eventIndex` sequence are the ones the session events that follow continue.
+
+#### Deriving instance busy/idle
+
+This derivation is a stable, supported pattern: mark an instance busy on `submission_queued` or `submission_running`, and clear that submission on `submission_settled`, keyed by `submissionId`.
+
+```ts
+import { observe } from '@flue/runtime';
+
+// instanceId → the submissions currently keeping it busy.
+const busy = new Map<string, Set<string>>();
+
+observe((event) => {
+  if (event.instanceId === undefined || event.submissionId === undefined) return;
+  if (event.type === 'submission_queued' || event.type === 'submission_running') {
+    let active = busy.get(event.instanceId);
+    if (!active) busy.set(event.instanceId, (active = new Set()));
+    active.add(event.submissionId);
+  } else if (event.type === 'submission_settled') {
+    const active = busy.get(event.instanceId);
+    active?.delete(event.submissionId);
+    if (active?.size === 0) busy.delete(event.instanceId); // instance went idle
+  }
+});
+```
+
+The pattern converges across process restarts and Durable Object eviction: a fresh isolate's recovery re-emits `submission_running` for every interrupted submission (and `submission_queued` re-fires on admission replays) before those submissions settle, so the new observer's busy set rebuilds itself. The at-least-once emissions are absorbed by the set semantics.
+
+### `submission_recovery`
+
+```ts
+{
+  type: 'submission_recovery';
+  submissionId?: string; // absent for pass-wide failures
+  kind?: 'dispatch' | 'direct';
+  operation:
+    | 'materialize_submission'
+    | 'finalize_settlement'
+    | 'reconcile_submission'
+    | 'start_submission'
+    | 'process_submission'
+    | 'reconcile_pass';
+  outcome: 'deferred' | 'agent_unavailable' | 'attempt_cap_deferred' | 'terminated';
+  attemptCount?: number;
+  maxAttempts?: number;
+  error?: {
+    name?: string;
+    message: string;
+    type?: string;
+    details?: string;
+    dev?: string;
+    meta?: Record<string, unknown>;
+  };
+}
+```
+
+A coordinator recovery or reconciliation step failed (or skipped work) and was contained instead of terminalizing the submission. These are the failures that never reach `submission_settled` — a submission stuck in a retry loop is visible here and nowhere else on the stream, which makes this event the alerting companion to `submission_settled`.
+
+- `operation` — the recovery step: `materialize_submission` (admission-side materialization of a queued row), `finalize_settlement` (finalizing a settlement reserved by a process that died), `reconcile_submission` (classifying an interrupted attempt), `start_submission` (starting a claimed attempt), `process_submission` (the processing/settlement machinery around an attempt), `reconcile_pass` (a whole reconcile or claim pass — no single submission, so `submissionId` is absent).
+- `outcome` — `deferred` (the work will be retried on the next scheduled wake), `agent_unavailable` (a queued row targets an agent that is no longer registered — retried until the agent is restored, the instance is aborted, or the unready auto-fail bound settles it failed), `attempt_cap_deferred` (the per-drain attempt cap was reached and the submission was handed to the backstop wake), or `terminated` (the failure was swallowed so a durable give-up could proceed — "gave up durably", as opposed to "will retry"). A queued submission whose materialization keeps failing is not retried forever: past its admission time plus the agent's `durability.timeoutMs` (default one hour) the coordinator settles it failed, emitting `submission_settled` plus a `terminated` recovery event — and a durable abort settles an unready row immediately.
+- `error` — the same durable-shaped, stackless serialization as [`submission_settled.error`](#submission_settled). The live observation additionally carries the classified [`errorInfo`](#flueobservation) with the throw-site stack.
+
+A persistent condition **re-emits on every failed wake** (roughly every 30 seconds once a coordinator falls back to its scheduled backstop). That repetition is the alerting signal — a missed emission is re-signaled on the next wake, so alert on recurrence and deduplicate by (`submissionId`, `operation`). Every emitting site also still writes its structured `console.error` line; platform logs remain the zero-config trace.
+
+#### Delivery contract
+
+These guarantees hold for the submission-lifecycle and recovery events (and restate the general [`observe()`](#observe) contract where it matters most):
+
+- **A throwing observer cannot break coordination** — guaranteed twice over: every global subscriber is individually contained by the dispatch path, and the coordinator's emitter is itself infallible by construction. A failure signal can never worsen the failure it reports.
+- **Ordering is per-emitting-context only**, exactly as for every other event. Within one isolate's live view a submission's events are causally ordered — `submission_queued` (where observed) precedes `submission_running` precedes `submission_settled` — but there is no cross-submission or cross-isolate ordering.
+- **Delivery is live-only and best-effort**: at-most-once per emission occurrence, no durable replay. Three properties make this workable: recovery re-emits `submission_running` on every replacement attempt (busy derivation converges), `submission_recovery` re-fires on every failed wake while a condition persists, and the durable truths remain the submission row and the canonical settlement record. The stream is a signal, never the ledger — an application that needs guaranteed processing polls submission state or reads the conversation, not events.
+
 ### `submission_settled`
 
 ```ts
@@ -156,7 +253,7 @@ Nested errors do not necessarily fail the work that contains them: an agent can 
 }
 ```
 
-A durable submission reached a terminal state. Emitted on every terminal path — normal completion, failure, abort, and recovery of an interrupted submission. This is the event to alert on.
+A durable submission reached a terminal state. Emitted on every terminal path — normal completion, failure, abort, and recovery of an interrupted submission, including a settlement reserved by a process that died before finalizing it. This is the event to alert on for terminal failures; pair it with [`submission_recovery`](#submission_recovery) for failures that never terminalize.
 
 - `submissionId` — the settled submission. Also stamped as the envelope correlation field.
 - `outcome` — `completed`, `failed`, or `aborted`.
@@ -437,20 +534,22 @@ Log events are runtime events only: the model never sees them and they never app
 
 ### Event order
 
-Within one `prompt` operation containing a single tool-calling turn, events arrive in this order:
+For one durable submission whose `prompt` operation contains a single tool-calling turn, events arrive in this order:
 
-1. `operation_start`, `agent_start`
-2. `message_start` / `message_end` for the user message
-3. `turn_start`, `turn_request`
-4. `message_start` for the assistant message; `text_delta`, `thinking_*`, and `toolcall_delta` interleave while it streams
-5. `turn`, then `message_end` for the completed assistant message
-6. per tool call: `tool_start` when execution begins, then `message_start` / `message_end` for its tool-result message when it finishes
-7. the terminal `tool` events when the batch commits, then `turn_messages`
-8. further turns repeat from step 3 until a turn produces no tool calls
-9. `agent_end`, `operation`, `idle`
-10. `submission_settled` when the submission settles
+1. `submission_queued` at admission
+2. `submission_running` when the attempt starts processing
+3. `operation_start`, `agent_start`
+4. `message_start` / `message_end` for the user message
+5. `turn_start`, `turn_request`
+6. `message_start` for the assistant message; `text_delta`, `thinking_*`, and `toolcall_delta` interleave while it streams
+7. `turn`, then `message_end` for the completed assistant message
+8. per tool call: `tool_start` when execution begins, then `message_start` / `message_end` for its tool-result message when it finishes
+9. the terminal `tool` events when the batch commits, then `turn_messages`
+10. further turns repeat from step 5 until a turn produces no tool calls
+11. `agent_end`, `operation`, `idle`
+12. `submission_settled` when the submission settles
 
-The sequence describes the uncontended path. A delivery that joins an already-busy conversation can interleave additional user `message_start` / `message_end` pairs at turn boundaries.
+The sequence describes the uncontended path. A delivery that joins an already-busy conversation can interleave additional user `message_start` / `message_end` pairs at turn boundaries — such a joined delivery contributes its own `submission_queued` and `submission_settled` but no `submission_running`.
 
 ## `FlueObservation`
 
@@ -484,7 +583,7 @@ The shape `observe()` delivers: the event plus exporter-oriented detail fields. 
 - `args` — the tool call's normalized arguments. On `tool_start`.
 - `effectiveResult` — the tool's effective result as the model sees it (single text blocks collapsed to their string). On successful `tool` events. Image content is replaced with [`IMAGE_DATA_OMITTED`](#image_data_omitted).
 - `toolCallId` — on `task_start` when the task was raised by a model `task` tool call, linking the task to that call.
-- `errorInfo` — the classified error for a failed activity (`operation`, `tool`, `task`, `compaction`, `submission_settled`; failed turns carry the same shape as `turn.response.error` instead). `type` is the stable machine-readable category (a [`FlueError`](/docs/reference/errors/)'s `type`, else the error's `code`, `name`, or `_OTHER`); `meta` is framework-owned structured metadata (for example validation issues); `stack` is the throw-site stack, present only when the failure was observed live from a thrown `Error`. Stacks expose filesystem paths and deployment layout, which is why this projection exists only in process.
+- `errorInfo` — the classified error for a failed activity (`operation`, `tool`, `task`, `compaction`, `submission_recovery`, `submission_settled`; failed turns carry the same shape as `turn.response.error` instead). `type` is the stable machine-readable category (a [`FlueError`](/docs/reference/errors/)'s `type`, else the error's `code`, `name`, or `_OTHER`); `meta` is framework-owned structured metadata (for example validation issues); `stack` is the throw-site stack, present only when the failure was observed live from a thrown `Error`. Stacks expose filesystem paths and deployment layout, which is why this projection exists only in process.
 
 Observations are deep-frozen; treat them as read-only.
 

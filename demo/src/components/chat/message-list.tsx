@@ -19,10 +19,10 @@ import { MessageItem, type MessageGroup } from './message-item';
  * an empty avatar row. Tracked assistant messages share `submissionId`; untracked
  * messages fall back to adjacent same-role grouping.
  *
- * Aborts are detected purely from the conversation itself: the runtime appends a
- * canonical `submission_aborted` advisory message, which we turn into an
- * assistant-side "Response was stopped." event on the preceding turn. Sends that
- * were aborted before the server accepted them surface via `abortedLocalIds`.
+ * Failed and aborted turns are detected purely from the conversation itself: the
+ * runtime's terminal advisory carries a structured `settlement` marker, which we
+ * turn into an assistant-side event on the preceding turn. Sends that were
+ * aborted before the server accepted them surface via `abortedLocalIds`.
  */
 function groupMessages(
 	messages: FlueConversationMessage[],
@@ -31,22 +31,25 @@ function groupMessages(
 ): MessageGroup[] {
 	const groups: MessageGroup[] = [];
 
-	const pushAbortEvent = (id: string) => {
+	const pushSettlementEvent = (id: string, outcome: 'failed' | 'aborted') => {
+		const event: NonNullable<MessageGroup['event']> =
+			outcome === 'aborted'
+				? { type: 'response-aborted', text: 'Response was stopped.' }
+				: { type: 'response-failed', text: "The agent couldn't finish this response." };
 		const last = groups.at(-1);
 		if (last?.role === 'assistant') {
-			last.event = { type: 'response-aborted', text: 'Response was stopped.' };
+			last.event = event;
 			return;
 		}
 
-		groups.push({
-			id: `abort:${id}`,
-			role: 'assistant',
-			messages: [],
-			event: { type: 'response-aborted', text: 'Response was stopped.' },
-		});
+		groups.push({ id: `${outcome}:${id}`, role: 'assistant', messages: [], event });
 	};
 
 	for (const message of messages) {
+		if (message.settlement) {
+			pushSettlementEvent(message.id, message.settlement.outcome);
+			continue;
+		}
 		// This chat surface renders only the user/assistant exchange; system
 		// messages have no visual block here.
 		if (message.role === 'system') continue;
@@ -54,12 +57,6 @@ function groupMessages(
 			message.role === 'assistant' &&
 			!message.parts.some((part) => isVisiblePart(part, showThinking))
 		) {
-			continue;
-		}
-
-		const advisorySubmissionId = abortAdvisorySubmissionId(message);
-		if (advisorySubmissionId) {
-			pushAbortEvent(advisorySubmissionId);
 			continue;
 		}
 
@@ -77,18 +74,9 @@ function groupMessages(
 		if (sameTrackedTurn || sameUntrackedRun) last.messages.push(message);
 		else groups.push({ id: message.id, role: message.role, messages: [message] });
 
-		if (abortedLocalIds.has(message.id)) pushAbortEvent(message.id);
+		if (abortedLocalIds.has(message.id)) pushSettlementEvent(message.id, 'aborted');
 	}
 	return groups;
-}
-
-function abortAdvisorySubmissionId(message: FlueConversationMessage): string | undefined {
-	if (message.role !== 'user' || !message.id.includes('submission_aborted')) return undefined;
-	const aborted = message.parts.some(
-		(part) => part.type === 'text' && part.text.toLowerCase().includes('submission was aborted'),
-	);
-	if (!aborted) return undefined;
-	return message.id.replace(/^.*entry_submission_aborted_/, '') || message.id;
 }
 
 function isAbortFailure(error: Error): boolean {

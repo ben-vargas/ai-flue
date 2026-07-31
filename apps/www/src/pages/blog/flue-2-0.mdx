@@ -1,0 +1,181 @@
+---
+layout: ../../layouts/BlogLayout.astro
+title: 'Flue 2.0'
+description: 'Flue 2.0 is here: the first stable release of the open TypeScript agent framework, rebuilt around dynamic agents and a new hooks-based API.'
+author: 'Fred K. Schott'
+authorUrl: 'https://x.com/FredKSchott'
+pubDate: '2026-07-30'
+cover: 'logo'
+ogImage: '/assets/flue-2-og.jpg'
+---
+
+import CopyPrompt from '../../components/CopyPrompt.astro';
+
+Flue 2.0 is available today. We rebuilt our agent framework around a new hooks-based API, unlocking an entirely new class of agent that I'm calling **dynamic agents.**
+
+Agent Hooks are a new addition in Flue 2.0. Hooks let you build dynamic agents that can manage state, listen to agent lifecycle events, and attach different resources and capabilities dynamically, even at the direction of the agent itself. Agent Hooks are authored in TypeScript (not configuration) and presented in a familiar API:
+
+```ts
+export function Assistant() {
+  const [count, setCount] = usePersistentState('count', 0);
+  useAgentStart(() => setCount((n) => n + 1));
+  useModel('moonshot/kimi-k2');
+  return `You are a helpful assistant. This conversation has ${count} messages.`;
+}
+```
+
+With dynamic agents, capabilities and instructions can grow and evolve with the conversation. A support agent can earn new tools once the customer is verified, or trade up to a bigger model when the work gets hard. We built Flue 2.0 because we kept wanting agents like that, and had no good way to write them with existing harnesses and frameworks.
+
+Flue 2.0 ships with:
+
+- **16 built-in hooks** — [`useSkill()`](/docs/reference/agent-hooks-api/#useskill), [`useTool()`](/docs/reference/agent-hooks-api/#usetool), [`useAgentStart()`](/docs/reference/agent-hooks-api/#useagentstart) and more.
+- **[Custom hooks](/docs/guide/agent-hooks/#custom-hooks)** — package capabilities into composable, shareable units.
+- **A new Vite architecture** — hosted agents are now built with [Vite](https://vite.dev/) directly.
+- **[Built-in Stateless MCP](/docs/guide/mcp/)** — mount an MCP server's tools into your agent.
+- **100+ fixes and improvements** — Flue 2.0 is our first stable release.
+
+Try Flue today by passing the prompt below to your coding agent, and it will help scaffold your first Flue project for you:
+
+<CopyPrompt text="Read https://flueframework.com/start.md then help create my first agent..." />
+
+Prefer to set things up yourself? Read the [Getting Started](/docs/guide/getting-started/) guide. Upgrading an existing project from the Flue 1.0 Beta? The [Migration Guide](/docs/guide/migration/) walks you through it.
+
+## Dynamic Agents
+
+When I was designing the original Flue 1.0 API, I took the same static approach to agent architecture that every other agent framework and SDK had taken. OpenAI SDK, Anthropic SDK, Cursor SDK, Eve, Mastra, and many others treat the "agent definition" as something static, defined upfront and then locked into place:
+
+```ts
+// Flue 1.0 API
+export default defineAgent(() => ({
+  model:   'moonshot/kimi-k2',
+  tools:   [replyToIssue],
+  skills:  [triage, verify],
+  sandbox: local(),
+  instructions,
+}));
+```
+
+We dogfooded this with users in the Flue 1.0 Beta (downloaded over 700,000 times!). What we found was surprising. The static agent approach worked well for simple use-cases, but failed to scale up for complex, non-trivial agents and workflows.
+
+We began to wonder: if Flue 1.0 had this problem, then how many other popular agent frameworks and SDKs had this problem as well? We decided that this was a problem worth solving, and that the timing was right to make the breaking change to Flue now, while we were still early.
+
+```ts
+// Flue 2.0 API
+export function IssueTriageAgent() {
+  useModel('moonshot/kimi-k2');
+  useTool(replyToIssue);
+  useSkill(triage);
+  useSkill(verify);
+  useSandbox(local());
+  return instructions;
+}
+```
+
+I was playfully teasing this last week as "What if React for Agents?" and the inspiration is undeniably obvious. But I also think that undersells just how naturally we landed on this API for ourselves. We didn't set out to build "React for Agents," but we ended up here for a good reason: both agent developers and web developers face problems with composability at the lowest level. The same problem that React Hooks was invented to solve applies to agents as well.
+
+Agent Hooks unlock a new frontier for what is possible in hosted agents and agentic workflows.
+
+Let's say you want your agent to be able to upgrade its initial model or sandbox when appropriate. In Flue 1.0 and other popular agent harnesses, this is not trivial to do. In Flue 2.0, it's just a few lines of code:
+
+```ts
+export function CompanySlackAgent() {
+  // Attach persistent data to each agent, stored in your DB.
+  const [isEnhanced, setEnhanced] = usePersistentState("isEnhanced", false);
+  // Give your agent the ability to upgrade itself.
+  useTool({ name: "enhance", description: "...", run: () => setEnhanced(true) });
+  // Attach new capabilities, on-demand.
+  if (isEnhanced) {
+    useModel('anthropic/fable-5-0');
+    useSandbox(daytona());
+    useTool(/* ... */);
+    useSkill(/* ... */);
+    useSubagent(/* ... */);
+  } else {
+    useModel('moonshot/kimi-k2');
+  }
+  // Return your agent instructions. Flue handles the rest.
+  return `You are a helpful assistant.`;
+}
+```
+
+Or maybe you want to represent a state machine-like workflow in your agent, to guide your agent through a complex multi-step process. With static agents, you have no good way to keep track of the current step in the workflow, or provide tools selectively based on the current step.
+
+In Flue 2.0, a workflow is persistent state plus conditional tools. Give each step its own tools and skills, and let the agent advance itself. Here's the same triage agent from earlier, grown into a full workflow:
+
+```ts
+export function IssueTriageAgent({ id }) {
+  useSandbox(local());
+  // Persist which step of the workflow the agent is on.
+  const [step, setStep] = usePersistentState('step', 'reproduce');
+  // Each step attaches its own tools and skills.
+  if (step === 'reproduce') {
+    useModel('anthropic/sonnet-5-0');
+    useSkill(reproChecklist);
+    useTool({ name: 'submit_repro', description: '...', run: () => setStep('diagnose') });
+  }
+  if (step === 'diagnose') {
+    useModel('anthropic/fable-5-0');
+    useSkill(debuggingGuide);
+    useTool({ name: 'submit_diagnosis', description: '...', run: () => setStep('report') });
+  }
+  if (step === 'report') {
+    useModel('anthropic/sonnet-5-0');
+    useTool(postGitHubComment);
+  }
+  return `Follow the workflow to triage GitHub issue ${id}: reproduce -> diagnose -> report.`;
+}
+```
+
+## Agent Hooks API
+
+Hooks are the real unlock here. Similar to React, a hook is just a plain function call. Built-in hooks provide the functionality to enhance your agent with new capabilities and resources like [`useTool()`](/docs/reference/agent-hooks-api/#usetool), [`useSandbox()`](/docs/reference/agent-hooks-api/#usesandbox), and [`useMcpConnection()`](/docs/reference/agent-hooks-api/#usemcpconnection). Hooks also provide persistent state ([`usePersistentState()`](/docs/reference/agent-hooks-api/#usepersistentstate)), lifecycle events ([`useAgentStart()`](/docs/reference/agent-hooks-api/#useagentstart)) and more.
+
+And just like React hooks, they compose together really nicely. You can build your own [custom hooks](/docs/guide/agent-hooks/#custom-hooks) to share across your codebase, your company, or the world on npm.
+
+```ts
+function useLinear(apiKey) {
+  useMcpConnection({
+    name: 'linear',
+    url: 'https://mcp.linear.app/mcp',
+    auth: apiKey,
+  });
+}
+
+export function ProjectAssistant() {
+  useLinear(process.env.LINEAR_API_KEY);
+  useGitHub(process.env.GITHUB_API_KEY);
+  useBrowser();
+  return 'Help your team manage their work.';
+}
+```
+
+## What else is new in 2.0
+
+Agent Hooks are the headline, but this release includes plenty of other changes to help simplify and streamline the experience of building agents on Flue. The full list lives in the [Changelog](https://github.com/withastro/flue/blob/main/CHANGELOG.md) and [Migration Guide](/docs/guide/migration/). Here are the highlights:
+
+**Flue is now a Vite plugin.** The `flue dev` and `flue build` CLI commands are gone: a Flue app is now a plain [Vite](https://vite.dev/) project with the `flue()` plugin in `vite.config.ts`, and a [Hono](https://hono.dev/) app in `app.ts` that mounts your agent routes explicitly. `vite dev` runs your dev server, `vite build` produces the deployable output for Node.js or Cloudflare (via the official `@cloudflare/vite-plugin`), and `flue init` scaffolds the whole setup. This is a theme of the release: Flue deletes its own surface wherever the ecosystem already has a better one — Vite owns the build, Hono owns routing, [Pi](https://pi.dev/) owns providers.
+
+**MCP servers are built in.** The new `useMcpConnection()` hook mounts a remote MCP server's tools directly into your agent. Connections are stateless (they run great on Cloudflare Workers), can be marked optional so a flaky server degrades gracefully instead of failing the run, and — because a connection is just a hook — can be attached conditionally or bundled into a custom hook like anything else.
+
+**Workflows are now a pattern, not a primitive.** `defineWorkflow()` is gone, because durability made it redundant: every message an agent accepts settles exactly once, through crashes, restarts, and redeploys. A workflow is now just any script that runs an agent — `flue run` in a CI job, an `init()` handle in a Node.js script, or a step in your platform's workflow engine (Cloudflare Workflows, Inngest, Temporal). For checkpointed side effects inside the agent, tools can opt into `durable: true` and record their progress with `step.do()`. The [Workflows guide](/docs/guide/workflows/) covers every pattern.
+
+**A new conversation-scoped SDK.** Each conversation has a URL, and the new `@flue/sdk` client wraps exactly one of them: `send()` a message, `read()` the settled reply, `observe()` live updates, or `abort()` the work. Messages now carry typed `purpose` and `display` metadata, so a client can tell user chat from internal activity without guessing. On the frontend, `@flue/react`'s `useFlueAgent({ url })` streams the same conversation into your UI.
+
+**Zero-config tracing on Cloudflare.** Deploy an agent to Cloudflare, enable [Workers Traces](https://developers.cloudflare.com/workers/observability/traces/), and every conversation is traced — agent, model, and tool spans with full conversation content — with no instrumentation code at all. Everywhere else, `@flue/opentelemetry` plugs the same data into the observability stack you already run.
+
+## Try Flue 2.0 today
+
+The best way to understand Flue is to build with it. Hand the prompt below to your coding agent to scaffold your first project:
+
+<CopyPrompt text="Read https://flueframework.com/start.md then help create my first agent..." />
+
+Prefer to set things up yourself? Install the packages and initialize a project, then read the full [Getting Started](/docs/guide/getting-started/) guide:
+
+```sh
+npm install @flue/runtime @flue/cli
+npx flue init
+```
+
+**Want to help support the project?** Star us on [GitHub](https://github.com/withastro/flue), it's the easiest way to show your support and help us grow!
+
+**Want to follow along?** Follow [@FredKSchott](https://x.com/FredKSchott) for more tips and dev updates.

@@ -4,7 +4,7 @@
 	"type": "module",
 	"dependencies": {
 		"@flue/runtime": "workspace:*",
-		"agents": "^0.17.4",
+		"agents": "^0.20.1",
 		"hono": "^4.7.0",
 		"just-bash": "^3.0.1"
 	},

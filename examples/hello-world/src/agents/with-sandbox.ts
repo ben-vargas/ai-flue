@@ -39,13 +39,15 @@ export function WithSandbox() {
 			const findWc = await harness.sandbox.exec('find /tmp/pipe-test -type f | wc -l');
 			const findWcOk = findWc.exitCode === 0 && findWc.stdout.trim() === '3';
 			return {
-				unameOk,
-				fileOk,
-				compoundOk,
-				pipeOk,
-				redirectOk,
-				findWcOk,
-				allPassed: unameOk && fileOk && compoundOk && pipeOk && redirectOk && findWcOk,
+				output: {
+					unameOk,
+					fileOk,
+					compoundOk,
+					pipeOk,
+					redirectOk,
+					findWcOk,
+					allPassed: unameOk && fileOk && compoundOk && pipeOk && redirectOk && findWcOk,
+				},
 			};
 		},
 	});

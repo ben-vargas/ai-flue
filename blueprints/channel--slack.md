@@ -107,8 +107,10 @@ export function replyInThread(ref: { channelId: string; threadTs: string }) {
         text,
       });
       return {
-        ...(result.channel === undefined ? {} : { channel: result.channel }),
-        ...(result.ts === undefined ? {} : { ts: result.ts }),
+        output: {
+          ...(result.channel === undefined ? {} : { channel: result.channel }),
+          ...(result.ts === undefined ? {} : { ts: result.ts }),
+        },
       };
     },
   });

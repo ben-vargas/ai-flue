@@ -323,7 +323,7 @@ export function postMessage(ref: GoogleChatConversationRef) {
     input: v.object({ text: v.pipe(v.string(), v.minLength(1)) }),
     async run({ data: { text } }) {
       const message = await client.postMessage(ref, text);
-      return { message: message.name };
+      return { output: { message: message.name } };
     },
   });
 }

@@ -147,6 +147,26 @@ end
 return 1
 `;
 
+// Terminal settlement for a QUEUED row that can never be claimed (the
+// unready abort/auto-fail path). Gated atomically on status == 'queued' —
+// first terminal state wins against a racing claim. No attempt is created
+// and no joined-delivery fan-out is needed: joins attach to a RUNNING host,
+// so a queued row can never have deliveries joined into it. KEYS: row hash,
+// queued zset, settled zset, session-unsettled zset. ARGV: id, settledAt,
+// error message.
+export const settleQueuedSubmissionScript = `${guard}
+require_type(KEYS[1], 'hash')
+for i = 2, 4 do require_type(KEYS[i], 'zset') end
+if redis.call('HGET', KEYS[1], 'status') ~= 'queued' then return 0 end
+local sequence = redis.call('HGET', KEYS[1], 'sequence')
+redis.call('ZADD', KEYS[3], sequence, ARGV[1])
+redis.call('ZREM', KEYS[2], ARGV[1])
+redis.call('ZREM', KEYS[4], ARGV[1])
+redis.call('HSET', KEYS[1], 'status', 'settled', 'settledAt', ARGV[2])
+if ARGV[3] == '' then redis.call('HDEL', KEYS[1], 'error') else redis.call('HSET', KEYS[1], 'error', ARGV[3]) end
+return 1
+`;
+
 // Claim the contiguous queued prefix for a turn-boundary join. Candidate
 // hashes occupy KEYS[4..] in admission order with their submission ids at
 // ARGV[i - 1] (three fixed keys, two fixed arguments). The caller pre-vets

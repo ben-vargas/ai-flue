@@ -180,7 +180,82 @@ function createEphemeralToolStep(toolName: string): ToolStep {
 	};
 }
 
-export function validateToolOutput<TTool extends ToolDefinition>(
+const TOOL_RUN_ENVELOPE_FIELDS = new Set(['output', 'terminate']);
+
+/**
+ * Resolve a tool run's raw return value into the canonical
+ * `{ output, terminate }` envelope, then validate `output` exactly as before.
+ * The single resolution point for every executor of a `ToolDefinition.run`
+ * (live custom tools, durable recovery re-execution, standalone runs), so the
+ * sugar and the rejections can never drift between them:
+ *
+ * - `undefined`/no return → `{ output: undefined }` (legal only without an
+ *   `output` schema, the pre-envelope rule).
+ * - bare `string` → `{ output: <string> }` (kept for ergonomics; a declared
+ *   non-string schema rejects it with the normal validation error).
+ * - plain object → MUST be the envelope; unknown keys and a non-boolean
+ *   `terminate` are authoring errors, thrown loudly.
+ * - anything else (number, boolean, array, null, class instance) → a
+ *   deliberate migration error: wrap it — `return { output: <value> }` —
+ *   which is what makes plain-object returns unambiguous.
+ */
+export function resolveToolRun<TTool extends ToolDefinition>(
+	tool: TTool,
+	result: unknown,
+): { output: ToolOutput<TTool>; terminate: boolean } {
+	const envelope = coerceToolRunEnvelope(tool.name, result);
+	return {
+		output: validateToolOutput(tool, envelope.output),
+		terminate: envelope.terminate === true,
+	};
+}
+
+function coerceToolRunEnvelope(
+	toolName: string,
+	result: unknown,
+): { output?: unknown; terminate?: boolean } {
+	if (result === undefined) return {};
+	if (typeof result === 'string') return { output: result };
+	if (isPlainObject(result)) {
+		for (const key of Object.keys(result)) {
+			if (!TOOL_RUN_ENVELOPE_FIELDS.has(key)) {
+				throw new Error(
+					`[flue] Tool "${toolName}" run() returned an object with unexpected key "${key}". ` +
+						'run() results are `{ output?, terminate? }` envelopes — to return the object ' +
+						'itself as the tool output, wrap it: `return { output: <value> }`.',
+				);
+			}
+		}
+		if ('terminate' in result && typeof result.terminate !== 'boolean') {
+			throw new Error(
+				`[flue] Tool "${toolName}" run() returned a non-boolean \`terminate\` ` +
+					`(${describeToolRunValue(result.terminate)}). \`terminate\` must be a boolean.`,
+			);
+		}
+		return result;
+	}
+	throw new Error(
+		`[flue] Tool "${toolName}" run() returned a bare ${describeToolRunValue(result)}. ` +
+			'run() results are `{ output?, terminate? }` envelopes — wrap the value: ' +
+			'`return { output: <value> }`. (A bare string remains shorthand for `{ output: <string> }`.)',
+	);
+}
+
+/** The envelope contract is a plain-object contract: anything with a foreign
+ *  prototype (Date, Map, class instances) is a value to wrap, not an envelope. */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+	if (typeof value !== 'object' || value === null) return false;
+	const proto: unknown = Object.getPrototypeOf(value);
+	return proto === Object.prototype || proto === null;
+}
+
+function describeToolRunValue(value: unknown): string {
+	if (value === null) return 'null';
+	if (Array.isArray(value)) return 'array';
+	return typeof value;
+}
+
+function validateToolOutput<TTool extends ToolDefinition>(
 	tool: TTool,
 	result: unknown,
 ): ToolOutput<TTool> {
@@ -212,7 +287,9 @@ export async function validateAndRunTool<TTool extends ToolDefinition>(
 		);
 	}
 	const parsed = parseToolInput(tool, data, signal);
-	return validateToolOutput(tool, await tool.run(parsed.context));
+	// `terminate` is a turn-loop concern; a standalone run has no turn to end,
+	// so only the resolved output survives here.
+	return resolveToolRun(tool, await tool.run(parsed.context)).output;
 }
 
 function assertNonEmptyString(value: unknown, label: string): asserts value is string {

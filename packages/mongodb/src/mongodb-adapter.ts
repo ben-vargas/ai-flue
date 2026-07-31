@@ -1,8 +1,8 @@
 import type { PersistenceAdapter } from '@flue/runtime/adapter';
 import {
-	assertSupportedFlueSchemaVersion,
-	FLUE_SCHEMA_VERSION,
-	PersistedSchemaVersionError,
+	assertSupportedFlueFormatVersion,
+	FLUE_FORMAT_VERSION,
+	PersistedFormatVersionError,
 } from '@flue/runtime/adapter';
 import { ulid } from 'ulidx';
 import { MongoAttachmentStore } from './attachment-store.ts';
@@ -22,9 +22,15 @@ export function mongodb(runner: MongoRunner, options: MongoOptions = {}): Persis
 		async migrate() {
 			migrated = false;
 			const meta = runner.collection(collectionName(prefix, 'meta'));
-			const existingVersion = await meta.findOne({ _id: 'schema_version' });
-			if (existingVersion) assertMigratableSchemaVersion(String(existingVersion.value));
-			else if (await hasUnversionedData(runner, prefix)) rejectUnversionedSchema();
+			// Advisory pre-lock check (fail fast before topology inspection);
+			// the authoritative check and any adoption happen under the lock.
+			const existingVersion = await meta.findOne({ _id: 'format_version' });
+			if (existingVersion) assertSupportedFlueFormatVersion(String(existingVersion.value));
+			else {
+				const legacyVersion = await meta.findOne({ _id: 'schema_version' });
+				if (legacyVersion) assertAdoptableLegacyVersion(String(legacyVersion.value));
+				else if (await hasUnversionedData(runner, prefix)) rejectUnversionedSchema();
+			}
 			const topology = await runner.topology();
 			if (topology.kind === 'standalone' || !topology.transactions)
 				throw new TypeError(
@@ -67,16 +73,25 @@ export function mongodb(runner: MongoRunner, options: MongoOptions = {}): Persis
 				});
 			}, MIGRATION_LEASE_MS / 3);
 			try {
-				const lockedVersion = await meta.findOne({ _id: 'schema_version' });
-				if (lockedVersion) assertMigratableSchemaVersion(String(lockedVersion.value));
-				else if (await hasUnversionedData(runner, prefix)) rejectUnversionedSchema();
+				const lockedVersion = await meta.findOne({ _id: 'format_version' });
+				if (lockedVersion) assertSupportedFlueFormatVersion(String(lockedVersion.value));
+				else {
+					const legacyVersion = await meta.findOne({ _id: 'schema_version' });
+					if (legacyVersion) {
+						assertAdoptableLegacyVersion(String(legacyVersion.value));
+						// The new stamp lands before the old one is removed, so
+						// an interruption never leaves the store stampless.
+						await meta.insertOne({ _id: 'format_version', value: FLUE_FORMAT_VERSION });
+						await meta.deleteOne({ _id: 'schema_version' });
+					} else if (await hasUnversionedData(runner, prefix)) rejectUnversionedSchema();
+				}
 				await ensureSchema(runner, prefix);
 				await renewal;
 				if (lockLost || !(await meta.findOne({ _id: 'migration_lock', ownerId })))
 					throw new TypeError('MongoDB migration lock ownership was lost.');
-				const verifiedVersion = await meta.findOne({ _id: 'schema_version' });
-				if (verifiedVersion) assertMigratableSchemaVersion(String(verifiedVersion.value));
-				else await meta.insertOne({ _id: 'schema_version', value: FLUE_SCHEMA_VERSION });
+				const verifiedVersion = await meta.findOne({ _id: 'format_version' });
+				if (verifiedVersion) assertSupportedFlueFormatVersion(String(verifiedVersion.value));
+				else await meta.insertOne({ _id: 'format_version', value: FLUE_FORMAT_VERSION });
 				await new ValueStore(runner, prefix).collectGarbage();
 				migrated = true;
 			} finally {
@@ -103,8 +118,18 @@ export function mongodb(runner: MongoRunner, options: MongoOptions = {}): Persis
 	};
 }
 
-function assertMigratableSchemaVersion(storedVersion: string): void {
-	assertSupportedFlueSchemaVersion(storedVersion);
+/**
+ * Nightly-era stores stamped `schema_version` 8 hold storage shapes
+ * byte-for-byte identical to format 1, so adoption is a pure relabel of the
+ * stamp — no data rewrite. Any other value at the old key names a store this
+ * runtime cannot read.
+ */
+function assertAdoptableLegacyVersion(storedVersion: string): void {
+	if (storedVersion === '8') return;
+	throw new PersistedFormatVersionError({
+		storedVersion,
+		supportedVersion: FLUE_FORMAT_VERSION,
+	});
 }
 
 async function hasUnversionedData(runner: MongoRunner, prefix: string): Promise<boolean> {
@@ -113,7 +138,7 @@ async function hasUnversionedData(runner: MongoRunner, prefix: string): Promise<
 			.collection(spec.name)
 			.findOne(
 				spec.name === collectionName(prefix, 'meta')
-					? { _id: { $nin: ['schema_version', 'migration_lock'] } }
+					? { _id: { $nin: ['format_version', 'schema_version', 'migration_lock'] } }
 					: {},
 			);
 		if (document) return true;
@@ -122,9 +147,9 @@ async function hasUnversionedData(runner: MongoRunner, prefix: string): Promise<
 }
 
 function rejectUnversionedSchema(): never {
-	throw new PersistedSchemaVersionError({
+	throw new PersistedFormatVersionError({
 		storedVersion: 'unversioned',
-		supportedVersion: FLUE_SCHEMA_VERSION,
+		supportedVersion: FLUE_FORMAT_VERSION,
 	});
 }
 

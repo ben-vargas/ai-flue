@@ -60,7 +60,7 @@ export function postMessage(ref: TeamsMessageRef) {
 		input: v.object({ text: v.pipe(v.string(), v.minLength(1)) }),
 		async run({ data }) {
 			const result = await client.postMessage(ref, data.text);
-			return { activityId: result.id };
+			return { output: { activityId: result.id } };
 		},
 	});
 }

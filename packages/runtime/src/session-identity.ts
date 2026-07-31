@@ -87,9 +87,9 @@ export function parseSessionStorageKey(storageKey: string): SessionStorageIdenti
 		value.length !== 4 ||
 		value.some((part) => typeof part !== 'string')
 	) {
-		// Includes pre-v7 3-element keys: behind the schema-version gate they
-		// should never be read, but if one surfaces it must fail closed rather
-		// than match another agent's lane.
+		// Includes 3-element keys: behind the format-version gate they should
+		// never be read, but if one surfaces it must fail closed rather than
+		// match another agent's lane.
 		return undefined;
 	}
 	return { agentName: value[0], instanceId: value[1], harness: value[2], session: value[3] };

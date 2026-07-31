@@ -30,7 +30,11 @@
  * lost await stopped.
  */
 
-import type { AgentConversationSnapshot, ConversationStreamChunk } from './conversation-public.ts';
+import type {
+	AgentConversationSnapshot,
+	ConversationStreamChunk,
+	ConversationStreamWireChunk,
+} from './conversation-public.ts';
 import { AgentInstanceNotFoundError, InvalidRequestError } from './errors.ts';
 import {
 	observeSubmissionSettlement,
@@ -69,7 +73,7 @@ export interface InitOptions {
 /**
  * The handle-scoped dispatch payload: exactly the top-level `dispatch()`
  * request, minus the address (`id`) and send condition (`uid`) the handle
- * itself owns — `{ message, initialData? }`. `initialData` seeds the instance
+ * itself owns — `{ message, initialData?, idempotencyKey? }`. `initialData` seeds the instance
  * only on the send that creates it; once the handle has contacted the
  * instance it is ignored, exactly as a top-level `dispatch()` to an existing
  * instance ignores it.
@@ -126,8 +130,9 @@ export interface AgentInstanceHandle {
 	 * Deliver one message; resolves at admission with the durable
 	 * {@link DispatchReceipt}. Takes the top-level `dispatch()` request
 	 * payload minus the `id`/`uid` the handle owns —
-	 * `{ message, initialData? }` — or a bare string as shorthand for
-	 * `{ message }`. To then await the reply, pass the receipt to `read()`.
+	 * `{ message, initialData?, idempotencyKey? }` — or a bare string as
+	 * shorthand for `{ message }`. To then await the reply, pass the receipt
+	 * to `read()`.
 	 */
 	dispatch(request: string | AgentHandleDispatchRequest): Promise<DispatchReceipt>;
 	/**
@@ -217,6 +222,9 @@ export function init(agent: Agent, options: InitOptions = {}): AgentInstanceHand
 					message: delivered,
 					...(payload.initialData !== undefined && !contacted
 						? { initialData: payload.initialData }
+						: {}),
+					...(payload.idempotencyKey !== undefined
+						? { idempotencyKey: payload.idempotencyKey }
 						: {}),
 					...uidCondition(),
 				},
@@ -425,9 +433,13 @@ function cloudflareSettlementTransport(
 					await throwIfInstanceMissing(response);
 					throw routeFailure('conversation observation', agentName, response);
 				}
-				const chunks = (await response.json()) as ConversationStreamChunk[];
+				const chunks = (await response.json()) as ConversationStreamWireChunk[];
 				let settlement: SubmissionSettlement | undefined;
 				for (const chunk of chunks) {
+					// Wire-only continuity markers are transport metadata, not
+					// conversation content; the in-process transport never emits
+					// them, so skipping keeps onEvent identical on both targets.
+					if (chunk.type === 'stream-checkpoint') continue;
 					target.onEvent?.(chunk);
 					settlement ??= settlementFromChunk(chunk, target.submissionId);
 				}

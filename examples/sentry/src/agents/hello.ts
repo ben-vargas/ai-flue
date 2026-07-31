@@ -13,7 +13,7 @@ export function Hello() {
 		description: 'Log an info line and return a greeting. The no-issue success case.',
 		run({ log }) {
 			log.info('hello action starting');
-			return { greeting: 'hello from flue' };
+			return { output: { greeting: 'hello from flue' } };
 		},
 	});
 	return 'When asked to run the demo, call the `hello` action and report its result.';

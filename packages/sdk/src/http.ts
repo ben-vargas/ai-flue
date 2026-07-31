@@ -34,12 +34,22 @@ export class FlueApiError extends Error {
 	readonly status: number;
 	/** Parsed response body when available; otherwise the response text. */
 	readonly body: unknown;
+	/**
+	 * Server-minted error correlation ref (`err_…`), present when the runtime
+	 * logged the failure server-side. Parsed from the envelope's `error.ref`,
+	 * falling back to the `flue-error-ref` response header, and included in
+	 * the composed `message` so the ref lands in the calling service's own
+	 * logs. Quote it when reporting a production 500.
+	 */
+	readonly ref: string | undefined;
 
-	constructor(status: number, body: unknown) {
-		super(errorMessage(status, body));
+	constructor(status: number, body: unknown, headerRef?: string) {
+		const ref = envelopeRef(body) ?? headerRef;
+		super(errorMessage(status, body, ref));
 		this.name = 'FlueApiError';
 		this.status = status;
 		this.body = body;
+		this.ref = ref;
 	}
 }
 
@@ -141,7 +151,13 @@ function resolveUrl(url: string): URL {
 async function parseJsonResponse<T>(response: Response): Promise<T> {
 	const text = await response.text();
 	const body = text ? safeJsonParse(text) : undefined;
-	if (!response.ok) throw new FlueApiError(response.status, text ? body : text);
+	if (!response.ok) {
+		throw new FlueApiError(
+			response.status,
+			text ? body : text,
+			response.headers.get('flue-error-ref') ?? undefined,
+		);
+	}
 	return body as T;
 }
 
@@ -153,10 +169,17 @@ function safeJsonParse(value: string): unknown {
 	}
 }
 
-function errorMessage(status: number, body: unknown): string {
+function envelopeRef(body: unknown): string | undefined {
+	if (typeof body !== 'object' || body === null || !('error' in body)) return undefined;
+	const ref = (body as { error?: { ref?: unknown } }).error?.ref;
+	return typeof ref === 'string' && ref !== '' ? ref : undefined;
+}
+
+function errorMessage(status: number, body: unknown, ref: string | undefined): string {
+	const refSuffix = ref ? ` (ref ${ref})` : '';
 	if (typeof body === 'object' && body !== null && 'error' in body) {
 		const error = (body as { error?: { type?: string; message?: string } }).error;
-		return `Flue API error ${status}${error?.type ? ` [${error.type}]` : ''}: ${error?.message ?? 'request failed'}`;
+		return `Flue API error ${status}${error?.type ? ` [${error.type}]` : ''}${refSuffix}: ${error?.message ?? 'request failed'}`;
 	}
-	return `Flue API error ${status}: request failed`;
+	return `Flue API error ${status}${refSuffix}: request failed`;
 }

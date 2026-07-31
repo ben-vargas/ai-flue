@@ -109,7 +109,7 @@ The submitting connection observes the work but does not own it. If a client dis
 
 Accepted work runs inside the Durable Object itself, as one platform-visible unit per response: after admission answers, Flue schedules a zero-delay wake, and the object's alarm invocation claims the queued submission and awaits the full response — every model turn and tool call — before completing. Admission always returns first; the response begins on the next alarm tick, typically within tens of milliseconds. Three consequences:
 
-- **Platform observability sees agent work.** Workers Logs, Workers Traces, and invocation-wrapping integrations (the Sentry `wrap` pattern in [Extending Agents](#extending-agents-on-cloudflare)) attribute the whole response to the one invocation that ran it. [`createCloudflareTracing()`](#createcloudflaretracing) adds agent-level spans to those traces. See [Observability](/docs/guide/observability/#cloudflare) for the two views and [Deploy on Cloudflare](/docs/ecosystem/deploy/cloudflare/#observability) for enabling them.
+- **Platform observability sees agent work.** Workers Logs, Workers Traces, and invocation-wrapping integrations (the Sentry `wrap` pattern in [Extending Agents](#extending-agents-on-cloudflare)) attribute the whole response to the one invocation that ran it. [`createCloudflareTracing()`](#createcloudflaretracing) (installed by default) adds agent-level spans to those traces. See [Observability](/docs/guide/observability/#cloudflare) for the two views and [Deploy on Cloudflare](/docs/ecosystem/deploy/cloudflare/#observability) for enabling them.
 - **Scheduled callbacks wait for a running response.** A Durable Object runs one alarm at a time, so `schedule()`/`scheduleEvery()` callbacks that come due mid-response fire after it settles — delivery is durable; timeliness is not guaranteed while the agent is busy. `queue()` is not alarm-driven and is unaffected. Steering is also unaffected: a message that arrives mid-response still joins it at the next turn boundary.
 - **CPU limits are per invocation.** Agent responses are I/O-bound and sit far below the default 30-second active-CPU limit; raise [`limits.cpu_ms`](https://developers.cloudflare.com/durable-objects/platform/limits/) in `wrangler.jsonc` if an agent computes heavily.
 
@@ -358,13 +358,13 @@ interface CloudflareTracingOptions {
 }
 ```
 
-Creates the native [Workers Traces](https://developers.cloudflare.com/workers/observability/traces/) instrumentation for agent execution. Install it once at `app.ts` module scope with `instrument(...)`, and enable traces in `wrangler.jsonc` (see [Deploy on Cloudflare](/docs/ecosystem/deploy/cloudflare/#observability)):
+Creates the native [Workers Traces](https://developers.cloudflare.com/workers/observability/traces/) instrumentation for agent execution. The build installs it with default options — call it yourself only to customize, at `app.ts` module scope, where an explicit install registers ahead of the default and replaces it (a post-startup install throws: the registration slot is taken). [`tracing: false`](/docs/reference/configuration/#tracing) in `flue.config.ts` removes agent tracing from the build; enabling traces is covered in [Deploy on Cloudflare](/docs/ecosystem/deploy/cloudflare/#observability).
 
 ```ts title="src/app.ts"
-instrument(createCloudflareTracing());
+instrument(createCloudflareTracing({ content: false }));
 ```
 
-Each agent response's trace then carries agent-level spans nested under the invocation that ran it:
+Each agent response's trace carries agent-level spans nested under the invocation that ran it:
 
 - `invoke_agent {agent}` -- the whole run, with `gen_ai.agent.name`, `gen_ai.agent.id` (the instance), `gen_ai.conversation.id`, aggregate `gen_ai.usage.*` token counts, and the caller's input and output messages.
 - `chat {model}` -- one per model turn (compaction turns included), with request and response model identity, per-turn `gen_ai.usage.*`, the finish reason, and the turn's messages, system instructions, and tool definitions. Provider `fetch` subrequests nest inside it.
@@ -372,7 +372,7 @@ Each agent response's trace then carries agent-level spans nested under the invo
 
 Span names and attributes follow the OpenTelemetry GenAI conventions that Cloudflare's own agent tracing emits, so Flue agents read natively in the Traces dashboard; Flue-specific keys live under `flue.*`.
 
-**Content is on by default** — installing the adapter is the opt-in; nothing is emitted by merely deploying. Pass `content: false` for content-free spans, or a `transform` to apply policy in code:
+**Content is on by default** — the opt-in on this target is enabling Workers Traces on the account, in `wrangler.jsonc` or from the dashboard. Pass `content: false` for content-free spans, or a `transform` to apply policy in code:
 
 ```ts title="src/app.ts"
 instrument(
@@ -387,7 +387,7 @@ instrument(
 );
 ```
 
-The transform runs on a detached copy; returning `undefined` omits that content, and a throwing transform emits a `[flue]` failure sentinel rather than the unredacted content. After the transform, a fixed 56 KiB per-attribute safety budget is enforced **in-band**: payloads stay valid JSON, oldest messages drop first behind a `role: "flue"` sentinel message, and oversized strings are cut with a `[flue:truncated, N more bytes]` suffix — search for `[flue]` in the dashboard to find truncated content. `truncateContent` from `@flue/runtime/telemetry` is the same algorithm, exported for tighter budgets inside a transform.
+The transform runs on a detached copy; returning `undefined` omits that content, and a throwing transform emits a `[flue]` failure sentinel rather than the unredacted content. After the transform, a 56 KiB per-span content budget is enforced **in-band**: all content attributes on a span share one pool — Workers Traces caps a span's total attribute bytes, and token usage, finish, and error attributes must always land — with a reserve held so output messages have room beside large prompts. Payloads stay valid JSON, oldest messages drop first behind a `role: "flue"` sentinel message, and oversized strings are cut with a `[flue:truncated, N more bytes]` suffix — search for `[flue]` in the dashboard to find truncated content. `truncateContent` from `@flue/runtime/telemetry` is the same algorithm, exported for tighter budgets inside a transform.
 
 Two exclusions hold regardless of policy: raw error messages and stack traces never ship on this backend — a failed span records only a low-cardinality `error.type`, and aborted work is marked `flue.canceled` rather than counted as an error — and caller-origin shell (`bash`) operations stay content-free.
 

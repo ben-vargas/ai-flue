@@ -100,18 +100,21 @@ export async function handleAgentRequest(opts: HandleAgentOptions): Promise<Resp
 			});
 		}
 		// The wire body IS a DeliveredMessage (plus optional reserved
-		// `initialData` and `uid` siblings for instance creation / send
-		// conditions) — the same
+		// `initialData`, `uid`, and `idempotencyKey` siblings for instance
+		// creation / send conditions / delivery naming) — the same
 		// validated shape a `dispatch()` call admits, so both transports share
 		// one schema and produce the same structured InvalidRequestError on bad
 		// input.
-		const { message, initialData, uid } = parseDeliveredInput(await parseJsonBody(request));
+		const { message, initialData, uid, idempotencyKey } = parseDeliveredInput(
+			await parseJsonBody(request),
+		);
 		const traceCarrier = extractTraceCarrier(request.headers);
 		const streamUrl = invocationStreamUrl(request);
 		const receipt = await opts.admitAttachedSubmission(message, {
 			...(traceCarrier !== undefined ? { traceCarrier } : {}),
 			...(initialData !== undefined ? { initialData } : {}),
 			...(uid !== undefined ? { uid } : {}),
+			...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
 		});
 		return admissionResponse(
 			{
@@ -119,11 +122,12 @@ export async function handleAgentRequest(opts: HandleAgentOptions): Promise<Resp
 				offset: receipt.offset,
 				submissionId: receipt.submissionId,
 				uid: receipt.uid,
+				...(receipt.deduplicated ? { deduplicated: true } : {}),
 			},
 			streamUrl,
 			receipt.offset,
 		);
 	} catch (err) {
-		return toHttpResponse(err);
+		return toHttpResponse(err, { request });
 	}
 }

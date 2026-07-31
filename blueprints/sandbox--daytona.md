@@ -1,7 +1,7 @@
 ---
 {
   "kind": "sandbox",
-  "version": 2,
+  "version": 1,
   "website": "https://daytona.io",
   "aliases": ["@daytona/sdk"]
 }
@@ -35,7 +35,7 @@ Write this file verbatim. Do not "improve" it — it conforms to the published
 `SandboxApi` contract.
 
 ```ts
-// flue-blueprint: sandbox/daytona@2
+// flue-blueprint: sandbox/daytona@1
 /**
  * Daytona adapter for Flue.
  *
@@ -94,18 +94,6 @@ const DEAD_STATES: ReadonlySet<string> = new Set([
 	'build_failed',
 ]);
 
-/** Build a standard `AbortError` (`DOMException`) from the signal's reason. */
-function abortErrorFor(signal: AbortSignal): Error {
-	const reason: unknown = signal.reason;
-	const message =
-		reason instanceof Error && reason.message
-			? reason.message
-			: typeof reason === 'string' && reason
-				? reason
-				: 'The operation was aborted.';
-	return new DOMException(message, 'AbortError');
-}
-
 /**
  * Await a Daytona SDK call while watching for sandbox death. The Daytona SDK
  * routes control-plane and toolbox requests through one HTTP client whose
@@ -120,42 +108,30 @@ function abortErrorFor(signal: AbortSignal): Error {
  * counts as alive, and a rejecting probe is an answer, not death — a
  * transient control-plane error must not kill a healthy command. The one
  * exception is `DaytonaNotFoundError`: the control plane no longer knows the
- * sandbox, which the SDK itself maps to `destroyed`. When `signal` is
- * provided, its abort joins the race and rejects immediately even though the
- * underlying call cannot be cancelled remotely.
+ * sandbox, which the SDK itself maps to `destroyed`.
+ *
+ * Liveness only: this never races the caller's abort signal. Caller-facing
+ * cancellation is owned one layer up, by `createSandboxSessionEnv`'s `exec`
+ * abort race — it rejects promptly on abort and consumes this promise's
+ * eventual settlement once the caller has already been released.
  */
 function raceSandboxDeath<T>(
 	sandbox: DaytonaSandbox,
 	operation: string,
 	call: Promise<T>,
-	signal?: AbortSignal,
 ): Promise<T> {
-	if (signal?.aborted) {
-		// The call is already in flight; swallow its eventual settlement so the
-		// early rejection can't leave an unhandled rejection behind.
-		call.catch(() => {});
-		return Promise.reject(abortErrorFor(signal));
-	}
 	return new Promise<T>((resolve, reject) => {
 		let settled = false;
 		let pollTimer: ReturnType<typeof setTimeout> | undefined;
 		let silenceTimer: ReturnType<typeof setTimeout> | undefined;
-		let removeAbortListener = (): void => {};
 
 		const settle = (complete: () => void): void => {
 			if (settled) return;
 			settled = true;
 			clearTimeout(pollTimer);
 			clearTimeout(silenceTimer);
-			removeAbortListener();
 			complete();
 		};
-
-		if (signal) {
-			const onAbort = (): void => settle(() => reject(abortErrorFor(signal)));
-			signal.addEventListener('abort', onAbort, { once: true });
-			removeAbortListener = () => signal.removeEventListener('abort', onAbort);
-		}
 
 		const probe = (): void => {
 			silenceTimer = setTimeout(() => {
@@ -205,8 +181,8 @@ function raceSandboxDeath<T>(
 class DaytonaSandboxApi implements SandboxApi {
 	constructor(private sandbox: DaytonaSandbox) {}
 
-	private guarded<T>(operation: string, call: Promise<T>, signal?: AbortSignal): Promise<T> {
-		return raceSandboxDeath(this.sandbox, operation, call, signal);
+	private guarded<T>(operation: string, call: Promise<T>): Promise<T> {
+		return raceSandboxDeath(this.sandbox, operation, call);
 	}
 
 	async readFile(path: string): Promise<string> {
@@ -279,10 +255,10 @@ class DaytonaSandboxApi implements SandboxApi {
 			signal?: AbortSignal;
 		},
 	): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-		// Daytona's executeCommand does not accept an AbortSignal, so
-		// cancellation stays local: the signal joins the death detector's
-		// race, and an abort rejects immediately even though the sandbox
-		// keeps running the command.
+		// Daytona's executeCommand does not accept an AbortSignal, so it is
+		// deliberately not forwarded here — createSandboxSessionEnv (which
+		// this adapter builds on) owns caller-facing abort and rejects
+		// promptly while the sandbox keeps running the command.
 		const response = await this.guarded(
 			'exec',
 			this.sandbox.process.executeCommand(
@@ -293,7 +269,6 @@ class DaytonaSandboxApi implements SandboxApi {
 					? Math.ceil(options.timeoutMs / 1000)
 					: undefined,
 			),
-			options?.signal,
 		);
 		return {
 			stdout: response.result ?? '',
@@ -401,133 +376,3 @@ When updating an existing integration, inspect and compare it against this compl
 ### Version 1 — 2026-06-14
 
 Initial version.
-
-### Version 2 — 2026-07-22
-
-Sandbox death detection. The Daytona SDK routes control-plane and toolbox
-requests through one HTTP client whose request timeout is 24 hours —
-effectively unbounded — so a call that was in flight when the sandbox died
-(destroyed, auto-stopped, evicted, crashed) could hang an agent for hours.
-The adapter now watches every SDK call: while a call is pending it polls
-`sandbox.refreshData()` (one control-plane GET) about every 5 seconds and
-rejects with `SandboxDiedError` (exported from `@flue/runtime`) once
-`sandbox.state` reports `destroyed`, `stopped`, `error`, or `build_failed`
-— every other state, including transitional and unknown ones, counts as
-alive, so a legitimately slow command on a healthy sandbox is never
-interrupted, and there are no per-command timeouts. A probe rejection is
-treated as an answer, not death (except `DaytonaNotFoundError`, which the
-SDK itself maps to `destroyed`); a probe that goes unanswered for 10
-seconds presumes the control plane unreachable and the sandbox dead with
-it. `exec` additionally joins its `AbortSignal` into the race so an abort
-settles immediately. No polling happens while the adapter is idle.
-
-The change is pervasive (new module-level machinery plus a wrapper around
-every SDK call), so the simplest upgrade is to rewrite the file from the
-current blueprint, preserving any customizations. The essential changes:
-
-```diff
---- a/src/sandboxes/daytona.ts
-+++ b/src/sandboxes/daytona.ts
-@@ -1,4 +1,4 @@
--// flue-blueprint: sandbox/daytona@1
-+// flue-blueprint: sandbox/daytona@2
-@@ imports
--import { createSandboxSessionEnv, SandboxOperationUnsupportedError } from '@flue/runtime';
-+import {
-+	createSandboxSessionEnv,
-+	SandboxDiedError,
-+	SandboxOperationUnsupportedError,
-+} from '@flue/runtime';
- import type { SandboxApi, SandboxFactory, SessionEnv, FileStat } from '@flue/runtime';
-+import { DaytonaNotFoundError } from '@daytona/sdk';
- import type { Sandbox as DaytonaSandbox } from '@daytona/sdk';
-+
-+const STATE_POLL_MS = 5_000;
-+const PROBE_SILENCE_MS = 10_000;
-+const DEAD_STATES: ReadonlySet<string> = new Set([
-+	'destroyed',
-+	'stopped',
-+	'error',
-+	'build_failed',
-+]);
-+
-+function abortErrorFor(signal: AbortSignal): Error {
-+	/* build a standard AbortError DOMException — see current blueprint */
-+}
-+
-+function raceSandboxDeath<T>(
-+	sandbox: DaytonaSandbox,
-+	operation: string,
-+	call: Promise<T>,
-+	signal?: AbortSignal,
-+): Promise<T> {
-+	/* poll refreshData()/state while `call` is pending; reject with
-+	   SandboxDiedError on a dead state, DaytonaNotFoundError, probe
-+	   silence, or abort — see current blueprint for the full body */
-+}
-@@ class DaytonaSandboxApi
- class DaytonaSandboxApi implements SandboxApi {
- 	constructor(private sandbox: DaytonaSandbox) {}
-
-+	private guarded<T>(operation: string, call: Promise<T>, signal?: AbortSignal): Promise<T> {
-+		return raceSandboxDeath(this.sandbox, operation, call, signal);
-+	}
-+
- 	async readFile(path: string): Promise<string> {
--		const buffer = await this.sandbox.fs.downloadFile(path);
-+		const buffer = await this.guarded('readFile', this.sandbox.fs.downloadFile(path));
- 		return buffer.toString('utf-8');
- 	}
-@@ every other SDK call gains the same wrapper
--		const buffer = await this.sandbox.fs.downloadFile(path);
-+		const buffer = await this.guarded('readFile', this.sandbox.fs.downloadFile(path));
--		await this.sandbox.fs.uploadFile(buffer, path);
-+		await this.guarded('writeFile', this.sandbox.fs.uploadFile(buffer, path));
--		const info = await this.sandbox.fs.getFileDetails(path);
-+		const info = await this.guarded('stat', this.sandbox.fs.getFileDetails(path));
--		const entries = await this.sandbox.fs.listFiles(path);
-+		const entries = await this.guarded('readdir', this.sandbox.fs.listFiles(path));
--		await this.sandbox.fs.createFolder(path, '755');
-+		await this.guarded('mkdir', this.sandbox.fs.createFolder(path, '755'));
--		await this.sandbox.fs.deleteFile(path, options?.recursive);
-+		await this.guarded('rm', this.sandbox.fs.deleteFile(path, options?.recursive));
-@@ exists() must not report a dead sandbox as a missing path
- 	async exists(path: string): Promise<boolean> {
- 		try {
--			await this.sandbox.fs.getFileDetails(path);
-+			await this.guarded('exists', this.sandbox.fs.getFileDetails(path));
- 			return true;
--		} catch {
-+		} catch (error) {
-+			// Sandbox death is an infrastructure failure, not a missing path.
-+			if (error instanceof SandboxDiedError) throw error;
- 			return false;
- 		}
- 	}
-@@ exec() forwards its AbortSignal into the race
--		const response = await this.sandbox.process.executeCommand(
--			command,
--			options?.cwd,
--			options?.env,
--			typeof options?.timeoutMs === 'number'
--				? Math.ceil(options.timeoutMs / 1000)
--				: undefined,
--		);
-+		const response = await this.guarded(
-+			'exec',
-+			this.sandbox.process.executeCommand(
-+				command,
-+				options?.cwd,
-+				options?.env,
-+				typeof options?.timeoutMs === 'number'
-+					? Math.ceil(options.timeoutMs / 1000)
-+					: undefined,
-+			),
-+			options?.signal,
-+		);
-@@ createSessionEnv guards its one SDK call too
--			const sandboxCwd = (await sandbox.getWorkDir()) ?? '/home/daytona';
-+			const sandboxCwd =
-+				(await raceSandboxDeath(sandbox, 'getWorkDir', sandbox.getWorkDir())) ??
-+				'/home/daytona';
-```

@@ -162,7 +162,7 @@ export function postMessage(ref: GoogleChatConversationRef) {
     async run({ data }) {
       const { text } = data;
       const message = await client.postMessage(ref, text);
-      return { message: message.name };
+      return { output: { message: message.name } };
     },
   });
 }

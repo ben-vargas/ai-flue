@@ -16,7 +16,7 @@ export function WithSkill() {
 				`Use the greet skill to greet the user named "${data.name ?? 'World'}".`,
 				{ result: v.object({ greeting: v.string() }) },
 			);
-			return result;
+			return { output: result };
 		},
 	});
 	return 'When asked to run a demo, call the `greet-with-skill` tool and report its result.';

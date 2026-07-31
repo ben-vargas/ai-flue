@@ -73,6 +73,7 @@ interface FlueConfig {
   cloudflare?: string;
   agents?: string;
   providers?: string[];
+  tracing?: boolean;
 }
 ```
 
@@ -129,6 +130,14 @@ The providers registered at server start, by provider ID (for example `['anthrop
 - `flue run` ignores `providers`; it always registers the full built-in set.
 
 The full semantics live in the [Provider API reference](/docs/reference/provider-api/#the-providers-config).
+
+### `tracing`
+
+Agent tracing on the Cloudflare target (the built-in [`createCloudflareTracing()`](/docs/guide/cloudflare-target/#createcloudflaretracing) install). Inert on Node.
+
+- Default: unset — tracing is on. Spans flow once [Workers Traces](https://developers.cloudflare.com/workers/observability/traces/) is enabled on the account; until then the instrumentation is a platform no-op.
+- `false` drops it from the build.
+- An explicit `instrument(createCloudflareTracing(...))` at `app.ts` module scope always replaces the built-in install, whatever this field is set to — customizing does not require `tracing: false`.
 
 ## Entry-path resolution
 

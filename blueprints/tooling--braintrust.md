@@ -1,5 +1,5 @@
 ---
-{ "kind": "tooling", "version": 2, "website": "https://www.braintrust.dev" }
+{ "kind": "tooling", "version": 1, "website": "https://www.braintrust.dev" }
 ---
 
 # Add Braintrust to Flue
@@ -65,7 +65,7 @@ identifiable information.
 Create `<source-dir>/braintrust.ts`:
 
 ```ts title="src/braintrust.ts"
-// flue-blueprint: tooling/braintrust@2
+// flue-blueprint: tooling/braintrust@1
 import { type FlueObservation, observe } from '@flue/runtime';
 import { braintrustFlueObserver, initLogger } from 'braintrust';
 
@@ -190,75 +190,3 @@ This comparison is required when the marker is missing.
 ### Version 1 — 2026-06-15
 
 Initial version.
-
-### Version 2 — 2026-06-16
-
-Remove the runtime event-type filter and ignore unsupported events inside the bridge.
-
-```diff
---- a/src/braintrust.ts
-+++ b/src/braintrust.ts
-@@ -1,4 +1,4 @@
--// flue-blueprint: tooling/braintrust@1
-+// flue-blueprint: tooling/braintrust@2
-@@ -14,31 +14,34 @@ if (apiKey) {
--  observe(
--    (event, ctx) => braintrustFlueObserver(compatibleEvent(event), ctx),
--    {
--      types: [
--        'run_start',
--        'run_resume',
--        'run_end',
--        'operation_start',
--        'operation',
--        'turn_request',
--        'turn',
--        'tool_start',
--        'tool',
--        'task_start',
--        'task',
--        'compaction_start',
--        'compaction',
--      ],
--    },
--  );
-+  observe((event, ctx) => {
-+    const compatible = compatibleEvent(event);
-+    if (compatible) braintrustFlueObserver(compatible, ctx);
-+  });
- }
-
- function compatibleEvent(event: FlueEvent): unknown {
--  if (event.type === 'run_start') observedRuns.add(event.runId);
--  if (event.type === 'run_end') observedRuns.delete(event.runId);
-+  if (event.type === 'run_start') {
-+    observedRuns.add(event.runId);
-+    return event;
-+  }
-+  if (event.type === 'run_end') {
-+    observedRuns.delete(event.runId);
-+    return event;
-+  }
-   if (event.type === 'tool') return { ...event, type: 'tool_call' };
-   if (event.type === 'run_resume') {
-     if (observedRuns.has(event.runId)) return event;
-     observedRuns.add(event.runId);
-     return { ...event, type: 'run_start', input: undefined, payload: undefined };
-   }
--  return event;
-+  if (
-+    event.type === 'operation_start' ||
-+    event.type === 'operation' ||
-+    event.type === 'turn_request' ||
-+    event.type === 'turn' ||
-+    event.type === 'tool_start' ||
-+    event.type === 'task_start' ||
-+    event.type === 'task' ||
-+    event.type === 'compaction_start' ||
-+    event.type === 'compaction'
-+  ) {
-+    return event;
-+  }
-+  return undefined;
- }
-```

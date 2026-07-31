@@ -19,7 +19,7 @@ project targets Cloudflare, stop and tell the user — there is nothing to add.
 
 MongoDB must be Atlas, a replica set, a transaction-capable sharded cluster, or
 a single-node replica set. A standalone `mongod` is unsupported. Migration
-checks topology before creating collections or stamping the Flue schema version
+checks topology before creating collections or stamping the Flue format version
 and fails when transactions are unavailable.
 
 For local development, a single-node replica set means starting one `mongod`
@@ -232,7 +232,7 @@ Flue discovers `db.ts` and runs `migrate()` at server startup. Migration first
 rejects unsupported topology, then creates or updates collections with strict
 validators and required indexes. It inspects the actual collection validator,
 validation settings, index keys, uniqueness, partial filters, and collations
-before stamping the schema version. A database written by a newer Flue version
+before stamping the format version. A database written by a newer Flue version
 is rejected. There is no separate migration command.
 
 ## Values and stored state
@@ -261,7 +261,7 @@ sandbox files, external API effects, credentials, or application business data.
 3. Start the server and confirm migration creates collections and indexes. Then
    restart it and confirm stored state reloads.
 4. Point at a throwaway standalone `mongod` and confirm migration fails before a
-   schema-version document is written.
+   format-version document is written.
 5. Exercise a value larger than one 4 MiB part and confirm it round-trips.
 6. Do not use a production database for verification.
 

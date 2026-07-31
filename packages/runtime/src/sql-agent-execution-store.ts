@@ -43,7 +43,7 @@ import {
 	createDispatchAgentSubmissionInput,
 } from './runtime/agent-submissions.ts';
 import type { DispatchInput } from './runtime/dispatch-queue.ts';
-import { migrateFlueSqlSchema } from './schema-version.ts';
+import { migrateFlueSqlSchema } from './format-version.ts';
 import {
 	createSqlSubmissionChunkStore,
 	ensureSqlSubmissionChunkTable,
@@ -465,6 +465,26 @@ class AgentSubmissionStoreImpl implements AgentSubmissionStore {
 			if (settled) this.settleJoinedSubmissions(attempt.submissionId, message);
 			return settled;
 		});
+	}
+
+	async settleQueuedSubmission(
+		submissionId: string,
+		_outcome: 'failed' | 'aborted',
+		error: unknown,
+	): Promise<boolean> {
+		const message = error instanceof Error ? error.message : String(error);
+		// A single queued-gated CAS: no attempt is created and no joined-delivery
+		// fan-out is needed — joins attach to a RUNNING host, so a queued row can
+		// never have deliveries joined into it.
+		return this.updateOwnedSubmission(
+			`UPDATE flue_agent_submissions
+			 SET status = 'settled', settled_at = ?, error = ?
+			 WHERE submission_id = ? AND status = 'queued'
+			 RETURNING submission_id`,
+			Date.now(),
+			message,
+			submissionId,
+		);
 	}
 
 	// ── Turn-boundary joins ──────────────────────────────────────────────

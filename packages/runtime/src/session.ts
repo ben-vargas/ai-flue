@@ -38,6 +38,7 @@ import {
 	READ_SKILL_RESOURCE_TOOL_NAME,
 	type TaskToolParams,
 	type TaskToolResultDetails,
+	type TaskToolUndeclaredAgentDetails,
 } from './agent.ts';
 import {
 	type AgentSubmission,
@@ -179,7 +180,7 @@ import {
 	claimStepName,
 	cloneStepValue,
 	parseToolInput,
-	validateToolOutput,
+	resolveToolRun,
 } from './tool.ts';
 import { getPreparedToolAdapter } from './tool-adapter.ts';
 import type {
@@ -2506,6 +2507,11 @@ export class Session implements FlueSession, AgentSubmissionSession {
 							isError: event.isError,
 							content: outcomeContent,
 							...(hasStructuredOutput ? { output: details?.output } : {}),
+							// Durable mirror of the engine's loop-ending flag, captured
+							// at the one seam every tool result passes through (built-in
+							// finish/give_up and custom tools alike), so recovery can
+							// reproduce the engine's batch-termination verdict.
+							...(result.terminate === true ? { terminate: true } : {}),
 							durationMs: toolDurationMs,
 						},
 					]);
@@ -2849,6 +2855,7 @@ export class Session implements FlueSession, AgentSubmissionSession {
 			isError: boolean,
 			text: string,
 			output?: unknown,
+			terminate?: boolean,
 		): ConversationRecord => ({
 			...this.canonicalEnvelope('tool_outcome', `record_tool_outcome_${outcomeKey}`),
 			type: 'tool_outcome',
@@ -2858,6 +2865,7 @@ export class Session implements FlueSession, AgentSubmissionSession {
 			isError,
 			content: [{ type: 'text', text }],
 			...(output !== undefined ? { output } : {}),
+			...(terminate ? { terminate: true } : {}),
 			durationMs: durationSince(startedAt),
 		});
 		const log = this.createToolLogger(toolDef.name, toolCallId);
@@ -2874,8 +2882,13 @@ export class Session implements FlueSession, AgentSubmissionSession {
 				step: this.createToolStep(toolDef.name, toolCallId, log),
 				...(harness ? { harness } : {}),
 			});
-			const output = validateToolOutput(toolDef, await toolDef.run(parsed.context));
-			return buildOutcome(false, output === undefined ? 'null' : JSON.stringify(output), output);
+			const resolved = resolveToolRun(toolDef, await toolDef.run(parsed.context));
+			return buildOutcome(
+				false,
+				resolved.output === undefined ? 'null' : JSON.stringify(resolved.output),
+				resolved.output,
+				resolved.terminate,
+			);
 		} catch (error) {
 			if (signal.aborted) throw error;
 			return buildOutcome(true, error instanceof Error ? error.message : String(error));
@@ -3844,7 +3857,8 @@ export class Session implements FlueSession, AgentSubmissionSession {
 							const context = harness
 								? ({ ...parsed.context, harness } as unknown as typeof parsed.context)
 								: parsed.context;
-							const output = validateToolOutput(toolDef, await toolDef.run(context));
+							const resolved = resolveToolRun(toolDef, await toolDef.run(context));
+							const output = resolved.output;
 							return {
 								content: [
 									{
@@ -3857,6 +3871,10 @@ export class Session implements FlueSession, AgentSubmissionSession {
 									output,
 									...(invocationId ? { invocationId } : {}),
 								},
+								// The engine ends the turn after this batch iff EVERY
+								// finalized result terminates — the same contract the
+								// built-in finish/give_up tools use (result.ts).
+								...(resolved.terminate ? { terminate: true } : {}),
 							};
 						} finally {
 							if (harness) {
@@ -4076,16 +4094,28 @@ export class Session implements FlueSession, AgentSubmissionSession {
 		inheritedThinkingLevel: ThinkingLevel | undefined,
 		signal?: AbortSignal,
 		toolCallId?: string,
-	): Promise<AgentToolResult<TaskToolResultDetails>> {
-		// The tool path always names a delegate: a blank `agent` fails the same
-		// way an unknown one does, before any child session exists. Agent-less
-		// blank children are reserved for programmatic `session.task()` calls,
-		// which never enter through this path.
-		if (!params.agent) {
-			throw new SubagentNotDeclaredError({
-				subagent: params.agent,
-				available: Object.keys(this.liveSubagents),
-			});
+	): Promise<AgentToolResult<TaskToolResultDetails | TaskToolUndeclaredAgentDetails>> {
+		// Resolve against the LIVE roster — the task schema's `agent` is a
+		// plain string (never a name union, which would rewrite the tool spec
+		// on every roster flip), so unknown names are a real model-facing
+		// path: answer with a factual miss, not an error outcome. A blank
+		// `agent` misses the same way an unknown one does, before any child
+		// session exists; agent-less blank children are reserved for
+		// programmatic `session.task()` calls, which never enter through
+		// this path.
+		if (!params.agent || !this.liveSubagents[params.agent]) {
+			const available = Object.keys(this.liveSubagents);
+			return {
+				content: [
+					{
+						type: 'text',
+						text:
+							`Subagent "${params.agent}" is not declared. ` +
+							`Available subagents: ${available.length > 0 ? available.join(', ') : '(none)'}.`,
+					},
+				],
+				details: { agent: params.agent, available },
+			};
 		}
 		const attachmentIds = [
 			...new Set((params.attachments ?? []).map((attachment) => attachment.id)),
@@ -5253,7 +5283,10 @@ export class Session implements FlueSession, AgentSubmissionSession {
 				// Divergence preserved from before consolidation (see
 				// submission-state.ts): a completed response flagged as silent
 				// overflow is compacted and continued here, while inspection
-				// reports it 'completed'.
+				// reports it 'completed'. A completed-terminal-batch response
+				// (`terminalToolBatch`) always lands in this break — its trailing
+				// tool batch already ended the turn (live terminate semantics),
+				// so settlement proceeds with no further model call.
 				if (state.kind === 'completed' && !state.overflow) break;
 				// Recovery for the persisted trailing assistant (overflow
 				// compaction, transient-retry backoff) happens inside the turn

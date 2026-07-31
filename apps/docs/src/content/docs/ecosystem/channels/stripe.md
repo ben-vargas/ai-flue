@@ -164,9 +164,11 @@ export function retrieveCustomer(customerId: string) {
     description: 'Retrieve the Stripe customer bound to this billing agent.',
     async run() {
       const customer = await client.customers.retrieve(customerId);
-      return 'deleted' in customer
-        ? { id: customer.id, deleted: true }
-        : { id: customer.id, name: customer.name, email: customer.email };
+      return {
+        output: 'deleted' in customer
+          ? { id: customer.id, deleted: true }
+          : { id: customer.id, name: customer.name, email: customer.email },
+      };
     },
   });
 }

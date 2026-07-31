@@ -44,6 +44,7 @@ interface UseFlueAgentResult {
   historyReady: boolean;
   error: Error | undefined;
   failedSends: FailedSend[];
+  settlements: FlueConversationSettlement[];
   sendMessage(message: string, options?: SendMessageOptions): Promise<void>;
   refresh(): void;
 }
@@ -62,6 +63,8 @@ type AgentStatus = 'idle' | 'connecting' | 'submitted' | 'streaming' | 'error';
 | `submitted`  | A prompt is being admitted or awaits attributable assistant activity.    |
 | `streaming`  | Assistant activity for this client's submission is arriving.             |
 | `error`      | Prompt admission, a submission, or stream observation failed.            |
+
+`settlements` mirrors the observed conversation's terminal submission outcomes (`FlueConversationSettlement[]`), so application code can correlate a `submissionId` with its `completed`/`failed`/`aborted` outcome; `status` and `error` semantics are unaffected by it.
 
 ### `sendMessage()`
 
@@ -89,4 +92,4 @@ Changing the `url`, `client`, or `live` option replaces the current session. Unm
 
 ## Re-exported types
 
-`@flue/react` re-exports these SDK types: `DeliveredAttachment`, `FlueClient`, `FlueConversationMessage`, `FlueConversationPart`, `PromptUsage`.
+`@flue/react` re-exports these SDK types: `DeliveredAttachment`, `FlueClient`, `FlueConversationMessage`, `FlueConversationPart`, `FlueConversationSettlement`, `PromptUsage`.

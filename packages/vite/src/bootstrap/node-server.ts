@@ -24,9 +24,9 @@ import type {
 	AssembledNodeAgentRuntime,
 	FlueAgentRegistration,
 	PersistenceAdapter,
-	RuntimeActivityLease,
 } from '@flue/runtime/internal';
 import {
+	adapterInUseByLiveRuntime,
 	assembleNodeAgentRuntime,
 	connectPersistenceAdapter,
 	createInstrumentationOwner,
@@ -35,39 +35,20 @@ import {
 } from '@flue/runtime/internal';
 import { sqlite } from '@flue/runtime/node';
 import { serve } from '@hono/node-server';
+import type {
+	FlueNodeServer,
+	LoadedFlueNodeApplication,
+	LoadFlueNodeApplicationOptions,
+	StartFlueNodeServerOptions,
+} from '../types.ts';
 
-export interface LoadFlueNodeApplicationOptions {
-	/** Local (dev) mode: dev error rendering, dev SQLite file, lifecycle logs. */
-	local?: boolean;
-	/** Environment for the runtime; defaults to `process.env`. */
-	env?: Record<string, string | undefined>;
-}
-
-/** The loaded application's lifecycle surface (admission, drain, shutdown). */
-export interface LoadedFlueNodeApplication {
-	fetch(request: Request, env?: unknown): Response | Promise<Response>;
-	/** Take an activity lease marking an in-flight request; `pauseAdmissions()` rejects new leases. */
-	enterActivity(): RuntimeActivityLease;
-	/** Stop admitting new durable work (drain phase). */
-	pauseAdmissions(): void;
-	/** Graceful shutdown: coordinator, instrumentation, persistence. */
-	stop(timeoutMs?: number): Promise<void>;
-	/** Synchronous best-effort teardown for abnormal exits. */
-	closeSync(): void;
-}
-
-export interface StartFlueNodeServerOptions extends LoadFlueNodeApplicationOptions {
-	port?: number;
-	hostname?: string;
-	quiet?: boolean;
-	signal?: AbortSignal;
-	onReady?: () => void;
-}
-
-export interface FlueNodeServer {
-	stop(): Promise<void>;
-	closeSync(): void;
-}
+export type {
+	FlueNodeActivityLease,
+	FlueNodeServer,
+	LoadedFlueNodeApplication,
+	LoadFlueNodeApplicationOptions,
+	StartFlueNodeServerOptions,
+} from '../types.ts';
 
 /** Build the identity-keyed registration records from the scanned agent set. */
 function createAgentRegistrations(): FlueAgentRegistration[] {
@@ -127,7 +108,6 @@ export async function loadFlueNodeApplication(
 				stores,
 				env: runtimeEnv,
 				devMode: isLocalMode,
-				...(devLifecycle ? { onInteractionStart: devLifecycle.onAgentInteractionStart } : {}),
 			});
 			assembled = runtime;
 			const { activityGate } = runtime;
@@ -182,9 +162,12 @@ export async function loadFlueNodeApplication(
 		const cleanupErrors: unknown[] = [];
 		try {
 			// close() covers the coordinator AND the adapter; before assembly the
-			// connected adapter is closed directly.
+			// connected adapter is closed directly — unless a still-serving
+			// application owns the same instance (a cached db.ts module hands
+			// every dev reload the same adapter).
 			if (assembled) await assembled.close();
-			else if (persistenceAdapter?.close) await persistenceAdapter.close();
+			else if (persistenceAdapter?.close && !adapterInUseByLiveRuntime(persistenceAdapter))
+				await persistenceAdapter.close();
 		} catch (cleanupError) {
 			cleanupErrors.push(cleanupError);
 		}

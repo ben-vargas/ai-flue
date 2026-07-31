@@ -35,6 +35,16 @@ export interface TaskToolResultDetails {
 }
 
 /**
+ * Details for a `task` call naming an agent outside the live roster. The
+ * call answers with a factual miss (same pattern as `activate_skill`), so
+ * no child session — and none of the `TaskToolResultDetails` fields — exist.
+ */
+export interface TaskToolUndeclaredAgentDetails {
+	agent: string;
+	available: string[];
+}
+
+/**
  * Layer packaged-skill routing onto an env before handing it to model-facing
  * tool factories: `readFile` serves `/.flue/packaged-skills/` paths from the
  * in-memory catalog (and reports unknown paths under that root as missing)
@@ -375,14 +385,16 @@ const TaskParams = Type.Object({
  * "Available Agents" section (same freeze semantics as the skill catalog);
  * mid-window changes are announced as `resources` signals; and `agent` is
  * schema-required, resolving against the live roster at run time — an agent
- * with no `useSubagent()` declarations has no valid value to pass.
+ * with no `useSubagent()` declarations has no valid value to pass, and a
+ * name outside the roster answers with a factual miss (same pattern as
+ * `activate_skill`), not an error outcome.
  */
 export function createTaskTool(
 	runTask: (
 		params: TaskToolParams,
 		signal?: AbortSignal,
 		toolCallId?: string,
-	) => Promise<AgentToolResult<TaskToolResultDetails>>,
+	) => Promise<AgentToolResult<TaskToolResultDetails | TaskToolUndeclaredAgentDetails>>,
 ): AgentTool<typeof TaskParams> {
 	return {
 		name: 'task',
@@ -606,7 +618,17 @@ function readPackagedSkillFile(
 ): string | undefined {
 	for (const skill of Object.values(skills)) {
 		for (const [filePath, file] of Object.entries(skill.files)) {
-			if (path !== formatPackagedSkillFilePath(skill.id, filePath)) continue;
+			// The advertised path percent-encodes the skill id, but models echo
+			// it back decoded — framework ids are `skill:<name>:<hash>`, whose
+			// `:` encodes to `%3A` — so accept both spellings. The encoded form
+			// is checked first; it stays unambiguous even for ids containing
+			// path separators.
+			if (
+				path !== formatPackagedSkillFilePath(skill.id, filePath) &&
+				path !== `${PACKAGED_SKILLS_ROOT}${skill.id}/${filePath}`
+			) {
+				continue;
+			}
 			return file.kind === 'binary'
 				? wrapBase64ForReading(file.content)
 				: new TextDecoder().decode(decodeBase64(file.content));

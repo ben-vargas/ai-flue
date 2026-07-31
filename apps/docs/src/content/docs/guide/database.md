@@ -115,7 +115,7 @@ export default postgres({
 
 Each blueprint generates a complete `db.ts` like this one for its ecosystem's standard driver; each ecosystem page documents the runner contract and the backend's durability caveats.
 
-There are no migrations to run by hand with any adapter. `migrate()` provisions Flue's tables idempotently on first boot, reuses them on restart, and stamps a schema version — a database written by an incompatible Flue version refuses to start rather than corrupting state.
+There are no migrations to run by hand with any adapter. `migrate()` provisions Flue's tables idempotently on first boot, reuses them on restart, and stamps a format version — a database written by an incompatible Flue version refuses to start rather than corrupting state.
 
 A shared database does **not** enable active-active scaling. A durable external database lets a replacement process recover accepted work and lets replicas share conversation state, but each agent conversation still needs exactly one live Node owner at a time. See [Durability](/docs/guide/durability/#nodejs-recovery) for the ownership rules and what recovery actually replays.
 

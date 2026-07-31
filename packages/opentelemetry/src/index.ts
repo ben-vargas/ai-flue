@@ -9,8 +9,10 @@ import type {
 import {
 	agentInputMessage,
 	agentOutputMessage,
+	type ContentLedger,
 	type ContentOption,
-	contentAttribute,
+	createContentLedger,
+	drawContentAttribute,
 	type GenAIContentType,
 	inputMessages,
 	normalizeFinishReason,
@@ -22,6 +24,7 @@ import {
 	type Attributes,
 	type Context,
 	context,
+	type Exception,
 	type Meter,
 	metrics,
 	propagation,
@@ -31,9 +34,9 @@ import {
 	type Tracer,
 	trace,
 } from '@opentelemetry/api';
-import { emitInferenceException, type GenAILogger } from './logs.ts';
+import { emitInferenceException, emitSubmissionRecovery, type GenAILogger } from './logs.ts';
 import { createGenAIMetrics, recordTokenUsage } from './metrics.ts';
-import { ATTR, GEN_AI_SCHEMA_URL } from './semconv.ts';
+import { ATTR } from './semconv.ts';
 
 export type {
 	ContentOption,
@@ -41,11 +44,14 @@ export type {
 	GenAIContentScope,
 	GenAIContentType,
 } from '@flue/runtime/telemetry';
-export { CONTENT_BUDGET_BYTES, truncateContent } from '@flue/runtime/telemetry';
+export {
+	CONTENT_BUDGET_BYTES,
+	OUTPUT_CONTENT_RESERVE_BYTES,
+	truncateContent,
+} from '@flue/runtime/telemetry';
 export {
 	FLUE_TELEMETRY_EXTENSION_REVISION,
 	GEN_AI_PROJECTION_REVISION,
-	GEN_AI_SCHEMA_URL,
 	GEN_AI_SEMCONV_REVISION,
 } from './semconv.ts';
 
@@ -57,8 +63,9 @@ export interface OpenTelemetryInstrumentationOptions {
 	 * `false` opts out of content entirely; `{ transform }` is the policy hook
 	 * (redact, drop, reshape, tighten via `truncateContent`, side-effect for
 	 * external delivery with `scope.traceId`/`scope.spanId`); absent means
-	 * content on with the safety-net truncation alone. Exception message/stack
-	 * flow through the same gate.
+	 * content on with the safety-net truncation alone — all content a span
+	 * carries draws from one shared `CONTENT_BUDGET_BYTES` pool. Exception
+	 * message/stack flow through the same gate and the same pool.
 	 */
 	content?: ContentOption;
 	resolveRootContext?: (event: FlueObservation, ctx: FlueEventContext) => Context | undefined;
@@ -76,14 +83,10 @@ export interface OpenTelemetryInstrumentation {
 export function createOpenTelemetryInstrumentation(
 	options: OpenTelemetryInstrumentationOptions = {},
 ): OpenTelemetryInstrumentation {
-	const tracer =
-		options.tracer ??
-		trace
-			.getTracerProvider()
-			.getTracer('@flue/opentelemetry', undefined, { schemaUrl: GEN_AI_SCHEMA_URL });
-	const meter =
-		options.meter ??
-		metrics.getMeter('@flue/opentelemetry', undefined, { schemaUrl: GEN_AI_SCHEMA_URL });
+	// No schemaUrl: the GenAI semconv repo has not published one (see
+	// GEN_AI_SEMCONV_REVISION for the pinned upstream revision instead).
+	const tracer = options.tracer ?? trace.getTracerProvider().getTracer('@flue/opentelemetry');
+	const meter = options.meter ?? metrics.getMeter('@flue/opentelemetry');
 	const instruments = createGenAIMetrics(meter);
 	const operations = new Map<string, TrackedSpan>();
 	const turns = new Map<string, TrackedSpan>();
@@ -94,6 +97,19 @@ export function createOpenTelemetryInstrumentation(
 
 	const observe: FlueObservationSubscriber = (event, ctx) => {
 		if (disposed) return;
+		if (event.type === 'submission_recovery') {
+			// No span: recovery happens outside any intercepted execution, so
+			// there is nothing live to attach one to.
+			recordSignal(() =>
+				emitSubmissionRecovery(options.logger, {
+					...(event.submissionId ? { 'flue.submission.id': event.submissionId } : {}),
+					'flue.recovery.operation': event.operation,
+					'flue.recovery.outcome': event.outcome,
+					...(event.errorInfo ? { [ATTR.errorType]: metricErrorType(event.errorInfo.type) } : {}),
+				}),
+			);
+			return;
+		}
 		const time = new Date(event.timestamp);
 		if (event.type === 'operation_start') {
 			if (event.operationKind === 'shell') return;
@@ -135,15 +151,16 @@ export function createOpenTelemetryInstrumentation(
 					...(event.conversationId ? { [ATTR.conversationId]: event.conversationId } : {}),
 				},
 			);
+			const tracked = trackedSpan(span, event);
 			setContent(
-				span,
+				tracked,
 				ATTR.inputMessages,
 				agentInputMessage(event.agentInput),
 				event,
 				options.content,
 				'input_messages',
 			);
-			tasks.set(taskKey(event), trackedSpan(span, event));
+			tasks.set(taskKey(event), tracked);
 			return;
 		}
 		if (event.type === 'compaction_start') {
@@ -186,6 +203,11 @@ export function createOpenTelemetryInstrumentation(
 					[ATTR.providerName]: request.providerName,
 					[ATTR.requestModel]: request.requestedModel,
 					[ATTR.requestStream]: true,
+					// Not in the semconv inference-span table (agent linkage there
+					// is structural, via the parent invoke_agent) — recorded here
+					// so backends can aggregate the span's token usage by agent
+					// without span stitching (#535).
+					...(event.agentName ? { [ATTR.agentName]: event.agentName } : {}),
 					...(event.conversationId ? { [ATTR.conversationId]: event.conversationId } : {}),
 					...(request.reasoningLevel ? { [ATTR.reasoningLevel]: request.reasoningLevel } : {}),
 					...(request.maxTokens !== undefined ? { [ATTR.maxTokens]: request.maxTokens } : {}),
@@ -197,31 +219,7 @@ export function createOpenTelemetryInstrumentation(
 					'flue.turn.purpose': event.purpose,
 				},
 			);
-			setContent(
-				span,
-				ATTR.inputMessages,
-				inputMessages(request.input.messages),
-				event,
-				options.content,
-				'input_messages',
-			);
-			setContent(
-				span,
-				ATTR.systemInstructions,
-				systemInstructions(request.input.systemPrompt),
-				event,
-				options.content,
-				'system_instructions',
-			);
-			setContent(
-				span,
-				ATTR.toolDefinitions,
-				toolDefinitions(request.input.tools),
-				event,
-				options.content,
-				'tool_definitions',
-			);
-			turns.set(turnKey(event), {
+			const tracked: TrackedSpan = {
 				...trackedSpan(span, event),
 				clientAttributes: {
 					[ATTR.operationName]: 'chat',
@@ -230,7 +228,32 @@ export function createOpenTelemetryInstrumentation(
 					...(request.serverAddress ? { [ATTR.serverAddress]: request.serverAddress } : {}),
 					...(request.serverPort !== undefined ? { [ATTR.serverPort]: request.serverPort } : {}),
 				},
-			});
+			};
+			setContent(
+				tracked,
+				ATTR.inputMessages,
+				inputMessages(request.input.messages),
+				event,
+				options.content,
+				'input_messages',
+			);
+			setContent(
+				tracked,
+				ATTR.systemInstructions,
+				systemInstructions(request.input.systemPrompt),
+				event,
+				options.content,
+				'system_instructions',
+			);
+			setContent(
+				tracked,
+				ATTR.toolDefinitions,
+				toolDefinitions(request.input.tools),
+				event,
+				options.content,
+				'tool_definitions',
+			);
+			turns.set(turnKey(event), tracked);
 			return;
 		}
 		if (event.type === 'tool_start') {
@@ -251,15 +274,19 @@ export function createOpenTelemetryInstrumentation(
 					...(shell ? {} : { [ATTR.toolName]: event.toolName }),
 					...(shell ? {} : { [ATTR.toolCallId]: event.toolCallId }),
 					...(shell ? {} : { [ATTR.toolType]: 'function' }),
+					// Conditionally required on execute_tool spans: the agent the
+					// tool runs on behalf of.
+					...(!shell && event.agentName ? { [ATTR.agentName]: event.agentName } : {}),
 					...(!shell && event.conversationId
 						? { [ATTR.conversationId]: event.conversationId }
 						: {}),
 					...(event.origin ? { 'flue.tool.origin': event.origin } : {}),
 				},
 			);
+			const tracked = trackedSpan(span, event);
 			if (!shell) {
 				setContent(
-					span,
+					tracked,
 					ATTR.toolDescription,
 					event.description,
 					event,
@@ -267,9 +294,9 @@ export function createOpenTelemetryInstrumentation(
 					'tool_description',
 					true,
 				);
-				setToolContent(span, 'arguments', event.args, event, options.content);
+				setToolContent(tracked, 'arguments', event.args, event, options.content);
 			}
-			tools.set(toolKey(event), trackedSpan(span, event));
+			tools.set(toolKey(event), tracked);
 			return;
 		}
 		if (event.type === 'turn') {
@@ -287,7 +314,7 @@ export function createOpenTelemetryInstrumentation(
 				...usageAttributes(event.response.usage),
 			});
 			setContent(
-				span,
+				tracked,
 				ATTR.outputMessages,
 				outputMessages(event.response.output, finishReason),
 				event,
@@ -325,9 +352,13 @@ export function createOpenTelemetryInstrumentation(
 						event,
 						span,
 						options,
+						tracked.ledger,
 					)
 				: undefined;
-			if (exception)
+			// The exception event requires `exception.type` or `exception.message`;
+			// with neither (no class name, content off), `error.type` on the span
+			// and metrics is the whole failure record.
+			if (exception && hasExceptionContent(exception))
 				recordSignal(() =>
 					emitInferenceException(options.logger, {
 						...metricAttributes,
@@ -360,7 +391,7 @@ export function createOpenTelemetryInstrumentation(
 			}
 			if (!event.isError && (event.origin !== 'caller' || event.toolName !== 'bash')) {
 				setToolContent(
-					span,
+					tracked,
 					'result',
 					Object.hasOwn(event, 'effectiveResult') ? event.effectiveResult : event.result,
 					event,
@@ -378,6 +409,7 @@ export function createOpenTelemetryInstrumentation(
 							value: event.errorInfo ?? event.result,
 							event,
 							options,
+							ledger: tracked.ledger,
 						}
 					: undefined,
 				time,
@@ -387,10 +419,10 @@ export function createOpenTelemetryInstrumentation(
 		}
 		if (event.type === 'task') {
 			const key = taskKey(event);
-			const span = tasks.get(key)?.span;
-			if (span) {
+			const tracked = tasks.get(key);
+			if (tracked) {
 				setContent(
-					span,
+					tracked,
 					ATTR.outputMessages,
 					agentOutputMessage(event.agentOutput),
 					event,
@@ -432,11 +464,12 @@ export function createOpenTelemetryInstrumentation(
 		if (event.type === 'operation') {
 			endDescendants(event, turns, tools, tasks, compactions, time);
 			const key = operationKey(event);
-			const span = operations.get(key)?.span;
+			const tracked = operations.get(key);
+			const span = tracked?.span;
 			if (span && event.usage) span.setAttributes(usageAttributes(event.usage));
-			if (span && (event.operationKind === 'prompt' || event.operationKind === 'skill')) {
+			if (tracked && (event.operationKind === 'prompt' || event.operationKind === 'skill')) {
 				setContent(
-					span,
+					tracked,
 					ATTR.inputMessages,
 					agentInputMessage(event.agentInput),
 					event,
@@ -444,7 +477,7 @@ export function createOpenTelemetryInstrumentation(
 					'input_messages',
 				);
 				setContent(
-					span,
+					tracked,
 					ATTR.outputMessages,
 					agentOutputMessage(event.agentOutput),
 					event,
@@ -474,6 +507,42 @@ export function createOpenTelemetryInstrumentation(
 	};
 
 	const interceptor: FlueExecutionInterceptor = (operation, executionContext, next) => {
+		if (operation.type === 'coordinator') {
+			// Framework bookkeeping around agent invocations: an internal span
+			// activated in context so auto-instrumented storage/RPC calls group
+			// under it instead of landing as unparented siblings of
+			// invoke_agent. Wholly interception-scoped — no observe event owes
+			// it attributes — and the coordinator starts attempt fibers only
+			// after this interception returns, so the semconv spans never nest
+			// under it. One stable span name; phases distinguish by attribute.
+			const span = tracer.startSpan(
+				'flue.coordinator',
+				{
+					kind: SpanKind.INTERNAL,
+					attributes: {
+						'flue.coordinator.phase': operation.phase,
+						...(executionContext.instanceId
+							? { 'flue.instance.id': executionContext.instanceId }
+							: {}),
+						...(executionContext.agentName
+							? { 'flue.agent.name': executionContext.agentName }
+							: {}),
+					},
+				},
+				context.active(),
+			);
+			return context.with(trace.setSpan(context.active(), span), next).then(
+				(value) => {
+					span.end();
+					return value;
+				},
+				(error: unknown) => {
+					span.setStatus({ code: SpanStatusCode.ERROR });
+					span.end();
+					throw error;
+				},
+			);
+		}
 		const span = (
 			operation.type === 'agent'
 				? operations.get(operationKey({ ...executionContext, operationId: operation.operationId }))
@@ -549,6 +618,8 @@ interface ExecutionIdentity {
 
 interface TrackedSpan {
 	span: Span;
+	/** Shared content pool: message, tool, and exception draws bill one span. */
+	ledger: ContentLedger;
 	operationKey?: string;
 	clientAttributes?: Attributes;
 }
@@ -556,6 +627,7 @@ interface TrackedSpan {
 function trackedSpan(span: Span, event: FlueObservation): TrackedSpan {
 	return {
 		span,
+		ledger: createContentLedger(),
 		...(event.operationId ? { operationKey: operationKey(event) } : {}),
 	};
 }
@@ -621,7 +693,7 @@ function usageAttributes(usage: PromptUsage | undefined): Attributes {
 }
 
 function setContent(
-	span: Span,
+	tracked: TrackedSpan,
 	name: string,
 	value: unknown,
 	event: FlueObservation,
@@ -630,33 +702,39 @@ function setContent(
 	rawString = false,
 ): void {
 	if (policy === false) return;
-	const spanContext = span.spanContext();
-	const result = contentAttribute(policy, value, event, {
+	const spanContext = tracked.span.spanContext();
+	const result = drawContentAttribute(tracked.ledger, policy, () => value, event, {
+		key: name,
 		contentType,
 		rawString,
 		traceId: spanContext.traceId,
 		spanId: spanContext.spanId,
 	});
-	if (result.value !== undefined) span.setAttribute(name, result.value);
+	if (result.value !== undefined) tracked.span.setAttribute(name, result.value);
 }
 
+/**
+ * The draw is charged under the semconv key; the raw fallback differs by a
+ * few bytes, well inside the pool's slack.
+ */
 function setToolContent(
-	span: Span,
+	tracked: TrackedSpan,
 	kind: 'arguments' | 'result',
 	value: unknown,
 	event: FlueObservation,
 	policy: ContentOption | undefined,
 ): void {
 	if (policy === false) return;
-	const spanContext = span.spanContext();
-	const result = contentAttribute(policy, value, event, {
+	const spanContext = tracked.span.spanContext();
+	const result = drawContentAttribute(tracked.ledger, policy, () => value, event, {
+		key: ATTR[kind === 'arguments' ? 'toolArguments' : 'toolResult'],
 		contentType: kind === 'arguments' ? 'tool_arguments' : 'tool_result',
 		rawString: true,
 		traceId: spanContext.traceId,
 		spanId: spanContext.spanId,
 	});
 	if (result.value !== undefined) {
-		span.setAttribute(
+		tracked.span.setAttribute(
 			result.objectShaped
 				? ATTR[kind === 'arguments' ? 'toolArguments' : 'toolResult']
 				: `flue.tool.call.${kind}`,
@@ -673,6 +751,7 @@ function complete(
 				value?: unknown;
 				event?: FlueObservation;
 				options?: OpenTelemetryInstrumentationOptions;
+				ledger?: ContentLedger;
 				attributes?: Attributes;
 		  }
 		| undefined,
@@ -681,9 +760,16 @@ function complete(
 	if (error) {
 		const attributes =
 			error.attributes ??
-			(error.event && error.options
-				? exceptionAttributes(error.type, error.value, error.event, span, error.options)
-				: { [ATTR.errorType]: error.type ?? '_OTHER', 'exception.type': error.type ?? '_OTHER' });
+			(error.event && error.options && error.ledger
+				? exceptionAttributes(
+						error.type,
+						error.value,
+						error.event,
+						span,
+						error.options,
+						error.ledger,
+					)
+				: { [ATTR.errorType]: error.type ?? '_OTHER' });
 		span.setAttribute(ATTR.errorType, attributes[ATTR.errorType] as string);
 		// The status message reuses the content-policy-processed exception
 		// message, so trace UIs that render status.message (not exception
@@ -694,15 +780,21 @@ function complete(
 				? { message: attributes['exception.message'] as string }
 				: {}),
 		});
-		span.recordException({
-			name: attributes['exception.type'] as string,
-			...(attributes['exception.message']
-				? { message: attributes['exception.message'] as string }
-				: {}),
-			...(attributes['exception.stacktrace']
-				? { stack: attributes['exception.stacktrace'] as string }
-				: {}),
-		});
+		// An exception record needs a class name or a message; without either
+		// (no throw-site class, content off) the span's `error.type` is the
+		// whole failure record — recording an empty exception would only echo
+		// the taxonomy into a slot the spec defines as the class name.
+		if (hasExceptionContent(attributes)) {
+			span.recordException({
+				...(attributes['exception.type'] ? { name: attributes['exception.type'] as string } : {}),
+				...(attributes['exception.message']
+					? { message: attributes['exception.message'] as string }
+					: {}),
+				...(attributes['exception.stacktrace']
+					? { stack: attributes['exception.stacktrace'] as string }
+					: {}),
+			} as Exception);
+		}
 	}
 	span.end(time);
 }
@@ -740,7 +832,7 @@ function endSpan(
 	if (!tracked) return;
 	complete(
 		tracked.span,
-		isError ? { type: errorType, value: error, event, options } : undefined,
+		isError ? { type: errorType, value: error, event, options, ledger: tracked.ledger } : undefined,
 		time,
 	);
 	spans.delete(key);
@@ -752,14 +844,21 @@ function exceptionAttributes(
 	event: FlueObservation,
 	span: Span,
 	options: OpenTelemetryInstrumentationOptions,
+	ledger: ContentLedger,
 ): Attributes {
-	const type = errorType ?? '_OTHER';
-	const attributes: Attributes = { [ATTR.errorType]: type, 'exception.type': type };
+	const attributes: Attributes = { [ATTR.errorType]: errorType ?? '_OTHER' };
+	// `exception.type` (a Stable attribute) is the exception *class name* —
+	// the spec wants "the fully qualified class name" — never Flue's error
+	// taxonomy, whose home is `error.type`. Classified `errorInfo` carries the
+	// throw-site class as `name`; a raw thrown `Error` carries it directly.
+	const className = exceptionClassName(error);
+	if (className) attributes['exception.type'] = className;
 	if (options.content === false) return attributes;
 	const spanContext = span.spanContext();
 	const message = errorMessage(error);
 	if (message) {
-		const processed = contentAttribute(options.content, message, event, {
+		const processed = drawContentAttribute(ledger, options.content, () => message, event, {
+			key: 'exception.message',
 			contentType: 'exception_message',
 			rawString: true,
 			traceId: spanContext.traceId,
@@ -773,7 +872,8 @@ function exceptionAttributes(
 	// transform on `exception_stacktrace` (or disable content) if that matters.
 	const stack = errorStack(error);
 	if (stack) {
-		const processed = contentAttribute(options.content, stack, event, {
+		const processed = drawContentAttribute(ledger, options.content, () => stack, event, {
+			key: 'exception.stacktrace',
 			contentType: 'exception_stacktrace',
 			rawString: true,
 			traceId: spanContext.traceId,
@@ -782,6 +882,33 @@ function exceptionAttributes(
 		if (processed.value !== undefined) attributes['exception.stacktrace'] = processed.value;
 	}
 	return attributes;
+}
+
+/** True when the attributes can carry a spec-valid exception record. */
+function hasExceptionContent(attributes: Attributes): boolean {
+	return (
+		attributes['exception.type'] !== undefined || attributes['exception.message'] !== undefined
+	);
+}
+
+/**
+ * The exception class name for `exception.type`: `Error#name` on a live
+ * throwable, the classified `errorInfo.name` (which `classifyError` takes
+ * from the same place) on the runtime's projected shape. Anything else —
+ * strings, taxonomy-only objects — has no class to report.
+ */
+function exceptionClassName(error: unknown): string | undefined {
+	if (error instanceof Error) return error.name || error.constructor.name || 'Error';
+	if (
+		error &&
+		typeof error === 'object' &&
+		'name' in error &&
+		typeof error.name === 'string' &&
+		error.name.length > 0
+	) {
+		return error.name;
+	}
+	return undefined;
 }
 
 function errorMessage(error: unknown): string | undefined {

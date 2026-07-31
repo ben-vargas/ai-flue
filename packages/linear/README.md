@@ -32,5 +32,7 @@ storage, or model tools. Run `flue add channel linear` to generate editable proj
 code using the official `@linear/sdk` client.
 
 Instance ids identify issues, nested issue-comment threads, and agent
-sessions. They are not authorization capabilities. The package is stateless
-and does not deduplicate `Linear-Delivery` ids.
+sessions. They are not authorization capabilities. The package is stateless;
+deduplicate webhook redeliveries by naming the delivery in the dispatch
+(`idempotencyKey: deliveryId`, the `Linear-Delivery` header value) so a
+redelivery converges on the original submission.

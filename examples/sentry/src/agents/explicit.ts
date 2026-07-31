@@ -28,7 +28,7 @@ export function Explicit() {
 				threshold: 0.5,
 				action: 'fell back to deterministic path',
 			});
-			return { ok: true, fallbackUsed: true };
+			return { output: { ok: true, fallbackUsed: true } };
 		},
 	});
 	return 'When asked to run the demo, call the `explicit` action and report its result.';

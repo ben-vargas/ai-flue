@@ -55,7 +55,7 @@ const checkSpam = defineTool({
 				}),
 			},
 		);
-		return result.data;
+		return { output: result.data };
 	},
 });
 

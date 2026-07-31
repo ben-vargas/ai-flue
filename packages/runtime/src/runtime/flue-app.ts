@@ -190,6 +190,7 @@ function resolveAgentDefinitionDispatchRequest(
 		// `uid: null` is a meaningful condition (create-only), so presence is
 		// keyed on the property, not on undefined.
 		...('uid' in request && request.uid !== undefined ? { uid: request.uid } : {}),
+		...(request.idempotencyKey !== undefined ? { idempotencyKey: request.idempotencyKey } : {}),
 	};
 }
 

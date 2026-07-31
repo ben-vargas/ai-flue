@@ -64,9 +64,30 @@ export type ToolContext<
 	([H] extends [true] ? { readonly harness: FlueHarness } : Record<never, never>) &
 	([D] extends [true] ? { readonly step: ToolStep } : Record<never, never>);
 
-type ToolRunResult<S extends ToolOutputSchema | undefined> = S extends ToolOutputSchema
-	? v.InferInput<S>
-	: JsonValue | undefined;
+/**
+ * The canonical `run` return shape: `output` is the tool's result value
+ * (validated against the declared `output` schema, and what the model sees
+ * serialized as JSON), and `terminate: true` ends the agent's turn after the
+ * current tool batch settles — the same loop-ending contract the built-in
+ * `finish`/`give_up` tools use, honored across crash recovery. `output` is
+ * required when an `output` schema is declared (forgetting the value is a bug
+ * the type should catch) and optional otherwise.
+ */
+export type ToolRunEnvelope<S extends ToolOutputSchema | undefined> = S extends ToolOutputSchema
+	? { output: v.InferInput<S>; terminate?: boolean }
+	: { output?: JsonValue; terminate?: boolean };
+
+// Bare-string sugar: `return 'text'` means `return { output: 'text' }`. The
+// string arm exists only where a string is a valid output to begin with (no
+// `output` schema, or a string-input schema) — a non-string schema keeps
+// rejecting the shorthand at the type level. The sugar rides the same
+// distributive conditional as the envelope (rather than a standalone
+// `[string] extends [ToolRunResult<S>]` union member) so TypeScript can still
+// measure the type parameter's variance: a concrete ToolDefinition must stay
+// assignable to the generic default.
+type ToolRunReturn<S extends ToolOutputSchema | undefined> = S extends ToolOutputSchema
+	? ToolRunEnvelope<S> | ([string] extends [v.InferInput<S>] ? string : never)
+	: ToolRunEnvelope<S> | string;
 
 export interface ToolDefinition<
 	TInput extends ToolInputSchema | undefined = ToolInputSchema | undefined,
@@ -95,17 +116,17 @@ export interface ToolDefinition<
 	 * settled with an unknown-outcome error like ordinary tools.
 	 */
 	readonly durable?: TDurable;
-	// `| void` only for the no-`output`-schema case, where undefined is
-	// already an allowed result — a bare `() => sideEffect()` with no return
-	// statement is the same value at runtime, so nothing is lost by accepting
-	// it. A declared output schema keeps requiring the real return: forgetting
-	// it there is a bug the type should still catch.
+	// `| void` only for the no-`output`-schema case, where an undefined
+	// output is already an allowed result — a bare `() => sideEffect()` with
+	// no return statement is the same value at runtime, so nothing is lost by
+	// accepting it. A declared output schema keeps requiring the real return:
+	// forgetting it there is a bug the type should still catch.
 	run(
 		context: ToolContext<TInput, THarness, TDurable>,
 	):
-		| ToolRunResult<TOutput>
-		| Promise<ToolRunResult<TOutput>>
-		| (TOutput extends undefined ? void : never);
+		| ToolRunReturn<TOutput>
+		| Promise<ToolRunReturn<TOutput>>
+		| (TOutput extends undefined ? void | Promise<void> : never);
 }
 
 export type ToolInput<TTool extends ToolDefinition> =

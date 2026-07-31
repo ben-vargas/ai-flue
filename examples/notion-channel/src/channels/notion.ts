@@ -65,7 +65,7 @@ export function retrievePage(pageId: string) {
 		name: 'retrieve_notion_page',
 		description: 'Retrieve the current Notion page bound to this agent.',
 		async run() {
-			return client.pages.retrieve({ page_id: pageId });
+			return { output: await client.pages.retrieve({ page_id: pageId }) };
 		},
 	});
 }

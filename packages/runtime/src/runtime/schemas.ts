@@ -88,6 +88,30 @@ export function parseDeliveredMessage(value: unknown): DeliveredMessage {
 	});
 }
 
+/** Length cap for a caller-supplied `idempotencyKey` — no format restriction
+ *  otherwise, so Slack event ids, Stripe event ids, and UUIDs all pass. */
+const MAX_IDEMPOTENCY_KEY_LENGTH = 256;
+
+/**
+ * Validate a caller-supplied idempotency key: a non-empty string of at most
+ * {@link MAX_IDEMPOTENCY_KEY_LENGTH} characters. Shared by `dispatch()`
+ * admission and the direct HTTP route so both transports reject a bad key
+ * with the same structured {@link InvalidRequestError}.
+ */
+export function parseIdempotencyKey(value: unknown): string {
+	if (typeof value !== 'string' || value === '') {
+		throw new InvalidRequestError({
+			reason: '`idempotencyKey` must be a non-empty string naming this delivery.',
+		});
+	}
+	if (value.length > MAX_IDEMPOTENCY_KEY_LENGTH) {
+		throw new InvalidRequestError({
+			reason: `\`idempotencyKey\` must be at most ${MAX_IDEMPOTENCY_KEY_LENGTH} characters.`,
+		});
+	}
+	return value;
+}
+
 /**
  * Validate a raw direct-HTTP body as a delivered input: a
  * {@link DeliveredMessage} with optional reserved top-level siblings, peeled
@@ -95,20 +119,23 @@ export function parseDeliveredMessage(value: unknown): DeliveredMessage {
  * - `initialData`: instance-creation data (the seed, used only when the send
  *   creates the instance);
  * - `uid`: the send condition (a string continues only that incarnation;
- *   `null` creates only when fresh; omitted sends unconditionally).
+ *   `null` creates only when fresh; omitted sends unconditionally);
+ * - `idempotencyKey`: the caller's name for this delivery — a redelivery
+ *   carrying the same key converges on the original submission.
  */
 export function parseDeliveredInput(value: unknown): {
 	message: DeliveredMessage;
 	initialData?: unknown;
 	uid?: string | null;
+	idempotencyKey?: string;
 } {
 	if (!value || typeof value !== 'object' || Array.isArray(value)) {
 		return { message: parseDeliveredMessage(value) };
 	}
-	if (!('initialData' in value) && !('uid' in value)) {
+	if (!('initialData' in value) && !('uid' in value) && !('idempotencyKey' in value)) {
 		return { message: parseDeliveredMessage(value) };
 	}
-	const { initialData, uid, ...rest } = value as Record<string, unknown>;
+	const { initialData, uid, idempotencyKey, ...rest } = value as Record<string, unknown>;
 	if ('uid' in value && uid !== null && typeof uid !== 'string') {
 		throw new InvalidRequestError({
 			reason:
@@ -119,5 +146,6 @@ export function parseDeliveredInput(value: unknown): {
 		message: parseDeliveredMessage(rest),
 		...(initialData !== undefined ? { initialData } : {}),
 		...('uid' in value ? { uid: uid as string | null } : {}),
+		...('idempotencyKey' in value ? { idempotencyKey: parseIdempotencyKey(idempotencyKey) } : {}),
 	};
 }

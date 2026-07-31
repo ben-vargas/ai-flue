@@ -12,7 +12,7 @@ export function WithCustomBash() {
 		harness: true,
 		async run({ harness }) {
 			await harness.sandbox.exec('echo "custom bash succeeded" > proof.txt');
-			return { text: (await harness.sandbox.exec('cat proof.txt')).stdout.trim() };
+			return { output: { text: (await harness.sandbox.exec('cat proof.txt')).stdout.trim() } };
 		},
 	});
 	return 'When asked to run the demo, call the `prove-custom-bash` action and report its result.';

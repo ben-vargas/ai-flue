@@ -154,10 +154,12 @@ export function retrieveConversation(ref: IntercomConversationRef) {
     name: 'retrieve_intercom_conversation',
     description: 'Retrieve the current Intercom conversation bound to this agent.',
     async run() {
-      return client.conversations.find({
-        conversation_id: ref.conversationId,
-        display_as: 'plaintext',
-      });
+      return {
+        output: await client.conversations.find({
+          conversation_id: ref.conversationId,
+          display_as: 'plaintext',
+        }),
+      };
     },
   });
 }

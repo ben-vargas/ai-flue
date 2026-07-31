@@ -1,5 +1,4 @@
 /** Wraps a @cloudflare/sandbox instance (from getSandbox()) into SessionEnv. */
-import { abortErrorFor } from '../abort.ts';
 import { decodeBase64, encodeBase64 } from '../base64.ts';
 import { SandboxDiedError } from '../errors.ts';
 import type { SandboxApi } from '../sandbox.ts';
@@ -111,43 +110,30 @@ export function setContainerDeathCadenceForTests(override?: DeathDetectorCadence
  * There is deliberately no deadline: any status other than `'stopped'` /
  * `'stopped_with_code'` — including transitional ones like `'stopping'` and
  * unrecognized future values — counts as alive, so a legitimately slow
- * command on a healthy container is never interrupted. When `signal` is
- * provided, its abort joins the race and rejects immediately even though the
- * underlying call cannot be cancelled remotely.
+ * command on a healthy container is never interrupted.
+ *
+ * Liveness only: caller aborts are owned one layer up by
+ * `createSandboxSessionEnv`'s exec abort race, which also consumes this
+ * promise's eventual settlement when the caller has already been released.
  */
 function raceContainerDeath<T>(
 	sandbox: CloudflareSandboxStub,
 	operation: string,
 	rpc: Promise<T>,
-	signal?: AbortSignal,
 ): Promise<T> {
-	if (signal?.aborted) {
-		// The call is already in flight; swallow its eventual settlement so the
-		// early rejection can't leave an unhandled rejection behind.
-		rpc.catch(() => {});
-		return Promise.reject(abortErrorFor(signal));
-	}
 	const { statePollMs, probeSilenceMs } = cadence;
 	return new Promise<T>((resolve, reject) => {
 		let settled = false;
 		let pollTimer: ReturnType<typeof setTimeout> | undefined;
 		let silenceTimer: ReturnType<typeof setTimeout> | undefined;
-		let removeAbortListener = (): void => {};
 
 		const settle = (complete: () => void): void => {
 			if (settled) return;
 			settled = true;
 			clearTimeout(pollTimer);
 			clearTimeout(silenceTimer);
-			removeAbortListener();
 			complete();
 		};
-
-		if (signal) {
-			const onAbort = (): void => settle(() => reject(abortErrorFor(signal)));
-			signal.addEventListener('abort', onAbort, { once: true });
-			removeAbortListener = () => signal.removeEventListener('abort', onAbort);
-		}
 
 		const probe = (): void => {
 			silenceTimer = setTimeout(() => {
@@ -175,8 +161,7 @@ function raceContainerDeath<T>(
 		pollTimer = setTimeout(probe, statePollMs);
 
 		// These handlers double as the losing branch's rejection consumer, so a
-		// late settlement after death or abort can't surface as an unhandled
-		// rejection.
+		// late settlement after death can't surface as an unhandled rejection.
 		rpc.then(
 			(value) => settle(() => resolve(value)),
 			(error: unknown) => settle(() => reject(error)),
@@ -192,8 +177,8 @@ function cfSandboxToSessionEnv(
 ): SessionEnv {
 	// Every container call goes through the death detector so a call that is
 	// in flight when the container dies settles instead of hanging forever.
-	const guarded = <T>(operation: string, rpc: Promise<T>, signal?: AbortSignal): Promise<T> =>
-		raceContainerDeath(sandbox, operation, rpc, signal);
+	const guarded = <T>(operation: string, rpc: Promise<T>): Promise<T> =>
+		raceContainerDeath(sandbox, operation, rpc);
 
 	const api: SandboxApi = {
 		async readFile(path: string): Promise<string> {
@@ -292,14 +277,12 @@ function cfSandboxToSessionEnv(
 				signal?: AbortSignal;
 			},
 		): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-			const externalSignal = execOpts?.signal;
-			if (externalSignal?.aborted) throw abortErrorFor(externalSignal);
-
-			// Cloudflare Sandbox does not currently accept AbortSignal across the
-			// getSandbox(...).exec(...) RPC boundary. Keep cancellation local while
-			// forwarding cloneable execution options to the sandbox: the signal
-			// joins the death detector's race, so an abort rejects immediately
-			// even though the container keeps running the command.
+			// Cloudflare Sandbox does not currently accept AbortSignal across
+			// the getSandbox(...).exec(...) RPC boundary, so `execOpts.signal`
+			// is deliberately not forwarded — `createSandboxSessionEnv` (which
+			// this adapter builds on) owns caller-facing abort and rejects
+			// promptly while the container keeps running the command. Only
+			// cloneable execution options cross the RPC boundary.
 			const result = await guarded(
 				'exec',
 				sandbox.exec(command, {
@@ -308,7 +291,6 @@ function cfSandboxToSessionEnv(
 					// The Cloudflare sandbox `timeout` option is in milliseconds.
 					timeout: execOpts?.timeoutMs,
 				}),
-				externalSignal,
 			);
 
 			return {

@@ -28,7 +28,7 @@ export function Hello() {
 				model: response.model.id,
 			});
 			await harness.sandbox.exec('cat AGENTS.md');
-			return response.data;
+			return { output: response.data };
 		},
 	});
 	return 'When asked to run a demo, call the `hello` tool and report its result.';

@@ -16,7 +16,7 @@ export function WithImportedSkill() {
 			const response = await harness.prompt(
 				`Use the "${review.name}" skill and report its result.`,
 			);
-			return { text: response.text, reference: review.name };
+			return { output: { text: response.text, reference: review.name } };
 		},
 	});
 	return 'When asked to run the demo, call the `run-review-skill` action and report its result.';

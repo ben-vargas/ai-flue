@@ -14,6 +14,7 @@ import {
 	AgentInstanceExistsError,
 	AgentInstanceNotFoundError,
 	InvalidRequestError,
+	SubmissionConflictError,
 } from '../errors.ts';
 import type { DispatchInput, DispatchQueue } from '../runtime/dispatch-queue.ts';
 import type { CloudflareRuntime } from '../runtime/flue-app.ts';
@@ -137,7 +138,13 @@ export function createCloudflareWorkerConfig(
 function dispatchAdmissionError(input: DispatchInput, status: number, rejection: unknown): Error {
 	const body =
 		typeof rejection === 'object' && rejection !== null
-			? (rejection as { type?: unknown; error?: unknown; details?: unknown; uid?: unknown })
+			? (rejection as {
+					type?: unknown;
+					error?: unknown;
+					details?: unknown;
+					uid?: unknown;
+					submissionId?: unknown;
+				})
 			: undefined;
 	switch (body?.type) {
 		case 'agent_instance_exists':
@@ -150,6 +157,12 @@ function dispatchAdmissionError(input: DispatchInput, status: number, rejection:
 			break;
 		case 'agent_instance_not_found':
 			return new AgentInstanceNotFoundError({ id: input.id });
+		case 'submission_conflict':
+			// The wire body's submissionId names the existing keyed submission;
+			// the dispatch input derived the same id, so it is the fallback.
+			return new SubmissionConflictError({
+				submissionId: typeof body.submissionId === 'string' ? body.submissionId : input.submissionId,
+			});
 		case 'invalid_request':
 			return new InvalidRequestError({
 				reason:

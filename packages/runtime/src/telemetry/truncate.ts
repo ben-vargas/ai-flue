@@ -19,7 +19,7 @@ export const CONTENT_TRANSFORM_FAILED = '[flue] content transform failed; conten
 export const CONTENT_BUDGET_EXCEEDED = '[flue] content exceeds attribute budget';
 
 /** Sentinels must themselves fit, so pathologically small budgets are refused. */
-const MIN_BUDGET_BYTES = 128;
+export const MIN_BUDGET_BYTES = 128;
 /** Below this, string leaves stop being worth splitting and we bail instead. */
 const MIN_LEAF_BYTES = 64;
 

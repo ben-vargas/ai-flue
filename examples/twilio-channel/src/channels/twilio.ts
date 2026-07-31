@@ -77,7 +77,7 @@ export function postMessage(
 					? { messagingServiceSid: ref.messagingServiceSid }
 					: { from: ref.address }),
 			});
-			return { messageSid: result.sid };
+			return { output: { messageSid: result.sid } };
 		},
 	});
 }

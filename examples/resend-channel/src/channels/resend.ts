@@ -56,7 +56,7 @@ export function retrieveReceivedEmail(emailId: string) {
 		async run() {
 			const result = await client.emails.receiving.get(emailId);
 			if (result.error) throw new Error(result.error.message);
-			return result.data as unknown as JsonValue;
+			return { output: result.data as unknown as JsonValue };
 		},
 	});
 }

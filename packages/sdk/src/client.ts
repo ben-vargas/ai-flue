@@ -177,12 +177,13 @@ export function createFlueClient(options: CreateFlueClientOptions): FlueClient {
 							}),
 							http,
 						),
-					updates: (updateOptions) =>
+					updates: ({ onActivity, ...updateOptions }) =>
 						createFlueEventStream<ConversationStreamChunk>(
 							updateOptions,
 							{
 								url: http.url('', { view: 'updates' }),
 								fetch: http.fetchWithHeaders.bind(http),
+								onActivity,
 							},
 							(chunk) => rewriteChunkAttachmentUrls(assertConversationStreamChunk(chunk), http),
 						),

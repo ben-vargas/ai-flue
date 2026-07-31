@@ -67,7 +67,7 @@ export function createChannelRouter<E extends Env = Env>(
 			path: new URL(c.req.url).pathname,
 		});
 	});
-	app.onError((err) => toHttpResponse(err));
+	app.onError((err, c) => toHttpResponse(err, { request: c.req.raw }));
 	return app;
 }
 

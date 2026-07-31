@@ -49,6 +49,9 @@ export const channel = createSlackChannel({
 
     await dispatch(Assistant, {
       id: channel.instanceId(thread),
+      // Slack redelivers events whose acknowledgement was slow or lost; the
+      // event id names the delivery, so a retry never runs a second turn.
+      idempotencyKey: payload.event_id,
       // Recorded once, when this delivery creates the conversation.
       initialData: {
         channelId: thread.channelId,
@@ -66,14 +69,14 @@ export const channel = createSlackChannel({
 });
 ```
 
-The handler filters the events the application cares about, chooses the receiving conversation, and dispatches a normalized message. Everything in the `dispatch(...)` call is covered in [Delivering into a conversation](#delivering-into-a-conversation) below.
+The handler filters the events the application cares about, chooses the receiving conversation, and dispatches a normalized message. Everything in the `dispatch(...)` call is covered in [Delivering into a conversation](#delivering-into-a-conversation) below, except `idempotencyKey` — that is the redelivery convention, covered next.
 
 The channel packages share a few conventions:
 
 - **Handlers select routes.** Each configured handler publishes its route (`events` → `/events`, `interactions` → `/interactions`, …); omit a handler and its route does not exist. Most providers expose a single `webhook` handler at `/webhook`.
 - **Return values become responses.** Returning nothing produces an empty `200`; a JSON-compatible value becomes a JSON response; a `Response` passes through unchanged — for the surfaces (like Slack slash commands or Discord interactions) whose protocol reads the acknowledgement body. See each package's reference for its exact contract.
 - **Acknowledge quickly.** `dispatch(...)` resolves as soon as the message is durably admitted — the agent runs asynchronously. Providers retry slow acknowledgements, so admit the work and return rather than awaiting agent output in the handler.
-- **Deliveries can repeat.** Providers retry failed requests and may deliver an event more than once; channel packages are stateless and do not deduplicate. Carry the provider's delivery id in signal `attributes` for tracing, and when a duplicate effect is unacceptable, claim that id in your application's durable storage before dispatching.
+- **Deliveries can repeat.** Providers retry failed requests and may deliver an event more than once; channel packages are stateless and do not deduplicate. Pass the provider's redelivery-stable id as the dispatch `idempotencyKey` — `idempotencyKey: payload.event_id` for Slack events — and a redelivered event converges on the original submission instead of running a second turn: same receipt (marked `deduplicated: true`), at most one answer. The key names the delivery, not the outcome, and reusing it with a different payload rejects with a 409 `submission_conflict`. Carrying the id in signal `attributes` as well keeps it visible for tracing.
 
 ## Mounting
 
@@ -178,7 +181,7 @@ export function replyInThread(ref: { channelId: string; threadTs: string }) {
         thread_ts: ref.threadTs,
         text: data.text,
       });
-      return { ts: result.ts ?? null };
+      return { output: { ts: result.ts ?? null } };
     },
   });
 }

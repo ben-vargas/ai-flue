@@ -10,17 +10,18 @@ import type {
 	SubmissionClaimRef,
 } from '@flue/runtime/adapter';
 import {
-	assertSupportedFlueSchemaVersion,
+	assertSupportedFlueFormatVersion,
 	createDispatchAgentSubmissionInput,
 	createSessionStorageKey,
 	DURABILITY_DEFAULT_MAX_ATTEMPTS,
 	DURABILITY_DEFAULT_TIMEOUT_MS,
-	FLUE_SCHEMA_VERSION,
+	FLUE_FORMAT_VERSION,
 	hydratePersistedSubmissionAttachments,
 	isSubmissionPayload,
 	LEASE_DURATION_MS,
 	matchesPersistedSubmissionAttachments,
 	parseAcceptedAt,
+	PersistedFormatVersionError,
 	prepareSubmissionAttachments,
 	SUBMISSION_HARNESS_NAME,
 	SUBMISSION_SESSION_NAME,
@@ -46,6 +47,7 @@ import {
 	repairSubmissionIndexesScript,
 	replaceAttemptScript,
 	reserveSettlementScript,
+	settleQueuedSubmissionScript,
 } from './redis-scripts.ts';
 
 const empty = '';
@@ -137,30 +139,52 @@ export function redis(runner: RedisRunner, options: RedisOptions = {}): Persiste
 	return {
 		async migrate() {
 			await inspectServer(backend, options.inspectServer !== false);
-			const stored = await backend.command('HGET', [backend.keys.meta(), 'schema_version']);
+			const stored = await backend.command('HGET', [backend.keys.meta(), 'format_version']);
 			if (stored == null) {
-				let cursor = '0';
-				let existing = false;
-				do {
-					const result = await backend.command('SCAN', [
-						cursor,
-						'MATCH',
-						`${backend.keys.prefix}:*`,
-						'COUNT',
-						100,
+				const legacy = await backend.command('HGET', [backend.keys.meta(), 'schema_version']);
+				if (legacy != null) {
+					// Nightly-era stores stamped `schema_version` 8 hold storage
+					// shapes byte-for-byte identical to format 1, so adoption is
+					// a pure relabel of the stamp — no data rewrite. Any other
+					// value at the old field names a store this runtime cannot
+					// read. The new field lands before the old one is removed,
+					// so an interruption never leaves the store stampless.
+					if (String(legacy) !== '8') {
+						throw new PersistedFormatVersionError({
+							storedVersion: String(legacy),
+							supportedVersion: FLUE_FORMAT_VERSION,
+						});
+					}
+					await backend.command('HSET', [
+						backend.keys.meta(),
+						'format_version',
+						FLUE_FORMAT_VERSION,
 					]);
-					const page = Array.isArray(result) ? result : [];
-					cursor = String(page[0] ?? '0');
-					const keys = strings(page[1]);
-					if (keys.some((key) => key !== backend.keys.meta())) existing = true;
-				} while (cursor !== '0' && !existing);
-				if (existing) assertSupportedFlueSchemaVersion('unversioned');
-				await backend.command('HSETNX', [
-					backend.keys.meta(),
-					'schema_version',
-					FLUE_SCHEMA_VERSION,
-				]);
-			} else assertSupportedFlueSchemaVersion(String(stored));
+					await backend.command('HDEL', [backend.keys.meta(), 'schema_version']);
+				} else {
+					let cursor = '0';
+					let existing = false;
+					do {
+						const result = await backend.command('SCAN', [
+							cursor,
+							'MATCH',
+							`${backend.keys.prefix}:*`,
+							'COUNT',
+							100,
+						]);
+						const page = Array.isArray(result) ? result : [];
+						cursor = String(page[0] ?? '0');
+						const keys = strings(page[1]);
+						if (keys.some((key) => key !== backend.keys.meta())) existing = true;
+					} while (cursor !== '0' && !existing);
+					if (existing) assertSupportedFlueFormatVersion('unversioned');
+					await backend.command('HSETNX', [
+						backend.keys.meta(),
+						'format_version',
+						FLUE_FORMAT_VERSION,
+					]);
+				}
+			} else assertSupportedFlueFormatVersion(String(stored));
 		},
 		connect() {
 			return {
@@ -561,6 +585,35 @@ class RedisSubmissionStore implements AgentSubmissionStore {
 			Date.now(),
 			error instanceof Error ? error.message : String(error),
 		);
+	}
+
+	async settleQueuedSubmission(
+		submissionId: string,
+		_outcome: 'failed' | 'aborted',
+		error: unknown,
+	): Promise<boolean> {
+		const message = error instanceof Error ? error.message : String(error);
+		// sessionKey is immutable once the row exists, so pre-reading it to name
+		// the unsettled zset is race-free; the script re-checks the queued status
+		// atomically with the transition (first terminal state wins). No joined
+		// fan-out: joins attach to a RUNNING host, never a queued row.
+		const row = await this.backend.hgetall(this.backend.keys.submission(submissionId));
+		if (!row.sessionKey) return false;
+		try {
+			const result = await this.backend.eval(
+				settleQueuedSubmissionScript,
+				[
+					this.backend.keys.submission(submissionId),
+					this.backend.keys.submissionStatus('queued'),
+					this.backend.keys.submissionStatus('settled'),
+					this.backend.keys.sessionUnsettled(row.sessionKey),
+				],
+				[submissionId, Date.now(), message],
+			);
+			return integer(result) === 1;
+		} finally {
+			await this.repairSubmissionIndexes(submissionId);
+		}
 	}
 
 	// ── Turn-boundary joins ──────────────────────────────────────────────

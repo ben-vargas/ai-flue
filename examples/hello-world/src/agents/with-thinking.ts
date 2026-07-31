@@ -19,7 +19,7 @@ export function WithThinking() {
 				result: Answer,
 				thinkingLevel: 'minimal',
 			});
-			return { fast: fast.data, careful: careful.data, minimal: minimal.data };
+			return { output: { fast: fast.data, careful: careful.data, minimal: minimal.data } };
 		},
 	});
 	return 'When asked to run a demo, call the `thinking-test` tool and report its result.';

@@ -4,6 +4,36 @@
  * Wraps `@durable-streams/client` to provide an {@link AsyncIterable} of
  * {@link ConversationStreamChunk} values with automatic reconnection,
  * offset-based replay, and SSE live tailing.
+ *
+ * ## The resume-from-applied invariant (load-bearing, pinned by tests)
+ *
+ * Stream continuity rests on one structural property of this stack: **a
+ * resume offset never advances past content that has not been handed to the
+ * consumer.** Reconnect-edge loss is therefore impossible — a reconnect
+ * either replays the in-flight batch (position dedup absorbs it) or resumes
+ * after a batch the consumer already holds. The mechanical basis, verified
+ * against the DS client's internals:
+ *
+ * - The DS client's resume offset advances only when a control frame is
+ *   parsed (SSE) or a response arrives (long-poll), and every reconnect /
+ *   next-request site runs inside its response `ReadableStream`'s `pull`.
+ *   With the default HWM-1 queue, at most one parsed batch is ever buffered
+ *   ahead, and `pull` runs again only after the consumer reads it.
+ * - A connection dying between a batch's `data` frame and its `control`
+ *   frame yields a synthetic response minted at the *pre-batch* offset, and
+ *   the reconnect resumes from there → redelivery, deduped by position.
+ * - `subscribeJson` awaits its subscriber, and this wrapper's subscriber
+ *   resolves only after the batch's last event has been yielded — so
+ *   {@link FlueEventStream.offset} (the consumer-facing checkpoint) advances
+ *   per *fully delivered* batch, never past one still being applied.
+ * - Nothing fails silently inside a connection: a truncated JSON payload or
+ *   a mid-body failure errors the stream loudly, and `observe()` recovers by
+ *   re-hydrating from a fresh `history()` snapshot — transport offset
+ *   bookkeeping is never reused across a surfaced failure.
+ *
+ * `test/stream-continuity.test.ts` pins the observable consequences against
+ * the real `@durable-streams/client`, so a dependency bump or a refactor here
+ * that breaks the invariant turns that suite red.
  */
 
 import type { BackoffOptions, LiveMode } from '@durable-streams/client';
@@ -48,6 +78,14 @@ export interface StreamConnectionOptions {
 	url: string;
 	/** Custom fetch implementation. */
 	fetch?: typeof globalThis.fetch;
+	/**
+	 * Liveness seam: invoked on every batch the transport delivers, including
+	 * empty keep-alive batches (idle SSE control events, empty long-poll
+	 * responses) that yield no events to the consumer. This interface is
+	 * internal — not exported from the package — so the seam never becomes
+	 * public API; `observe()` uses it to reset its stale-stream watchdog.
+	 */
+	onActivity?: () => void;
 }
 
 /**
@@ -174,6 +212,7 @@ export function createFlueEventStream<T = ConversationStreamChunk>(
 	const startConsuming = (res: Awaited<ReturnType<typeof stream<T>>>) => {
 		res.subscribeJson<T>((batch) => {
 			if (abortController.signal.aborted) return;
+			connectionOpts.onActivity?.();
 			const final =
 				batch.streamClosed || streamOpts.live === false ? { upToDate: batch.upToDate } : undefined;
 			if (batch.items.length === 0) {
