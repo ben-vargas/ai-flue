@@ -488,12 +488,23 @@ function resolveGrepBackend(env: SessionEnv): Promise<'rg' | 'grep'> {
 	let backend = grepBackends.get(env.exec);
 	if (!backend) {
 		// No caller signal here: the probe result is cached per-env, so an
-		// operation abort mid-probe would poison the cache with 'grep'. A
-		// short deadline keeps a hung exec from wedging the first search.
-		backend = env
+		// operation abort mid-probe would poison the cache with 'grep'. The
+		// exec timeout is adapter-enforced and can itself hang (a wedged
+		// sandbox RPC never observes a container-side deadline), so a
+		// host-side race bounds the CACHED promise — a probe that answers
+		// nothing memoizes 'grep', not a forever-pending promise every
+		// later search in the session would await.
+		const probe: Promise<'rg' | 'grep'> = env
 			.exec('rg --version', { timeoutMs: 10_000 })
-			.then((result) => (result.exitCode === 0 ? 'rg' : 'grep'))
-			.catch(() => 'grep');
+			.then((result) => (result.exitCode === 0 ? ('rg' as const) : ('grep' as const)))
+			.catch(() => 'grep' as const);
+		backend = Promise.race<'rg' | 'grep'>([
+			probe,
+			new Promise<'grep'>((resolve) => {
+				const timer = setTimeout(() => resolve('grep'), 15_000);
+				void probe.finally(() => clearTimeout(timer));
+			}),
+		]);
 		grepBackends.set(env.exec, backend);
 	}
 	return backend;

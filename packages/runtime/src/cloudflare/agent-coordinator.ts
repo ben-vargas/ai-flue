@@ -9,6 +9,7 @@ import {
 	InvalidRequestError,
 	SubmissionAbortedError,
 	SubmissionConflictError,
+	SubmissionTimeoutError,
 } from '../errors.ts';
 import { interceptExecution } from '../execution-interceptor.ts';
 import { createMcpConnectionCache } from '../mcp.ts';
@@ -34,7 +35,11 @@ import {
 } from '../runtime/agent-submissions.ts';
 import type { AttachmentStore } from '../runtime/attachment-store.ts';
 import type { ConversationStreamStore } from '../runtime/conversation-stream-store.ts';
-import { type CoordinatorEventEmitter, createCoordinatorEventEmitter } from '../runtime/events.ts';
+import {
+	type CoordinatorEventEmitter,
+	createCoordinatorEventEmitter,
+	drainGlobalEventDeliveries,
+} from '../runtime/events.ts';
 import { assertAgentDispatchAdmissionInput, handleAgentRequest } from '../runtime/handle-agent.ts';
 import {
 	handleAgentAttachmentRead,
@@ -57,14 +62,16 @@ const FLUE_AGENT_SUBMISSION_WAKE_CALLBACK = '__flueWakeAgentSubmissions';
 const FLUE_AGENT_SUBMISSION_WAKE_SECONDS = 30;
 const FLUE_AGENT_SUBMISSION_ATTEMPT_FIBER = 'flue:submission-attempt';
 /**
- * Per-submission attempt cap within one drain. A settled fiber whose
- * submission is still unsettled (only reachable through SDK bugs or test
- * fakes — `processSubmission` settles durably on every real path) would
- * otherwise requeue-and-restart forever inside one alarm invocation. At the
- * cap the drain stops looping on that submission and defers it to the 30s
- * backstop, degrading to today's polling cadence instead of livelocking.
+ * How long past a deadline (durability timeout, or a durable abort intent) a
+ * live attempt fiber gets to unwind through its own settle path after its
+ * controller is aborted, before the supervisor force-settles the submission
+ * over it. Signal-aware awaits (provider fetches, exec) unwind well inside
+ * this; only a signal-deaf hang (a sandbox RPC pending against a
+ * healthy-reporting container, a wedged stream reader) reaches the force
+ * path. Two heartbeat periods, so the abort is guaranteed at least one full
+ * pass to land before force-settlement.
  */
-const FLUE_AGENT_SUBMISSION_DRAIN_ATTEMPT_CAP = 3;
+const FLUE_AGENT_SUBMISSION_SETTLE_GRACE_MS = 2 * FLUE_AGENT_SUBMISSION_WAKE_SECONDS * 1000;
 
 import type { SqlStorage } from '../sql-storage.ts';
 
@@ -79,6 +86,13 @@ interface CloudflareAgentInstance {
 	readonly ctx: {
 		readonly id: { toString(): string };
 		readonly storage: CloudflareAgentStorage;
+		/**
+		 * DurableObjectState.waitUntil. Optional because test fakes and older
+		 * SDK surfaces may omit it; a detached attempt fiber survives without
+		 * it (the durable keepAlive alarm chain re-enters through fiber
+		 * recovery), waitUntil just tells the platform the work is deliberate.
+		 */
+		waitUntil?(promise: Promise<unknown>): void;
 	};
 	schedule(
 		delaySeconds: number,
@@ -104,6 +118,7 @@ interface CloudflareAgentRecoveredFiberContext {
  * a returned promise into an inline await of the whole attempt.
  */
 interface StartedSubmissionAttempt {
+	readonly submissionId: string;
 	readonly running: Promise<void>;
 }
 
@@ -147,10 +162,13 @@ export interface CloudflareAgentRuntime {
 	/**
 	 * The single place submission attempts start. Dispatched by the
 	 * `__flueWakeAgentSubmissions` schedule target from inside the Durable
-	 * Object's alarm invocation, and awaited there for the full duration of
-	 * every attempt it starts — the alarm invocation owns the execution, so
-	 * invocation-scoped platform observability (native tracing, log/outcome
-	 * attribution) sees the agent's work. Every other boundary only records
+	 * Object's alarm invocation as one bounded, storage-only supervisor
+	 * pass: it reconciles durable state, enforces deadlines, and starts
+	 * attempt fibers detached — the pass returns without awaiting agent
+	 * execution, so a hung attempt can never block supervision, and the
+	 * pass arms its successor heartbeat before doing any failable work.
+	 * Attempt fibers ride the SDK's runFiber keepAlive/recovery machinery
+	 * across invocations and isolates. Every other boundary only records
 	 * durable intent and arms this drain.
 	 */
 	drainSubmissions(instance: CloudflareAgentInstance): Promise<void>;
@@ -257,6 +275,13 @@ class CloudflareAgentCoordinator {
 	 * falls back to the durable `abortRequestedAt` + reconcile path.
 	 */
 	private activeControllers = new Map<string, AbortController>();
+	/**
+	 * When each live attempt's controller was first fired by deadline
+	 * enforcement, keyed by the controller so a replacement attempt starts
+	 * its own clock. In-memory is exactly coextensive with the enforcement
+	 * itself: both only apply to fibers live in this isolate.
+	 */
+	private attemptDeadlineSignaledAt = new WeakMap<AbortController, number>();
 
 	// Instance context is established at exactly two boundaries: the public
 	// coordinator entry points below (onStart/drainSubmissions/onRequest/
@@ -271,13 +296,21 @@ class CloudflareAgentCoordinator {
 	// reconciliation, materialization, submission processing — assumes the
 	// context is already present and never re-wraps.
 	//
-	// Execution ownership: attempts start ONLY inside drainSubmissions, which
-	// runs as an alarm-dispatched schedule callback and awaits every attempt
-	// it starts. All other boundaries (admission, abort, onStart,
+	// Execution ownership: attempts start ONLY inside drainSubmissions'
+	// supervisor pass, which runs as an alarm-dispatched schedule callback.
+	// The pass is bounded and storage-only — it never awaits agent execution.
+	// Attempt fibers run detached: the SDK's runFiber keepAlive holds a ≤30s
+	// durable alarm chain for a fiber's whole lifetime, and fiber recovery
+	// re-enters through onFiberRecovered if the isolate dies with the fiber.
+	// Supervision therefore never inherits an attempt's liveness: a hung
+	// await inside a fiber cannot block deadline enforcement, and the
+	// heartbeat is armed BEFORE the pass does any failable work, so no
+	// single pass failure (throw, platform cancellation, code-update reset)
+	// can break the wake chain — a lost wake costs one heartbeat of latency,
+	// never settlement. All other boundaries (admission, abort, onStart,
 	// onFiberRecovered) record durable intent and arm the drain. The SDK
 	// deletes a one-shot schedule row only AFTER its callback returns, so an
-	// armed drain row doubles as durable recovery: an isolate death mid-drain
-	// leaves the row behind and the alarm re-fires on the fresh isolate.
+	// armed row doubles as durable recovery on isolate death.
 	onStart(inherited: () => Promise<unknown> | unknown): Promise<void> {
 		return this.runWithInstanceContext(async () => {
 			// A fresh isolate has no live attempt by definition, so unsettled
@@ -291,83 +324,122 @@ class CloudflareAgentCoordinator {
 	}
 
 	/**
-	 * In-isolate reentrancy guard. Alarm-dispatched drains are serialized by
-	 * the platform (one `alarm()` at a time), but a direct call while a drain
-	 * is live must not start a second loop: the active drain's next reconcile
-	 * pass absorbs any work admitted meanwhile, and the caller's armed row
-	 * fires a no-op drain afterwards.
+	 * In-isolate serialization of supervisor passes. Alarm-dispatched wakes
+	 * are serialized by the platform (one `alarm()` at a time), but a direct
+	 * call while a pass is live must not interleave with it. A promise chain
+	 * instead of a boolean guard: a wake that arrives mid-pass queues its own
+	 * full pass rather than being silently consumed — no code path can eat a
+	 * wake without doing (or scheduling) the work it promised. Passes are
+	 * bounded and storage-only, so the chain drains in bounded time.
 	 */
-	private draining = false;
+	private supervisorChain: Promise<void> = Promise.resolve();
 
 	drainSubmissions(): Promise<void> {
-		return this.runWithInstanceContext(() => this.drainLocked());
+		const pass = this.supervisorChain.then(() =>
+			this.runWithInstanceContext(() => this.supervisorPass()),
+		);
+		// The chain absorbs rejections so one failed pass can't wedge every
+		// later one; the caller's `pass` still rejects, preserving the SDK's
+		// schedule-callback deferral semantics (code-update resets and
+		// transient platform errors rethrow so the preserved row re-runs).
+		this.supervisorChain = pass.then(
+			() => undefined,
+			() => undefined,
+		);
+		return pass;
 	}
 
 	/**
-	 * Drain loop: reconcile → start attempts → await them → repeat until a
-	 * pass starts nothing. Errors below this method are either handled
-	 * internally (reconcile logs and returns what it started; attempt
-	 * promises are catch-guarded) or safe to propagate: the SDK retries a
-	 * throwing schedule callback in-process and deliberately rethrows
-	 * code-update resets so the preserved row re-runs on new code.
+	 * One bounded supervisor pass: arm the heartbeat, reconcile durable
+	 * state (settlement finalization, interrupted-attempt recovery, deadline
+	 * enforcement), claim runnable work, and start attempt fibers WITHOUT
+	 * awaiting them — fibers settle their submissions themselves and re-enter
+	 * through onFiberSettled. The pass never waits on agent execution, so
+	 * supervision stays live no matter what any attempt is doing.
 	 */
-	private async drainLocked(): Promise<void> {
-		if (this.draining) return;
-		this.draining = true;
-		try {
-			if (!(await this.submissions.hasUnsettledSubmissions())) return;
-			// Per-drain attempt counts backing the livelock cap; a fresh drain
-			// (e.g. the 30s backstop) starts over.
-			const attemptsBySubmission = new Map<string, number>();
-			for (;;) {
-				// The reconcile pass is storage-only and runs under the
-				// `flue.coordinator` interception so tracing backends can group
-				// its platform-instrumented storage spans. Attempt fibers start
-				// AFTER the interception settles, deliberately: `runFiber` runs
-				// its callback in the caller's async context, so a fiber started
-				// inside the span's activation would re-parent its invoke_agent
-				// span under the coordinator span. A claim whose start is
-				// preempted here (crash, code-update reset) is an interrupted
-				// attempt by construction — the next pass's running-recovery
-				// loop reconciles it, and a durable abort in the widened
-				// claim-to-start gap resolves through the existing
-				// abortRequestedAt path.
-				const claims = await interceptExecution(
-					{ type: 'coordinator', phase: 'reconcile' },
-					{ instanceId: this.instance.name, agentName: this.agentName },
-					() => this.reconcileSubmissions(attemptsBySubmission),
-				);
-				const started: Array<Promise<void>> = [];
-				for (const claimed of claims) {
-					try {
-						const attempt = await this.startGuardedAttempt(claimed, attemptsBySubmission);
-						if (attempt) started.push(attempt.running);
-					} catch (error) {
-						this.logSubmissionReconciliationFailure(claimed, 'start_submission', error);
-					}
-				}
-				if (started.length === 0) break;
-				// Every promise is catch-guarded and finally-cleaned in
-				// startSubmissionAttempt — this await cannot reject, and the
-				// abort-controller cleanup completes before the next reconcile
-				// pass observes the submission.
-				await Promise.all(started);
+	private async supervisorPass(): Promise<void> {
+		if (!(await this.submissions.hasUnsettledSubmissions())) return;
+		// Heartbeat-first: the successor wake is armed before any failable
+		// work, so a pass that throws, or an invocation the platform cancels,
+		// leaves a live wake behind. The extra rows this arms are cheap no-op
+		// passes. Non-idempotent — an idempotent arm from inside this callback
+		// could dedupe onto the row being executed, which the SDK deletes
+		// after return, losing the wake.
+		await this.armBackstop();
+		// The reconcile pass is storage-only and runs under the
+		// `flue.coordinator` interception so tracing backends can group
+		// its platform-instrumented storage spans. Attempt fibers start
+		// AFTER the interception settles, deliberately: `runFiber` runs
+		// its callback in the caller's async context, so a fiber started
+		// inside the span's activation would re-parent its invoke_agent
+		// span under the coordinator span. A claim whose start is
+		// preempted here (crash, code-update reset) is an interrupted
+		// attempt with no live controller — the next pass's
+		// running-recovery loop reconciles it, and a durable abort in the
+		// claim-to-start gap resolves through the existing
+		// abortRequestedAt path.
+		const claims = await interceptExecution(
+			{ type: 'coordinator', phase: 'reconcile' },
+			{ instanceId: this.instance.name, agentName: this.agentName },
+			() => this.reconcileSubmissions(),
+		);
+		for (const claimed of claims) {
+			try {
+				const attempt = await this.startSubmissionAttempt(claimed);
+				if (attempt) this.watchAttempt(attempt);
+			} catch (error) {
+				this.logSubmissionReconciliationFailure(claimed, 'start_submission', error);
 			}
-			// Anything still unsettled cannot progress locally right now
-			// (deferred errors, capped submissions, work awaiting recovery
-			// stamps): the 30s backstop owns it. Non-idempotent — an idempotent arm from inside
-			// this callback could dedupe onto the row being executed, which the
-			// SDK deletes after return, losing the wake.
-			if (await this.submissions.hasUnsettledSubmissions()) {
-				await this.armBackstop();
-			}
-		} finally {
-			this.draining = false;
 		}
+		// observe() deliveries are fire-and-forget on the emit path; hand
+		// whatever this pass emitted (deadline signals, force settlements) to
+		// the platform so the invocation's end can't tear them down mid-POST.
+		this.instance.ctx.waitUntil?.(drainGlobalEventDeliveries());
+	}
+
+	/**
+	 * Detach an attempt fiber from the pass that started it. `running` is
+	 * catch-guarded and finally-cleaned in startSubmissionAttempt, so the
+	 * tail here cannot reject. When the fiber settles its submission, any
+	 * queued work behind it becomes runnable — arm a zero-delay wake so the
+	 * queue progresses promptly instead of waiting out the heartbeat. A
+	 * fiber that ends with its submission still unsettled (a failure inside
+	 * settlement itself) deliberately does NOT arm: the heartbeat owns that
+	 * class at polling cadence, which throttles a pathological
+	 * claim/crash/reclaim cycle instead of hot-looping it.
+	 */
+	private watchAttempt(attempt: StartedSubmissionAttempt): void {
+		const tail = attempt.running.then(async () => {
+			try {
+				const settled =
+					(await this.submissions.getSubmission(attempt.submissionId))?.status === 'settled';
+				if (settled && (await this.submissions.hasUnsettledSubmissions())) {
+					await this.armDrain();
+				}
+			} catch {
+				// Wake arming is best-effort here: the heartbeat armed by the
+				// starting pass (and every pass since) covers the work.
+			}
+			// The fiber's settlement events (submission_settled and any
+			// subscriber bridge work they trigger) ride this waitUntil too.
+			await drainGlobalEventDeliveries();
+		});
+		// Tell the platform the invocation intentionally leaves work running.
+		// Without waitUntil the fiber still survives: runFiber's keepAlive
+		// alarm chain re-wakes the DO and fiber recovery re-enters the drain.
+		this.instance.ctx.waitUntil?.(tail);
 	}
 
 	onRequest(request: Request): Promise<Response | null> {
-		return this.runWithInstanceContext(() => this.routeRequest(request));
+		return this.runWithInstanceContext(async () => {
+			try {
+				return await this.routeRequest(request);
+			} finally {
+				// Admission-side observe() emissions (submission_queued, abort
+				// advisories) must survive the request invocation ending.
+				this.instance.ctx.waitUntil?.(drainGlobalEventDeliveries());
+			}
+		});
 	}
 
 	async onAlarm(inherited: () => Promise<unknown> | unknown): Promise<unknown> {
@@ -546,15 +618,13 @@ class CloudflareAgentCoordinator {
 
 	/**
 	 * One reconcile pass: materialize unready submissions, finalize pending
-	 * settlements, recover interrupted attempts, claim and START runnable
-	 * work. Returns the started attempts' guarded fiber promises for the
-	 * drain to await — this method never waits on agent execution itself.
+	 * settlements, recover interrupted attempts, enforce deadlines on live
+	 * ones, and claim runnable work. Returns the claims for the supervisor
+	 * pass to start — this method never waits on agent execution itself.
 	 * Failures are logged with `deferred_to_scheduled_wake` and surface as
-	 * still-unsettled work the drain hands to the backstop.
+	 * still-unsettled work the heartbeat owns.
 	 */
-	private async reconcileSubmissions(
-		attemptsBySubmission: Map<string, number>,
-	): Promise<ReadonlyArray<AgentSubmission>> {
+	private async reconcileSubmissions(): Promise<ReadonlyArray<AgentSubmission>> {
 		const toStart: Array<AgentSubmission> = [];
 		if (!(await this.submissions.hasUnsettledSubmissions())) return toStart;
 		try {
@@ -642,27 +712,32 @@ class CloudflareAgentCoordinator {
 				}
 			}
 			for (const submission of await this.submissions.listRunningSubmissions()) {
-				// A running submission reaching this loop is an interrupted attempt
-				// by construction: attempts only run inside a drain, drains are
-				// serialized (platform alarm ordering + the per-coordinator
-				// draining guard), every attempt this drain started has been
-				// awaited to cleanup before this pass, and a coordinator
-				// replacement (code-update reset / fresh isolate) implies the
-				// prior drain's fibers are dead. A hypothetical zombie is fenced
-				// by the claim CAS and attempt-id ownership checks on every
-				// durable write.
+				// Attempt fibers run detached from supervisor passes, so a running
+				// row here is live exactly when its attempt controller is still
+				// registered in this isolate. No controller means the attempt is
+				// dead (isolate replacement, fiber crash past its cleanup, or a
+				// start preempted in the claim-to-start gap) and the row goes to
+				// interrupted-attempt reconciliation. A live row is left alone
+				// until a deadline demands enforcement — see
+				// enforceLiveAttemptDeadline. A zombie fiber that outlives either
+				// path is fenced by the claim CAS and attempt-id ownership checks
+				// on every durable write.
+				const liveController = this.activeControllers.get(submission.submissionId);
+				if (liveController && !this.enforceLiveAttemptDeadline(submission)) {
+					continue;
+				}
 				try {
 					const replacement = await this.reconcileInterruptedSubmission(submission);
 					// The attempt fiber starts after the reconcile pass returns —
-					// see drainLocked for why starts must escape the pass's
+					// see supervisorPass for why starts must escape the pass's
 					// tracing activation.
 					if (replacement) toStart.push(replacement);
+					if (liveController) this.orphanEnforcedAttempt(submission.submissionId, liveController);
 				} catch (error) {
 					this.logSubmissionReconciliationFailure(submission, 'reconcile_submission', error);
 				}
 			}
 			for (const submission of await this.submissions.listRunnableSubmissions()) {
-				if (this.drainAttemptCapReached(submission, attemptsBySubmission)) continue;
 				// Cloudflare DOs are single-threaded per instance — leases are
 				// advisory-only. Set to 0 so reconciliation never misidentifies
 				// an active submission as expired. The Node coordinator uses real
@@ -697,52 +772,6 @@ class CloudflareAgentCoordinator {
 			);
 		}
 		return toStart;
-	}
-
-	private drainAttemptCapReached(
-		submission: AgentSubmission,
-		attemptsBySubmission: Map<string, number>,
-	): boolean {
-		if (
-			(attemptsBySubmission.get(submission.submissionId) ?? 0) <
-			FLUE_AGENT_SUBMISSION_DRAIN_ATTEMPT_CAP
-		) {
-			return false;
-		}
-		console.error('[flue:submission-reconciliation]', {
-			agentName: this.agentName,
-			instanceId: this.instance.name,
-			submissionId: submission.submissionId,
-			operation: 'start_submission',
-			outcome: 'drain_attempt_cap_deferred_to_scheduled_wake',
-		});
-		this.emitCoordinatorEvent({
-			type: 'submission_recovery',
-			submissionId: submission.submissionId,
-			kind: submission.kind,
-			operation: 'start_submission',
-			outcome: 'attempt_cap_deferred',
-			attemptCount: submission.attemptCount,
-			maxAttempts: submission.maxAttempts,
-		});
-		return true;
-	}
-
-	/**
-	 * Count the attempt against the per-drain cap and start it. The cap check
-	 * here (in addition to the pre-claim check in the runnable loop) covers
-	 * interrupted-recovery replacements, which arrive already claimed.
-	 */
-	private async startGuardedAttempt(
-		submission: AgentSubmission,
-		attemptsBySubmission: Map<string, number>,
-	): Promise<StartedSubmissionAttempt | undefined> {
-		if (this.drainAttemptCapReached(submission, attemptsBySubmission)) return undefined;
-		attemptsBySubmission.set(
-			submission.submissionId,
-			(attemptsBySubmission.get(submission.submissionId) ?? 0) + 1,
-		);
-		return this.startSubmissionAttempt(submission);
 	}
 
 	/**
@@ -814,6 +843,75 @@ class CloudflareAgentCoordinator {
 			},
 			{ errorInfo: classifyError(error) },
 		);
+	}
+
+	/**
+	 * Deadline enforcement for an attempt fiber that is still live in this
+	 * isolate. When a deadline has passed — the durability timeout, or a
+	 * durable abort intent the fiber has not honored — fire the attempt's
+	 * abort controller so a signal-aware await unwinds through the fiber's
+	 * own settle path (`processSubmission` settles failed/aborted durably
+	 * and emits the live event). Returns true — demand interrupted-attempt
+	 * reconciliation NOW, settling over the live fiber — only once the
+	 * deadline is more than FLUE_AGENT_SUBMISSION_SETTLE_GRACE_MS old and
+	 * the fiber still has not settled: a signal-deaf hang (a sandbox RPC
+	 * pending against a healthy-reporting container, a wedged stream
+	 * reader). The hung fiber is orphaned; its late writes lose the
+	 * settlement CAS and attempt-id fences.
+	 */
+	private enforceLiveAttemptDeadline(submission: AgentSubmission): boolean {
+		const now = Date.now();
+		const timedOut = submission.timeoutAt > 0 && now >= submission.timeoutAt;
+		const abortRequested = submission.abortRequestedAt !== undefined;
+		if (!timedOut && !abortRequested) return false;
+		const controller = this.activeControllers.get(submission.submissionId);
+		if (!controller) return true;
+		// Abort intent wins over timeout, mirroring the settle-order in
+		// reconcileInterruptedSubmission. AbortController.abort is idempotent,
+		// so re-signaling on every pass is safe.
+		controller.abort(
+			abortRequested ? new SubmissionAbortedError() : new SubmissionTimeoutError(),
+		);
+		// The grace is anchored to when the fiber was first SIGNALED, not to
+		// the deadline itself: a delayed first pass (late alarms) must not
+		// abort and force-settle in the same breath. Abort intents were
+		// signaled at request time (abortInstance fires the controller in
+		// this isolate), so they seed from abortRequestedAt.
+		const signaledAt = this.attemptDeadlineSignaledAt.get(controller);
+		const deadline =
+			signaledAt ??
+			(abortRequested && submission.abortRequestedAt !== undefined
+				? Math.min(submission.abortRequestedAt, now)
+				: now);
+		if (signaledAt === undefined) this.attemptDeadlineSignaledAt.set(controller, deadline);
+		if (now < deadline + FLUE_AGENT_SUBMISSION_SETTLE_GRACE_MS) {
+			this.emitCoordinatorEvent({
+				type: 'submission_recovery',
+				submissionId: submission.submissionId,
+				kind: submission.kind,
+				operation: 'enforce_deadline',
+				outcome: 'deferred',
+				attemptCount: submission.attemptCount,
+				maxAttempts: submission.maxAttempts,
+				error: serializeSubmissionError(
+					abortRequested
+						? new SubmissionAbortedError()
+						: new SubmissionTimeoutError(),
+				),
+			});
+			return false;
+		}
+		console.error('[flue:submission-reconciliation]', {
+			agentName: this.agentName,
+			instanceId: this.instance.name,
+			submissionId: submission.submissionId,
+			sessionKey: submission.sessionKey,
+			attemptId: submission.attemptId,
+			operation: 'enforce_deadline',
+			outcome: 'terminated',
+			reason: abortRequested ? 'abort_unhonored' : 'exceeded_timeout',
+		});
+		return true;
 	}
 
 	/**
@@ -905,6 +1003,7 @@ class CloudflareAgentCoordinator {
 				.finally(() => {
 					this.deleteControllerIfCurrent(submission.submissionId, controller);
 				}),
+			submissionId: submission.submissionId,
 		};
 	}
 
@@ -921,6 +1020,19 @@ class CloudflareAgentCoordinator {
 		}
 	}
 
+	/**
+	 * After deadline enforcement settled over a live-but-hung fiber, orphan
+	 * it: drop its controller entry (its own finally-cleanup is unreachable)
+	 * and rotate the cached conversation writer so later sessions acquire a
+	 * fresh producer — a waking zombie's rejected append then fails only the
+	 * stale writer object it holds, never a successor's.
+	 */
+	private orphanEnforcedAttempt(submissionId: string, controller: AbortController): void {
+		this.deleteControllerIfCurrent(submissionId, controller);
+		this.conversationWriter = undefined;
+		this.conversationWriterCreation = undefined;
+	}
+
 	async abortInstance(): Promise<boolean> {
 		// One DO instance owns one agent instance; external submissions share one
 		// durable session, so a single session-scoped stamp covers the running
@@ -933,11 +1045,13 @@ class CloudflareAgentCoordinator {
 		);
 		const affected = await this.submissions.requestSessionAbort(sessionKey);
 		if (affected.length === 0) return false;
-		// Abort any of those attempt fibers live in this isolate — processSubmission's
-		// catch settles them aborted, and the drain awaiting the fiber observes the
-		// settlement. Queued ones settle via the pre-execution abort check once the
-		// drain claims them; an evicted running attempt is driven by the durable
-		// flag through the drain's reconciliation.
+		// Abort any of those attempt fibers live in this isolate —
+		// processSubmission's catch settles them aborted and the fiber tail
+		// arms the next wake. Queued ones settle via the pre-execution abort
+		// check once a pass claims them; an evicted running attempt is driven
+		// by the durable flag through reconciliation, and a signal-deaf live
+		// fiber is force-settled by enforceLiveAttemptDeadline once the abort
+		// intent outlives the settle grace.
 		for (const submissionId of affected) {
 			this.activeControllers.get(submissionId)?.abort(new SubmissionAbortedError());
 		}

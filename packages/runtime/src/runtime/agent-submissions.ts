@@ -626,9 +626,14 @@ export async function reconcileInterruptedSubmission(
 	// option A in plans/2026-07-13-single-source-of-truth-ledger-design.md —
 	// make that the FIRST commit of multi-process support):
 	//
-	// - Unreachable today: Cloudflare DOs are single-threaded, multi-process
-	//   Node is unsupported, and the in-process coordinator serializes
-	//   reconciliation against live attempts.
+	// - Narrow today: Cloudflare DOs are single-threaded and multi-process
+	//   Node is unsupported, so the only in-process race is deadline
+	//   enforcement settling over a live-but-hung fiber (the force path
+	//   shares the zombie's attemptId, so the stream fence admits both until
+	//   the settlement CAS lands). A zombie that wakes inside that window
+	//   can interleave writes with the terminal records; first-terminal-wins
+	//   and the idempotent terminal path bound the damage to stray timeline
+	//   entries.
 	// - Narrow even if raced: racing reconcilers derive the reason from the
 	//   same durable row facts, so their advisories are byte-identical and
 	//   the terminal path's idempotency check absorbs the race; content can
@@ -934,12 +939,18 @@ export async function processSubmission(opts: ProcessSubmissionOptions): Promise
 			);
 			return;
 		}
+		// Same signal-reason keying for a deadline interruption: the session
+		// unwinds a fired abort signal as a generic AbortError (DOMException),
+		// so the typed timeout must be recovered from the signal's reason or
+		// the settlement would serialize as internal_error.
+		const settleError =
+			opts.signal?.reason instanceof SubmissionTimeoutError ? opts.signal.reason : error;
 		await settleJoinedSubmissions(
 			submissions,
 			attempt,
 			ctx,
 			'failed',
-			error,
+			settleError,
 			opts.conversationWriter,
 		);
 		await settleSubmissionWithRecord(
@@ -948,7 +959,7 @@ export async function processSubmission(opts: ProcessSubmissionOptions): Promise
 			attempt,
 			ctx,
 			'failed',
-			error,
+			settleError,
 			opts.conversationWriter,
 		);
 		throw error;
@@ -1215,7 +1226,40 @@ async function settleSubmissionWithRecord(
 			recordId: eventKey,
 			record: settlement,
 		}));
-	if (!obligation) return;
+	if (!obligation) {
+		// Losing the reservation is usually benign convergence — a replacement
+		// attempt or the deadline sweep already owns the terminal transition.
+		// A row still unsettled after a refusal is the pathological class
+		// (stale settlement_record_id, attempt mismatch) that used to loop the
+		// heartbeat with completely empty logs; say so on every occurrence —
+		// re-emission at wake cadence is the alerting signal.
+		const row = await submissions.getSubmission(attempt.submissionId).catch(() => null);
+		if (row && row.status !== 'settled') {
+			console.error('[flue:submission-settlement]', {
+				submissionId: attempt.submissionId,
+				attemptId: attempt.attemptId,
+				operation: 'reserve_settlement',
+				outcome: 'refused',
+				rowStatus: row.status,
+				rowAttemptId: row.attemptId,
+			});
+			ctx.publishEvent(
+				ctx.createEvent({
+					type: 'submission_recovery',
+					submissionId: attempt.submissionId,
+					kind,
+					operation: 'process_submission',
+					outcome: 'deferred',
+					error: {
+						name: 'Error',
+						message:
+							'Settlement reservation refused for an unsettled submission; the settle will be retried by reconciliation.',
+					},
+				}),
+			);
+		}
+		return;
+	}
 	const existing = await conversationWriter.getRecord(eventKey);
 	if (!existing) {
 		await conversationWriter.append([obligation.record], { submission: attempt });

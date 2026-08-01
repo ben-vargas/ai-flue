@@ -1289,7 +1289,11 @@ type FlueEventVariant =
 				| 'reconcile_submission'
 				| 'start_submission'
 				| 'process_submission'
-				| 'reconcile_pass';
+				| 'reconcile_pass'
+				| 'enforce_deadline';
+			/** `attempt_cap_deferred` is retained for compatibility but no longer
+			 *  emitted: supervisor passes are bounded, so heartbeat cadence —
+			 *  not an in-pass cap — throttles pathological reclaim cycles. */
 			outcome: 'deferred' | 'agent_unavailable' | 'attempt_cap_deferred' | 'terminated';
 			attemptCount?: number;
 			maxAttempts?: number;

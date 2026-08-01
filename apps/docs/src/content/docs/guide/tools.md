@@ -70,7 +70,7 @@ const checkInventory = defineTool({
 
 **The rest of the context.** Alongside `data`, every `run` receives:
 
-- `signal` — an `AbortSignal` for the call. Pass it to your own async work so a cancelled tool call stops promptly.
+- `signal` — an `AbortSignal` for the call. Pass it to your own async work so a cancelled tool call stops promptly. A `run` that ignores the signal cannot wedge the agent: when the signal fires, the runtime abandons the await — the call fails with an `AbortError` saying the work may still be running, and the orphaned promise's eventual result is discarded.
 - `log` — progress logging (`log.info(...)`, `log.warn(...)`, `log.error(...)`) for long-running tools. Lines stream into the conversation as events your application can observe; they are not part of the result and the model never sees them.
 - `toolCallId` — the id of this specific call, the same id carried on the call's conversation events. Use it to correlate side effects with the call that raised them.
 

@@ -23,7 +23,7 @@ import type {
 	UserMessage,
 } from '@earendil-works/pi-ai';
 import type * as v from 'valibot';
-import { abortErrorFor, createCallHandle } from './abort.ts';
+import { abandonToolOnAbort, abortErrorFor, createCallHandle } from './abort.ts';
 import {
 	createActivateSkillTool,
 	createBashTool,
@@ -3675,10 +3675,14 @@ export class Session implements FlueSession, AgentSubmissionSession {
 					call.startEmitted = true;
 				}
 				try {
+					// Abandon-on-abort: a signal-deaf tool must not wedge the turn
+					// past an abort or durability deadline; its orphaned promise
+					// keeps running under the at-least-once contract while the
+					// turn unwinds.
 					const result = await interceptExecution(
 						{ type: 'tool', toolCallId, toolName: tool.name },
 						this.executionContext(),
-						prepared.run,
+						() => abandonToolOnAbort(prepared.run, signal),
 					);
 					call.effectiveResult = prepared.result ? prepared.result(result) : result;
 					call.effectiveResultCaptured = true;
@@ -4663,9 +4667,11 @@ export class Session implements FlueSession, AgentSubmissionSession {
 
 		// Cooperative halt points: checked before each turn and before recovery
 		// work (compaction, retry backoff), not during provider calls. A hung
-		// provider or long tool execution can exceed the deadline. That case is
-		// covered by DO eviction + the attempt budget (Capability K), not this
-		// check. Preemptive in-turn watchdog is deferred to Capability L.
+		// provider or long tool execution exceeds the deadline here, but not
+		// the contract: the coordinator's supervisor sweep fires the attempt's
+		// abort signal at the deadline (signal-aware awaits unwind through the
+		// normal settle paths) and force-settles a signal-deaf hang past the
+		// settle grace.
 		const throwIfHalted = () => {
 			if (options.signal.aborted) throw abortErrorFor(options.signal);
 			if (this.activeTimeoutAt !== undefined && Date.now() >= this.activeTimeoutAt) {

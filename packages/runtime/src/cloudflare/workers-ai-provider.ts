@@ -224,6 +224,66 @@ function mapStopReason(reason: string): {
 	}
 }
 
+/**
+ * Default cap on how long a model stream may go without delivering a single
+ * byte before the request is failed as a retryable interruption. Generous on
+ * purpose: long-thinking models can be legitimately silent for minutes when
+ * neither keepalives nor reasoning deltas are streamed, and a false trip
+ * burns a turn retry. The pathological case this exists for — a stream that
+ * returned 200 and then never speaks again (#538) — is unbounded without it.
+ */
+const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000;
+
+/**
+ * Wrap a response body so a chunk gap longer than `idleMs` rejects the read
+ * with a retryable-interruption error instead of pending forever. The timer
+ * only runs while a read is outstanding — consumer backpressure is not
+ * source silence. `idleMs <= 0` disables the guard.
+ */
+function withStreamIdleDeadline(
+	body: ReadableStream<Uint8Array>,
+	idleMs: number,
+): ReadableStream<Uint8Array> {
+	if (idleMs <= 0) return body;
+	const reader = body.getReader();
+	return new ReadableStream<Uint8Array>({
+		async pull(controller) {
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			try {
+				const result = await Promise.race([
+					reader.read(),
+					new Promise<never>((_, reject) => {
+						timer = setTimeout(() => {
+							reject(
+								new Error(
+									`Model stream stalled: no data received for ${Math.round(idleMs / 1000)}s ${RETRYABLE_INTERRUPTION_MARKER}`,
+								),
+							);
+						}, idleMs);
+					}),
+				]);
+				if (result.done) controller.close();
+				else controller.enqueue(result.value);
+			} catch (error) {
+				// Cancel the source so workerd doesn't keep the underlying AI
+				// request streaming with no consumer; the stalled read promise
+				// is orphaned either way. cancel() rejects when the source
+				// errored in the meantime — consume it, an unhandled rejection
+				// is an exception on workerd.
+				try {
+					void reader.cancel().catch(() => {});
+				} catch {}
+				controller.error(error);
+			} finally {
+				clearTimeout(timer);
+			}
+		},
+		cancel(reason) {
+			return reader.cancel(reason);
+		},
+	});
+}
+
 async function* iterateSseChunks(body: ReadableStream<Uint8Array>): AsyncIterable<unknown> {
 	const reader = body.getReader();
 	const decoder = new TextDecoder();
@@ -302,23 +362,50 @@ function isAbortError(error: unknown): boolean {
 	return error instanceof DOMException && error.name === 'AbortError';
 }
 
+/** Resolved per-provider streaming config threaded to every wire-format branch. */
+interface CloudflareBindingStreamConfig {
+	gateway: CloudflareGatewayOptions | undefined;
+	streamIdleTimeoutMs: number;
+}
+
+/**
+ * The gateway shape forwarded to `ai.run` plus the headers carrying gateway
+ * options with no binding-object equivalent (`requestTimeoutMs` →
+ * `cf-aig-request-timeout`).
+ */
+function gatewayRunOptions(gateway: CloudflareGatewayOptions | undefined): {
+	gateway?: Omit<CloudflareGatewayOptions, 'requestTimeoutMs'>;
+	headers: Record<string, string>;
+} {
+	if (!gateway) return { headers: {} };
+	const { requestTimeoutMs, ...forwarded } = gateway;
+	return {
+		gateway: forwarded,
+		headers:
+			requestTimeoutMs !== undefined && requestTimeoutMs > 0
+				? { 'cf-aig-request-timeout': String(requestTimeoutMs) }
+				: {},
+	};
+}
+
 function streamCloudflareWorkersAi(
 	ai: Ai,
-	gateway: CloudflareGatewayOptions | undefined,
+	binding: CloudflareBindingStreamConfig,
 	model: Model<Api>,
 	context: Context,
 	options?: SimpleStreamOptions,
 ) {
 	switch (bindingWireFormat(model)) {
 		case 'anthropic-messages':
-			return streamCloudflareAnthropicAi(ai, gateway, model, context, options);
+			return streamCloudflareAnthropicAi(ai, binding, model, context, options);
 		case 'openai-responses':
-			return streamCloudflareResponsesAi(ai, gateway, model, context, options);
+			return streamCloudflareResponsesAi(ai, binding, model, context, options);
 		case 'openai-completions':
 			break;
 		default:
 			return unsupportedWireFormatStream(model);
 	}
+	const { gateway, streamIdleTimeoutMs } = binding;
 
 	const stream = createAssistantMessageEventStream();
 	void (async () => {
@@ -367,7 +454,8 @@ function streamCloudflareWorkersAi(
 			const overridden = await options?.onPayload?.(payload, model);
 			const finalPayload = overridden === undefined ? payload : (overridden as typeof payload);
 
-			const extraHeaders = buildExtraHeaders(options);
+			const run = gatewayRunOptions(gateway);
+			const extraHeaders = { ...buildExtraHeaders(options), ...run.headers };
 
 			// `Ai.run` only types overloads for known model IDs; we route
 			// arbitrary ids through the unknown-model overload (see RunOverload).
@@ -377,7 +465,7 @@ function streamCloudflareWorkersAi(
 				returnRawResponse: true,
 				...(options?.signal ? { signal: options.signal } : {}),
 				...(Object.keys(extraHeaders).length > 0 ? { extraHeaders } : {}),
-				...(gateway ? { gateway } : {}),
+				...(run.gateway ? { gateway: run.gateway } : {}),
 			})) as Response;
 
 			await options?.onResponse?.(
@@ -510,7 +598,9 @@ function streamCloudflareWorkersAi(
 				return block;
 			};
 
-			for await (const rawChunk of iterateSseChunks(response.body)) {
+			for await (const rawChunk of iterateSseChunks(
+				withStreamIdleDeadline(response.body, streamIdleTimeoutMs),
+			)) {
 				const chunk = rawChunk as ChatCompletionChunk | null;
 				if (!chunk || typeof chunk !== 'object') continue;
 				output.responseId ||= chunk.id;
@@ -643,14 +733,14 @@ function streamCloudflareWorkersAi(
 
 function streamCloudflareAnthropicAi(
 	ai: Ai,
-	gateway: CloudflareGatewayOptions | undefined,
+	binding: CloudflareBindingStreamConfig,
 	model: Model<Api>,
 	context: Context,
 	options?: SimpleStreamOptions,
 ) {
 	warnZeroMetadataGatewayModel(model);
 	const anthropicModel = toAnthropicGatewayModel(model);
-	const client = createAnthropicBindingClient(ai, model, options, gateway);
+	const client = createAnthropicBindingClient(ai, model, options, binding);
 
 	// The lazy shim types options as plain StreamOptions; the impl receives
 	// the Anthropic-specific fields (client, thinkingEnabled) verbatim.
@@ -685,11 +775,12 @@ const RESPONSES_TOOL_CALL_ID_PROVIDERS: ReadonlySet<string> = new Set();
 
 function streamCloudflareResponsesAi(
 	ai: Ai,
-	gateway: CloudflareGatewayOptions | undefined,
+	binding: CloudflareBindingStreamConfig,
 	model: Model<Api>,
 	context: Context,
 	options?: SimpleStreamOptions,
 ) {
+	const { gateway } = binding;
 	warnZeroMetadataGatewayModel(model);
 	const stream = createAssistantMessageEventStream();
 	void (async () => {
@@ -742,12 +833,13 @@ function streamCloudflareResponsesAi(
 			const overridden = await options?.onPayload?.(payload, model);
 			const finalPayload = overridden === undefined ? payload : (overridden as typeof payload);
 
-			const extraHeaders = buildExtraHeaders(options);
+			const run = gatewayRunOptions(gateway);
+			const extraHeaders = { ...buildExtraHeaders(options), ...run.headers };
 			response = (await (ai.run as unknown as RunOverload)(model.id, finalPayload, {
 				returnRawResponse: true,
 				...(options?.signal ? { signal: options.signal } : {}),
 				...(Object.keys(extraHeaders).length > 0 ? { extraHeaders } : {}),
-				...(gateway ? { gateway } : {}),
+				...(run.gateway ? { gateway: run.gateway } : {}),
 			})) as Response;
 
 			await options?.onResponse?.(
@@ -774,7 +866,10 @@ function streamCloudflareResponsesAi(
 			stream.push({ type: 'start', partial: output });
 
 			await processResponsesStream(
-				observeResponsesEvents(iterateSseChunks(response.body), observed) as Parameters<
+				observeResponsesEvents(
+					iterateSseChunks(withStreamIdleDeadline(response.body, binding.streamIdleTimeoutMs)),
+					observed,
+				) as Parameters<
 					typeof processResponsesStream
 				>[0],
 				output,
@@ -830,7 +925,16 @@ function streamCloudflareResponsesAi(
 }
 
 function toResponsesGatewayModel(model: Model<Api>): Model<'openai-responses'> {
-	return { ...model, api: 'openai-responses', baseUrl: '' };
+	const converted: Model<'openai-responses'> = { ...model, api: 'openai-responses', baseUrl: '' };
+	// The binding's /run validates reasoning.effort as none|low|medium|high even
+	// when the model's own API accepts more, so drop the levels the transport
+	// can't carry and let clampThinkingLevel land on the highest remaining one
+	// (the same ceiling mapReasoningEffort applies on the chat-completions path).
+	if (converted.thinkingLevelMap) {
+		const { xhigh, max, ...bindingLevels } = converted.thinkingLevelMap;
+		converted.thinkingLevelMap = bindingLevels;
+	}
+	return converted;
 }
 
 function applyResponsesReasoning(
@@ -972,23 +1076,30 @@ function createAnthropicBindingClient(
 	ai: Ai,
 	model: Model<Api>,
 	options: SimpleStreamOptions | undefined,
-	gateway: CloudflareGatewayOptions | undefined,
+	binding: CloudflareBindingStreamConfig,
 ): AnthropicOptions['client'] {
 	return {
 		messages: {
 			create(params: Record<string, unknown>, requestOptions?: { signal?: AbortSignal }) {
 				return {
 					async asResponse() {
-						const extraHeaders = buildExtraHeaders(options);
+						const run = gatewayRunOptions(binding.gateway);
+						const extraHeaders = { ...buildExtraHeaders(options), ...run.headers };
 						const response = (await (ai.run as unknown as RunOverload)(model.id, params, {
 							returnRawResponse: true,
 							...(requestOptions?.signal ? { signal: requestOptions.signal } : {}),
 							...(Object.keys(extraHeaders).length > 0 ? { extraHeaders } : {}),
-							...(gateway ? { gateway } : {}),
+							...(run.gateway ? { gateway: run.gateway } : {}),
 						})) as Response;
 
 						await assertSuccessfulBindingResponse(response);
-						return response;
+						// pi-ai's Anthropic protocol consumes the body itself, so the
+						// idle deadline wraps the Response it hands back.
+						if (!response.body) return response;
+						return new Response(
+							withStreamIdleDeadline(response.body, binding.streamIdleTimeoutMs),
+							response,
+						);
 					},
 				};
 			},
@@ -1063,6 +1174,10 @@ function applyReasoningEffort(
 	payload.reasoning_effort = mapReasoningEffort(level);
 }
 
+/**
+ * Ceiling for the binding's accepted effort values; the Responses path applies
+ * the same ceiling by stripping xhigh/max in toResponsesGatewayModel.
+ */
 function mapReasoningEffort(
 	level: NonNullable<SimpleStreamOptions['reasoning']>,
 ): WorkersAIReasoningEffort {
@@ -1125,6 +1240,14 @@ export interface CloudflareBindingProviderOptions {
 	 * See https://developers.cloudflare.com/ai-gateway/integrations/worker-binding-methods/.
 	 */
 	gateway?: CloudflareGatewayOptions | false;
+	/**
+	 * Cap on how long a model stream may go without delivering a byte before
+	 * the request fails as a retryable interruption (the turn retries under
+	 * the transient-error budget). Defaults to 5 minutes — generous, because
+	 * a long-thinking model can be legitimately silent when neither
+	 * keepalives nor reasoning deltas stream. `0` disables the guard.
+	 */
+	streamIdleTimeoutMs?: number;
 }
 
 /**
@@ -1145,9 +1268,13 @@ export function cloudflareBindingProvider(options: CloudflareBindingProviderOpti
 	// default AI Gateway, `false` opts out, an options object replaces the
 	// default.
 	const gateway = options.gateway === false ? undefined : (options.gateway ?? { id: 'default' });
+	const binding: CloudflareBindingStreamConfig = {
+		gateway,
+		streamIdleTimeoutMs: options.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+	};
 	const ai = options.binding as Ai;
 	const stream = (model: Model<Api>, context: Context, streamOptions?: SimpleStreamOptions) =>
-		streamCloudflareWorkersAi(ai, gateway, model, context, streamOptions);
+		streamCloudflareWorkersAi(ai, binding, model, context, streamOptions);
 	const streams: ProviderStreams = { stream, streamSimple: stream };
 
 	const provider = createProvider<Api>({

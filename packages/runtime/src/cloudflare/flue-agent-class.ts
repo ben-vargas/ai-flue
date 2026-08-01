@@ -76,11 +76,13 @@ export function createFlueAgentClass(options: CreateFlueAgentClassOptions): Exte
 		}
 
 		/**
-		 * Durable schedule target that owns submission execution: armed at zero
-		 * delay by admission/abort/recovery boundaries and at 30s as the
-		 * reconciliation backstop. Dispatched from the Durable Object's alarm
-		 * invocation, it drains — starts AND awaits — every runnable attempt,
-		 * so the alarm invocation owns the agent's work end to end.
+		 * Durable schedule target that owns submission supervision: armed at
+		 * zero delay by admission/abort/recovery/fiber-settle boundaries and
+		 * at 30s as the heartbeat while unsettled work exists. Dispatched
+		 * from the Durable Object's alarm invocation as one bounded,
+		 * storage-only pass that reconciles, enforces deadlines, and starts
+		 * attempt fibers detached — the fibers outlive the invocation on the
+		 * SDK's runFiber keepAlive/recovery machinery.
 		 */
 		__flueWakeAgentSubmissions() {
 			return runtime.drainSubmissions(this as unknown as CloudflareAgentInstance);

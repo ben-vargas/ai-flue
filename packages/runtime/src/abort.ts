@@ -41,6 +41,84 @@ export function composeTimeoutSignal(
 	return { timeoutSignal, mergedSignal };
 }
 
+/** Appended to the abort error when the abandoned work may still be running. */
+export const ABANDONED_TOOL_SUFFIX =
+	' The tool execution could not be confirmed cancelled and may still be running.';
+
+/**
+ * Await `run()`, but reject promptly with an `AbortError` when `signal`
+ * fires instead of waiting for the promise — the pi tool loop awaits tool
+ * promises without racing its own signal, so a signal-deaf tool (a sandbox
+ * file op with no abort plumbing, a wedged provider SDK) would otherwise
+ * wedge the turn past every abort and deadline. The abandoned promise is
+ * orphaned under the same contract as an orphaned exec: both of its
+ * settlement paths are consumed so nothing surfaces as an unhandled
+ * rejection, and its eventual result is discarded — the conversation
+ * records the terminal story at abort time. Signal-aware tools reject on
+ * their own first; the race is then a no-op.
+ */
+export function abandonToolOnAbort<T>(
+	run: () => Promise<T>,
+	signal: AbortSignal | undefined,
+): Promise<T> {
+	if (signal?.aborted) return Promise.reject(abortErrorFor(signal));
+	if (!signal) return run();
+
+	let pending: Promise<T>;
+	try {
+		pending = run();
+	} catch (error) {
+		return Promise.reject(error);
+	}
+
+	return new Promise<T>((resolve, reject) => {
+		let settled = false;
+
+		const onAbort = (): void => {
+			// One macrotask of grace before abandoning: an abort-aware inner
+			// racer (raceExecAbort's orphan contract, a fetch rejecting on the
+			// same signal) delivers its own, more specific rejection first —
+			// its continuation hops are microtasks, which all drain before a
+			// timer callback — and this abandonment becomes a no-op.
+			setTimeout(() => {
+				if (settled) return;
+				settled = true;
+				pending.then(
+					() => {},
+					() => {},
+				);
+				const base = abortErrorFor(signal);
+				const error = new DOMException(base.message + ABANDONED_TOOL_SUFFIX, 'AbortError');
+				try {
+					Object.defineProperty(error, 'cause', { value: signal.reason, configurable: true });
+				} catch {
+					/* leave cause unset */
+				}
+				reject(error);
+			}, 0);
+		};
+		signal.addEventListener('abort', onAbort, { once: true });
+
+		pending.then(
+			(result) => {
+				if (settled) return;
+				settled = true;
+				signal.removeEventListener('abort', onAbort);
+				// An abort landing in the same tick as completion still rejects —
+				// no stale success after the turn's terminal story is decided.
+				if (signal.aborted) reject(abortErrorFor(signal));
+				else resolve(result);
+			},
+			(error: unknown) => {
+				if (settled) return;
+				settled = true;
+				signal.removeEventListener('abort', onAbort);
+				reject(error);
+			},
+		);
+	});
+}
+
 /**
  * Wrap an async `run` function in a `CallHandle`. The handle's internal
  * signal fires when `externalSignal` aborts or when `handle.abort()` is

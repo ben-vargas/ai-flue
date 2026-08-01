@@ -153,8 +153,9 @@ New capabilities you will likely reach for while migrating — durable per-insta
 
 ## Tools
 
-The tool contract keeps `defineTool({ name, description, input, output, run })`, with one rename and two new flags:
+The tool contract keeps `defineTool({ name, description, input, output, run })`, with a new return shape, one rename, and two new flags:
 
+- **`run()` returns a result envelope: `{ output?, terminate? }`.** Where a tool returned a bare value, return `{ output: <value> }`. Returning a bare `string` still works — it is sugar for `{ output: <string> }` — and returning nothing is still allowed for tools without an `output` schema, but any other bare value (object, number, boolean, array, `null`) now throws at runtime with instructions to wrap it. The optional `terminate: true` sibling ends the agent's turn once the current tool batch settles — the same loop-ending contract the built-in `finish` tool uses.
 - **`run({ input })` → `run({ data })`.** The parsed-arguments field on `ToolContext` is now `data`; `signal` is unchanged, and `log` (a `FlueLogger`) and `toolCallId` are always present. The pre-beta `parameters`/`execute` markers still throw.
 - **`harness: true`** replaces session plumbing: the tool receives `harness` (`harness.prompt()` for model calls in the tool's own scratch conversation, `harness.sandbox` for the environment). `harness.session()` and `FlueSession`/`FlueSessions` are gone — `prompt()` lives directly on the harness, and `session.task()` delegation is now the model-driven `task` tool over `useSubagent` declarations. The `task` tool's `agent` parameter is required, and an unnamed task no longer clones the parent's configuration — declare `useSubagent(GeneralSubagent)` for a blank fresh-context delegate (see [Subagents](/docs/guide/subagents/#the-general-purpose-delegate)).
 - **`durable: true`** opts a tool into checkpointed execution: `run` receives `step`, side effects go through `step.do(name, fn)`, and recovery replays recorded step values instead of re-running them. This is the in-agent replacement for small workflow orchestration.

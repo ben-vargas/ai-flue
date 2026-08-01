@@ -52,6 +52,15 @@ export function observe(subscriber: FlueEventSubscriber): () => void {
 }
 
 /**
+ * Async subscriber deliveries still in flight. Emission never awaits them
+ * (a slow subscriber must not block the emit path), but the set lets an
+ * invocation boundary hand them to the platform —
+ * {@link drainGlobalEventDeliveries} — so a settlement emitted in an alarm
+ * invocation's final moments isn't torn down mid-POST on Cloudflare.
+ */
+const inFlightDeliveries = new Set<Promise<unknown>>();
+
+/**
  * Internal: dispatch a single event to every registered subscriber.
  * Called from `createFlueContext`'s `emitEvent` after the per-context
  * subscribers have run.
@@ -64,11 +73,26 @@ export function dispatchGlobalEvent(
 	const observation = createObservation(event, detail);
 	for (const subscriber of [...subscribers]) {
 		try {
-			Promise.resolve(subscriber(observation, ctx)).catch(reportSubscriberFailure);
+			const delivery = Promise.resolve(subscriber(observation, ctx)).catch(
+				reportSubscriberFailure,
+			);
+			inFlightDeliveries.add(delivery);
+			void delivery.finally(() => inFlightDeliveries.delete(delivery));
 		} catch (error) {
 			reportSubscriberFailure(error);
 		}
 	}
+}
+
+/**
+ * Internal: settle every subscriber delivery in flight at call time. Never
+ * rejects (failures were already contained and logged per delivery). Handed
+ * to `ctx.waitUntil` at Cloudflare invocation boundaries; a no-op when
+ * nothing is pending.
+ */
+export function drainGlobalEventDeliveries(): Promise<void> {
+	if (inFlightDeliveries.size === 0) return Promise.resolve();
+	return Promise.allSettled([...inFlightDeliveries]).then(() => undefined);
 }
 
 function reportSubscriberFailure(error: unknown): void {

@@ -28,6 +28,12 @@ export interface CloudflareGatewayOptions {
 	collectLog?: boolean;
 	/** Correlate this request with a custom event id on the Gateway log. */
 	eventId?: string;
-	/** Per-request timeout enforced by the Gateway, in milliseconds. */
+	/**
+	 * Gateway-enforced bound (milliseconds) on the time to the first part of
+	 * the response — not total duration; pair with the provider's
+	 * `streamIdleTimeoutMs` for mid-stream stalls. Not a binding option: the
+	 * provider emits it as the `cf-aig-request-timeout` header on each
+	 * `env.AI.run(...)` call instead of forwarding it in the gateway object.
+	 */
 	requestTimeoutMs?: number;
 }

@@ -7,6 +7,7 @@ import {
 	RuntimeUnavailableError,
 	SubmissionAbortedError,
 	SubmissionConflictError,
+	SubmissionTimeoutError,
 } from '../errors.ts';
 import { createMcpConnectionCache, type McpConnectionCache } from '../mcp.ts';
 import {
@@ -581,7 +582,126 @@ export function createNodeAgentCoordinator(options: {
 		const now = Date.now();
 		if (now - lastLeaseScanAt < LEASE_SCAN_INTERVAL_MS) return;
 		lastLeaseScanAt = now;
+		await enforceActiveDeadlines();
 		await reconcileRunningSubmissions();
+	}
+
+	/**
+	 * How long past a deadline (durability timeout, or a durable abort
+	 * intent) a live attempt task gets to unwind through its own settle path
+	 * after its controller is aborted, before the scan force-settles the
+	 * submission over it. Only a signal-deaf hang reaches the force path;
+	 * mirrors the Cloudflare coordinator's grace.
+	 */
+	const SUBMISSION_SETTLE_GRACE_MS = 60_000;
+
+	/**
+	 * When each live attempt's controller was first fired by deadline
+	 * enforcement, keyed by the controller so a replacement attempt starts
+	 * its own clock.
+	 */
+	const attemptDeadlineSignaledAt = new WeakMap<AbortController, number>();
+
+	/**
+	 * Deadline enforcement over attempts that are live in this process. The
+	 * lease heartbeat keeps renewing a hung attempt's lease — a live process
+	 * looks identical to a working one — so the expired-lease reconcile pass
+	 * can never reach it and `timeoutAt` would otherwise go unenforced for
+	 * as long as the await hangs. Fire the attempt's controller at the
+	 * deadline (signal-aware awaits unwind through processSubmission's own
+	 * settle paths: timeout settles failed, abort intent settles aborted);
+	 * past the grace — anchored to when the controller was first fired, so
+	 * a late first scan never aborts and force-settles in the same breath —
+	 * settle over the hung task via the shared interrupted path. Its late
+	 * writes lose the settlement CAS and attempt-id fences.
+	 */
+	async function enforceActiveDeadlines(): Promise<void> {
+		for (const [submissionId, active] of [...activeSubmissions]) {
+			if (stopping) return;
+			let submission: AgentSubmission | null;
+			try {
+				submission = await submissions.getSubmission(submissionId);
+			} catch {
+				continue;
+			}
+			if (submission?.status !== 'running') continue;
+			const now = Date.now();
+			const timedOut = submission.timeoutAt > 0 && now >= submission.timeoutAt;
+			const abortRequested = submission.abortRequestedAt !== undefined;
+			if (!timedOut && !abortRequested) continue;
+			// Abort intent wins over timeout, mirroring the settle-order in
+			// reconcileInterruptedSubmission. abort() is idempotent, so
+			// re-signaling on every scan is safe.
+			active.abort.abort(
+				abortRequested ? new SubmissionAbortedError() : new SubmissionTimeoutError(),
+			);
+			// Abort intents were signaled at request time (abortInstance fires
+			// the controller in-process), so they seed from abortRequestedAt.
+			const signaledAt = attemptDeadlineSignaledAt.get(active.abort);
+			const deadline =
+				signaledAt ??
+				(abortRequested && submission.abortRequestedAt !== undefined
+					? Math.min(submission.abortRequestedAt, now)
+					: now);
+			if (signaledAt === undefined) attemptDeadlineSignaledAt.set(active.abort, deadline);
+			if (now < deadline + SUBMISSION_SETTLE_GRACE_MS) {
+				coordinatorEventEmitter(submission.input)({
+					type: 'submission_recovery',
+					submissionId: submission.submissionId,
+					kind: submission.kind,
+					operation: 'enforce_deadline',
+					outcome: 'deferred',
+					attemptCount: submission.attemptCount,
+					maxAttempts: submission.maxAttempts,
+					error: serializeSubmissionError(
+						abortRequested ? new SubmissionAbortedError() : new SubmissionTimeoutError(),
+					),
+				});
+				continue;
+			}
+			const agent = agents.find((record) => record.name === submission.input.agent)?.agent;
+			if (!agent) continue;
+			console.error('[flue:submission-reconciliation]', {
+				submissionId: submission.submissionId,
+				operation: 'enforce_deadline',
+				outcome: 'terminated',
+				reason: abortRequested ? 'abort_unhonored' : 'exceeded_timeout',
+			});
+			try {
+				const conversationWriter = await getConversationWriter(submission.input);
+				await reconcileInterruptedSubmission(
+					submissions,
+					submission,
+					agent,
+					makeSubmissionContext(submission.input, conversationWriter),
+					{ ownerId, leaseExpiresAt: Date.now() + LEASE_DURATION_MS },
+					conversationWriter,
+					coordinatorEventEmitter(submission.input),
+				);
+				// Orphan the zombie: drop its active entry so idleness and the
+				// claim loop key on the settled row (its own finally-cleanup is
+				// unreachable), and rotate the cached conversation writer so
+				// later sessions acquire a fresh producer — a waking zombie's
+				// rejected append then fails only the stale writer object it
+				// holds, never a successor's.
+				activeSubmissions.delete(submissionId);
+				conversationWriters.delete(agentStreamPath(submission.input.agent, submission.input.id));
+			} catch (error) {
+				coordinatorEventEmitter(submission.input)(
+					{
+						type: 'submission_recovery',
+						submissionId: submission.submissionId,
+						kind: submission.kind,
+						operation: 'enforce_deadline',
+						outcome: 'deferred',
+						attemptCount: submission.attemptCount,
+						maxAttempts: submission.maxAttempts,
+						error: serializeSubmissionError(error),
+					},
+					{ errorInfo: classifyError(error) },
+				);
+			}
+		}
 	}
 
 	/** In-flight expired-lease reconciliation pass, if any. */
