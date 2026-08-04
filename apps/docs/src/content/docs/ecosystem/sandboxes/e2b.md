@@ -20,11 +20,11 @@ The blueprint installs `e2b` when needed and creates `sandboxes/e2b.ts` in your 
 
 ```ts title="<source-root>/sandboxes/e2b.ts (abridged)"
 // flue-blueprint: sandbox/e2b@1
-import { createSandboxSessionEnv, useModel } from '@flue/runtime';
-import type { SandboxApi, SandboxFactory, SessionEnv, FileStat } from '@flue/runtime';
+import { sandboxFromDriver, useModel } from '@flue/runtime';
+import type { SandboxDriver, SandboxFactory, Sandbox, FileStat } from '@flue/runtime';
 import type { Sandbox as E2BSandbox } from 'e2b';
 
-class E2BSandboxApi implements SandboxApi {
+class E2BSandboxDriver implements SandboxDriver {
   constructor(private sandbox: E2BSandbox) {}
 
   /* Implements file reads, writes, stat, listing, existence, and mkdir with sandbox.files. */
@@ -36,10 +36,10 @@ class E2BSandboxApi implements SandboxApi {
 
 export function e2b(sandbox: E2BSandbox): SandboxFactory {
   return {
-    async createSessionEnv(): Promise<SessionEnv> {
+    async createSandbox(): Promise<Sandbox> {
       const sandboxCwd = '/home/user';
-      const api = new E2BSandboxApi(sandbox);
-      return createSandboxSessionEnv(api, sandboxCwd);
+      const driver = new E2BSandboxDriver(sandbox);
+      return sandboxFromDriver(driver, sandboxCwd);
     },
   };
 }
@@ -71,10 +71,10 @@ export function Assistant() {
   useSandbox({
     // Lazy, per the SandboxFactory contract: constructing this object is
     // cheap; the expensive E2B sandbox creation happens once, inside
-    // createSessionEnv(), at initialization — never on a re-render.
-    async createSessionEnv(options) {
+    // createSandbox(), at initialization — never on a re-render.
+    async createSandbox(options) {
       const sandbox = await Sandbox.create();
-      return e2b(sandbox).createSessionEnv(options);
+      return e2b(sandbox).createSandbox(options);
     },
   });
 }

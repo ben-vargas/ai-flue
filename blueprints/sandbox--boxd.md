@@ -42,7 +42,7 @@ Create any missing parent directories.
 ## File contents
 
 Write this file verbatim. Do not "improve" it — it conforms to the published
-`SandboxApi` contract.
+`SandboxDriver` contract.
 
 ```ts
 // flue-blueprint: sandbox/boxd@1
@@ -65,22 +65,22 @@ Write this file verbatim. Do not "improve" it — it conforms to the published
  *   useSandbox({
  *     // Lazy, per the SandboxFactory contract: constructing this object is
  *     // cheap; the expensive boxd VM creation happens once, inside
- *     // createSessionEnv(), at initialization — never on a re-render.
- *     async createSessionEnv(options) {
+ *     // createSandbox(), at initialization — never on a re-render.
+ *     async createSandbox(options) {
  *       const client = new Compute({ apiKey: process.env.BOXD_API_KEY });
  *       const box = await client.box.create({ name: 'my-agent' });
  *       // `client` doubles as the liveness probe: the adapter polls
  *       // `client.box.get()` while a call is in flight so a dying VM
  *       // rejects the call instead of hanging it.
- *       return boxd(box, { client }).createSessionEnv(options);
+ *       return boxd(box, { client }).createSandbox(options);
  *     },
  *   });
  *   return 'You are a helpful assistant with a full sandbox.';
  * }
  * ```
  */
-import { createSandboxSessionEnv, SandboxDiedError } from '@flue/runtime';
-import type { SandboxApi, SandboxFactory, SessionEnv, FileStat } from '@flue/runtime';
+import { sandboxFromDriver, SandboxDiedError } from '@flue/runtime';
+import type { SandboxDriver, SandboxFactory, Sandbox, FileStat } from '@flue/runtime';
 import { NotFoundError } from '@boxd-sh/sdk';
 import type { Box as BoxdBox, Compute } from '@boxd-sh/sdk';
 
@@ -172,7 +172,7 @@ const TERMINAL_VM_STATUSES = new Set(['destroyed', 'failed', 'stopped']);
  * command on a healthy VM is never interrupted.
  *
  * Liveness only: this never races the caller's abort signal. Caller-facing
- * cancellation is owned one layer up, by `createSandboxSessionEnv`'s `exec`
+ * cancellation is owned one layer up, by `sandboxFromDriver`'s `exec`
  * abort race — it rejects promptly on abort and consumes this promise's
  * eventual settlement once the caller has already been released.
  */
@@ -240,7 +240,7 @@ function raceVmDeath<T>(
 }
 
 /**
- * Implements SandboxApi by wrapping the boxd TypeScript SDK.
+ * Implements SandboxDriver by wrapping the boxd TypeScript SDK.
  *
  * boxd's `box.exec()` takes an argv array and has no native `cwd` option,
  * so we route everything through `bash -lc` and prepend `cd <cwd>` when
@@ -252,7 +252,7 @@ function raceVmDeath<T>(
  * death detector so a call that is in flight when the VM dies settles
  * instead of hanging forever.
  */
-class BoxdSandboxApi implements SandboxApi {
+class BoxdSandboxDriver implements SandboxDriver {
 	constructor(
 		private box: BoxdBox,
 		private client?: Compute,
@@ -379,7 +379,7 @@ class BoxdSandboxApi implements SandboxApi {
 			: command;
 		// Flue and boxd both express command timeouts in milliseconds. boxd's
 		// exec does not accept an AbortSignal, so it is deliberately not
-		// forwarded here — createSandboxSessionEnv (which this adapter builds
+		// forwarded here — sandboxFromDriver (which this adapter builds
 		// on) owns caller-facing abort and rejects promptly while the VM
 		// keeps running the command.
 		const result = await this.guarded(
@@ -399,19 +399,19 @@ class BoxdSandboxApi implements SandboxApi {
 
 /**
  * Create a Flue sandbox factory from an initialized boxd VM.
- * The user owns the VM lifecycle; Flue wraps it into a SessionEnv
+ * The user owns the VM lifecycle; Flue wraps it into a Sandbox
  * for agent use.
  */
 export function boxd(box: BoxdBox, options?: BoxdAdapterOptions): SandboxFactory {
 	let readyPromise: Promise<void> | undefined;
 	return {
-		async createSessionEnv(): Promise<SessionEnv> {
+		async createSandbox(): Promise<Sandbox> {
 			const sandboxCwd = options?.cwd ?? '/home/boxd';
 			// Probe once per box, not once per session.
 			readyPromise ??= waitForReady(box, options?.readyTimeoutMs ?? 30_000);
 			await readyPromise;
-			const api = new BoxdSandboxApi(box, options?.client);
-			return createSandboxSessionEnv(api, sandboxCwd);
+			const driver = new BoxdSandboxDriver(box, options?.client);
+			return sandboxFromDriver(driver, sandboxCwd);
 		},
 	};
 }
@@ -467,15 +467,15 @@ export function Assistant() {
 	useSandbox({
 		// Lazy, per the SandboxFactory contract: constructing this object is
 		// cheap; the expensive boxd VM creation happens once, inside
-		// createSessionEnv(), at initialization — never on a re-render.
-		async createSessionEnv(options) {
+		// createSandbox(), at initialization — never on a re-render.
+		async createSandbox(options) {
 			const client = new Compute({ apiKey: process.env.BOXD_API_KEY });
 			const box = await client.box.create({ name: `agent-${Date.now()}` });
 			// Pass the client through: the adapter uses it to watch VM status
 			// while calls are in flight, so a call that is in flight when the
 			// VM dies fails fast with SandboxDiedError instead of hanging.
 			// Keep the client open while the sandbox is in use.
-			return boxd(box, { client }).createSessionEnv(options);
+			return boxd(box, { client }).createSandbox(options);
 		},
 	});
 	return 'You are a helpful assistant with a full sandbox.';

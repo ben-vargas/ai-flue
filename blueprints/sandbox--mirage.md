@@ -49,7 +49,7 @@ Create any missing parent directories.
 ## File contents
 
 Write this file verbatim. Do not "improve" it — it conforms to the published
-`SandboxApi` contract.
+`SandboxDriver` contract.
 
 ```ts
 // flue-blueprint: sandbox/mirage@1
@@ -76,8 +76,8 @@ Write this file verbatim. Do not "improve" it — it conforms to the published
  * }
  * ```
  */
-import { createSandboxSessionEnv, SandboxOperationUnsupportedError } from '@flue/runtime';
-import type { SandboxApi, SandboxFactory, SessionEnv, FileStat } from '@flue/runtime';
+import { sandboxFromDriver, SandboxOperationUnsupportedError } from '@flue/runtime';
+import type { SandboxDriver, SandboxFactory, Sandbox, FileStat } from '@flue/runtime';
 import type { Workspace as MirageWorkspace } from '@struktoai/mirage-core';
 
 export interface MirageAdapterOptions {
@@ -100,7 +100,7 @@ function shellQuote(value: string): string {
 }
 
 /**
- * Implements SandboxApi by wrapping a Mirage Workspace.
+ * Implements SandboxDriver by wrapping a Mirage Workspace.
  *
  * Each Flue context maps onto a Mirage session (created lazily by id) so
  * that cwd, env, history, and lastExitCode stay isolated across agent
@@ -118,7 +118,7 @@ function shellQuote(value: string): string {
  * isolated session for `cwd`/`env`, and observes the signal cooperatively
  * at LIST/PIPELINE/loop boundaries. No shell-prefix workarounds.
  */
-class MirageSandboxApi implements SandboxApi {
+class MirageSandboxDriver implements SandboxDriver {
 	constructor(
 		private workspace: MirageWorkspace,
 		private flueContextId: string,
@@ -267,7 +267,7 @@ class MirageSandboxApi implements SandboxApi {
 
 /**
  * Create a Flue sandbox factory from an initialized Mirage Workspace.
- * The user owns the root lifecycle; Flue wraps it into a SessionEnv
+ * The user owns the root lifecycle; Flue wraps it into a Sandbox
  * for agent use.
  */
 export function mirage(
@@ -275,7 +275,7 @@ export function mirage(
 	options?: MirageAdapterOptions,
 ): SandboxFactory {
 	return {
-		async createSessionEnv({ id }: { id: string }): Promise<SessionEnv> {
+		async createSandbox({ id }: { id: string }): Promise<Sandbox> {
 			// Map this Flue context to a Mirage session so cwd, env, history,
 			// and lastExitCode stay isolated across contexts sharing the same
 			// Workspace. createSession throws on duplicate ids, so fall back to
@@ -291,8 +291,8 @@ export function mirage(
 			// default; pin via `options.cwd` to default to a specific writable
 			// mount (e.g. `/data`).
 			const sandboxCwd = options?.cwd ?? '/';
-			const api = new MirageSandboxApi(workspace, id);
-			return createSandboxSessionEnv(api, sandboxCwd);
+			const driver = new MirageSandboxDriver(workspace, id);
+			return sandboxFromDriver(driver, sandboxCwd);
 		},
 	};
 }

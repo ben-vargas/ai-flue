@@ -91,6 +91,7 @@ export const docsSections: DocsSection[] = [
 					{ title: 'Errors Reference', slug: 'reference/errors' },
 					{ title: 'Agent API', slug: 'reference/agent-api' },
 					{ title: 'Agent Hooks API', slug: 'reference/agent-hooks-api' },
+					{ title: 'Agent Behavior', slug: 'reference/agent-behavior' },
 					{ title: 'Provider API', slug: 'reference/provider-api' },
 					{ title: 'Streaming Protocol', slug: 'reference/streaming-protocol' },
 					{ title: 'Events Reference', slug: 'reference/events' },
@@ -174,7 +175,7 @@ export const docsSections: DocsSection[] = [
 				title: 'Sandboxes',
 				items: [
 					{ title: 'boxd', slug: 'ecosystem/sandboxes/boxd' },
-					{ title: 'Cloudflare Shell', slug: 'ecosystem/sandboxes/cloudflare-shell' },
+					{ title: 'Cloudflare Computer', slug: 'ecosystem/sandboxes/cloudflare-computer' },
 					{ title: 'Cloudflare Sandbox', slug: 'ecosystem/sandboxes/cloudflare' },
 					{ title: 'Daytona', slug: 'ecosystem/sandboxes/daytona' },
 					{ title: 'E2B', slug: 'ecosystem/sandboxes/e2b' },

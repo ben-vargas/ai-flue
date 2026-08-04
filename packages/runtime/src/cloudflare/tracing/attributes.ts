@@ -56,6 +56,12 @@ export const FLUE_ATTR = {
 	usageTotalTokens: 'flue.usage.total_tokens',
 	/** Recognized cancellation — a control path, never counted as an error. */
 	canceled: 'flue.canceled',
+	/**
+	 * Stamped on spans the adapter force-closes because their terminal event
+	 * never arrived (value names the close path, e.g. `settlement`). Absent on
+	 * every normally-closed span, so backends can measure lost primary closes.
+	 */
+	forcedClose: 'flue.span.forced_close',
 	recoveryOperation: 'flue.recovery.operation',
 	recoveryOutcome: 'flue.recovery.outcome',
 	/** Phase of a `flue.coordinator` span; new phases extend this, not the span name. */

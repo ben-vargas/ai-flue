@@ -20,8 +20,8 @@ The Modal blueprint installs the `modal` JavaScript SDK when needed and creates 
 
 ```ts title="<source-root>/sandboxes/modal.ts (abridged)"
 // flue-blueprint: sandbox/modal@1
-import { createSandboxSessionEnv } from '@flue/runtime';
-import type { SandboxApi, SandboxFactory, SessionEnv, FileStat } from '@flue/runtime';
+import { sandboxFromDriver } from '@flue/runtime';
+import type { SandboxDriver, SandboxFactory, Sandbox, FileStat } from '@flue/runtime';
 import type { Sandbox as ModalSandbox } from 'modal';
 
 export interface ModalAdapterOptions {
@@ -32,7 +32,7 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-class ModalSandboxApi implements SandboxApi {
+class ModalSandboxDriver implements SandboxDriver {
   constructor(private sandbox: ModalSandbox) {}
 
   /* Adapts Modal open/read/write handles and closes every opened file. */
@@ -44,10 +44,10 @@ class ModalSandboxApi implements SandboxApi {
 
 export function modal(sandbox: ModalSandbox, options?: ModalAdapterOptions): SandboxFactory {
   return {
-    async createSessionEnv(): Promise<SessionEnv> {
+    async createSandbox(): Promise<Sandbox> {
       const sandboxCwd = options?.cwd ?? '/';
-      const api = new ModalSandboxApi(sandbox);
-      return createSandboxSessionEnv(api, sandboxCwd);
+      const driver = new ModalSandboxDriver(sandbox);
+      return sandboxFromDriver(driver, sandboxCwd);
     },
   };
 }

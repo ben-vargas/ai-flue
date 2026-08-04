@@ -67,7 +67,7 @@ export function SupportAgent() {
 }
 ```
 
-Flue handles this complexity for you, announcing each change to the model and even preserving your cached prompt tokens across long-running sessions when possible.
+Flue handles this complexity for you, announcing each change to the model so the transcript stays coherent. Changing the tool set can invalidate the provider's prompt cache (see [the conditional-tools note](/docs/guide/tools/#conditional-tools)).
 
 Every built-in hook is documented in the [Agent API](/docs/reference/agent-api/) reference.
 

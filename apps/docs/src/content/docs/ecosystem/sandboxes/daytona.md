@@ -20,11 +20,11 @@ The blueprint installs `@daytona/sdk` when needed and creates `sandboxes/daytona
 
 ```ts title="<source-root>/sandboxes/daytona.ts (abridged)"
 // flue-blueprint: sandbox/daytona@1
-import { createSandboxSessionEnv, useModel } from '@flue/runtime';
-import type { SandboxApi, SandboxFactory, SessionEnv, FileStat } from '@flue/runtime';
+import { sandboxFromDriver, useModel } from '@flue/runtime';
+import type { SandboxDriver, SandboxFactory, Sandbox, FileStat } from '@flue/runtime';
 import type { Sandbox as DaytonaSandbox } from '@daytona/sdk';
 
-class DaytonaSandboxApi implements SandboxApi {
+class DaytonaSandboxDriver implements SandboxDriver {
   constructor(private sandbox: DaytonaSandbox) {}
 
   /* Implements file reads, writes, stat, listing, existence, and mkdir with sandbox.fs. */
@@ -36,10 +36,10 @@ class DaytonaSandboxApi implements SandboxApi {
 
 export function daytona(sandbox: DaytonaSandbox): SandboxFactory {
   return {
-    async createSessionEnv(): Promise<SessionEnv> {
+    async createSandbox(): Promise<Sandbox> {
       const sandboxCwd = (await sandbox.getWorkDir()) ?? '/home/daytona';
-      const api = new DaytonaSandboxApi(sandbox);
-      return createSandboxSessionEnv(api, sandboxCwd);
+      const driver = new DaytonaSandboxDriver(sandbox);
+      return sandboxFromDriver(driver, sandboxCwd);
     },
   };
 }
@@ -72,11 +72,11 @@ export function Assistant() {
   useSandbox({
     // Lazy, per the SandboxFactory contract: constructing this object is
     // cheap; the expensive Daytona sandbox creation happens once, inside
-    // createSessionEnv(), at initialization — never on a re-render.
-    async createSessionEnv(options) {
+    // createSandbox(), at initialization — never on a re-render.
+    async createSandbox(options) {
       const client = new Daytona({ apiKey: env.DAYTONA_API_KEY });
       const sandbox = await client.create();
-      return daytona(sandbox).createSessionEnv(options);
+      return daytona(sandbox).createSandbox(options);
     },
   });
 }

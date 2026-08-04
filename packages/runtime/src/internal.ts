@@ -126,6 +126,6 @@ export { rebuildSettledSubmissionRows } from './runtime/settlement-rebuild.ts';
 // durable-storage contract callers pair with the observation helpers above.
 export { agentStreamPath } from './runtime/stream-offsets.ts';
 
-export { bashFactoryToSessionEnv } from './sandbox.ts';
+export { bashFactoryToSandbox } from './sandbox.ts';
 export { parseSkillMarkdown } from './skill-frontmatter.ts';
 export { buildPackagedSkill, createSkillReference } from './skill-package.ts';

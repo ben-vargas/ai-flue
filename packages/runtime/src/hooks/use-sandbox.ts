@@ -3,15 +3,15 @@ import { requireRenderFrame } from './frame.ts';
 
 /**
  * Attach the environment this agent instance runs in: the sandbox adapter's
- * `createSessionEnv()` builds the filesystem/exec surface at initialization
+ * `createSandbox()` builds the filesystem/exec surface at initialization
  * (once per initialized harness — adapters key durable resources on the
- * instance id; see {@link SandboxFactory.createSessionEnv}), and its
+ * instance id; see {@link SandboxFactory.createSandbox}), and its
  * `tools()` — when present — REPLACES the framework's default model-facing
  * tool set (a codemode sandbox ships a `code` tool instead of bash, say).
  * Re-renders never rebuild the environment.
  *
  * Takes the `SandboxFactory` value directly — the factory itself is already
- * lazy (constructing it is cheap; the expensive `createSessionEnv()` call
+ * lazy (constructing it is cheap; the expensive `createSandbox()` call
  * happens once, at initialization):
  *
  * ```ts
@@ -57,10 +57,13 @@ export function useSandbox(sandbox: SandboxFactory, options: UseSandboxOptions =
 	if (
 		!sandbox ||
 		typeof sandbox !== 'object' ||
-		typeof (sandbox as Partial<SandboxFactory>).createSessionEnv !== 'function'
+		(typeof (sandbox as Partial<SandboxFactory>).createSandbox !== 'function' &&
+			// @deprecated Factories predating the createSandbox rename are still
+			// valid; remove together with SandboxFactory.createSessionEnv.
+			typeof (sandbox as Partial<SandboxFactory>).createSessionEnv !== 'function')
 	) {
 		throw new Error(
-			'[flue] useSandbox() requires a sandbox factory (an object with createSessionEnv()), like the value local() returns.',
+			'[flue] useSandbox() requires a sandbox factory (an object with createSandbox()), like the value local() returns.',
 		);
 	}
 	if (sandbox.tools !== undefined && typeof sandbox.tools !== 'function') {

@@ -40,7 +40,7 @@ Create any missing parent directories.
 ## File contents
 
 Write this file verbatim. Do not "improve" it — it conforms to the published
-`SandboxApi` contract.
+`SandboxDriver` contract.
 
 ```ts
 // flue-blueprint: sandbox/e2b@1
@@ -63,23 +63,23 @@ Write this file verbatim. Do not "improve" it — it conforms to the published
  *   useSandbox({
  *     // Lazy, per the SandboxFactory contract: constructing this object is
  *     // cheap; the expensive E2B sandbox creation happens once, inside
- *     // createSessionEnv(), at initialization — never on a re-render.
+ *     // createSandbox(), at initialization — never on a re-render.
  *     // E2B reads E2B_API_KEY from the environment automatically.
- *     async createSessionEnv(options) {
+ *     async createSandbox(options) {
  *       const sandbox = await Sandbox.create();
- *       return e2b(sandbox).createSessionEnv(options);
+ *       return e2b(sandbox).createSandbox(options);
  *     },
  *   });
  *   return 'You are a helpful assistant with a full sandbox.';
  * }
  * ```
  */
-import { createSandboxSessionEnv, SandboxOperationUnsupportedError } from '@flue/runtime';
-import type { SandboxApi, SandboxFactory, SessionEnv, FileStat } from '@flue/runtime';
+import { sandboxFromDriver, SandboxOperationUnsupportedError } from '@flue/runtime';
+import type { SandboxDriver, SandboxFactory, Sandbox, FileStat } from '@flue/runtime';
 import type { Sandbox as E2BSandbox } from 'e2b';
 
 /**
- * Implements SandboxApi by wrapping the E2B v2 TypeScript SDK.
+ * Implements SandboxDriver by wrapping the E2B v2 TypeScript SDK.
  *
  * E2B's `files` module has direct analogues for most filesystem operations
  * (`read`, `write`, `makeDir`, `remove`, `list`, `exists`, `getInfo`) so we
@@ -92,7 +92,7 @@ import type { Sandbox as E2BSandbox } from 'e2b';
  * and Flue express command timeouts in milliseconds, so the adapter forwards
  * them unchanged.
  */
-class E2BSandboxApi implements SandboxApi {
+class E2BSandboxDriver implements SandboxDriver {
 	constructor(private sandbox: E2BSandbox) {}
 
 	async readFile(path: string): Promise<string> {
@@ -182,17 +182,17 @@ class E2BSandboxApi implements SandboxApi {
 
 /**
  * Create a Flue sandbox factory from an initialized E2B sandbox.
- * The user owns the sandbox lifecycle; Flue wraps it into a SessionEnv
+ * The user owns the sandbox lifecycle; Flue wraps it into a Sandbox
  * for agent use.
  */
 export function e2b(sandbox: E2BSandbox): SandboxFactory {
 	return {
-		async createSessionEnv(): Promise<SessionEnv> {
+		async createSandbox(): Promise<Sandbox> {
 			// The E2B base template's default user is `user` with home
 			// directory /home/user.
 			const sandboxCwd = '/home/user';
-			const api = new E2BSandboxApi(sandbox);
-			return createSandboxSessionEnv(api, sandboxCwd);
+			const driver = new E2BSandboxDriver(sandbox);
+			return sandboxFromDriver(driver, sandboxCwd);
 		},
 	};
 }
@@ -251,11 +251,11 @@ export function Assistant() {
 	useSandbox({
 		// Lazy, per the SandboxFactory contract: constructing this object is
 		// cheap; the expensive E2B sandbox creation happens once, inside
-		// createSessionEnv(), at initialization — never on a re-render.
+		// createSandbox(), at initialization — never on a re-render.
 		// E2B reads E2B_API_KEY from the environment automatically.
-		async createSessionEnv(options) {
+		async createSandbox(options) {
 			const sandbox = await Sandbox.create();
-			return e2b(sandbox).createSessionEnv(options);
+			return e2b(sandbox).createSandbox(options);
 		},
 	});
 	return 'You are a helpful assistant with a full sandbox.';

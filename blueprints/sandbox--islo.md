@@ -43,12 +43,12 @@ Create any missing parent directories.
 ## File contents
 
 Write this file verbatim. Do not "improve" it — it conforms to the published
-`SandboxApi` contract, and the shell quoting in particular is load-bearing.
+`SandboxDriver` contract, and the shell quoting in particular is load-bearing.
 
 ```ts
 // flue-blueprint: sandbox/islo@1
 /**
- * islo adapter for Flue. Adapts a named islo sandbox to Flue's SandboxApi
+ * islo adapter for Flue. Adapts a named islo sandbox to Flue's SandboxDriver
  * by shelling out to the islo CLI. The user owns the sandbox lifecycle.
  *
  * @example
@@ -65,8 +65,8 @@ Write this file verbatim. Do not "improve" it — it conforms to the published
  * ```
  */
 import { spawn } from 'node:child_process';
-import { createSandboxSessionEnv } from '@flue/runtime';
-import type { SandboxApi, SandboxFactory, SessionEnv, FileStat } from '@flue/runtime';
+import { sandboxFromDriver } from '@flue/runtime';
+import type { SandboxDriver, SandboxFactory, Sandbox, FileStat } from '@flue/runtime';
 
 export interface IsloAdapterOptions {
 	/** Default cwd inside the sandbox. Defaults to `/workspace`. */
@@ -78,7 +78,7 @@ export interface IsloAdapterOptions {
 const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 
 /**
- * Implements SandboxApi via the islo CLI. Every operation runs as
+ * Implements SandboxDriver via the islo CLI. Every operation runs as
  * `islo --output json use <name> -- bash -lc <cmd>`. With `--output json`,
  * the CLI writes the remote command's stdout straight to local stdout,
  * remote stderr to local stderr, and propagates the exit code — so we
@@ -88,7 +88,7 @@ const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
  * File ops route through `exec()`. Binary content goes via base64 inline
  * (single-quote-safe alphabet) because the CLI decodes stdout as UTF-8.
  */
-class IsloSandboxApi implements SandboxApi {
+class IsloSandboxDriver implements SandboxDriver {
 	constructor(
 		private name: string,
 		private cliPath: string,
@@ -123,7 +123,7 @@ class IsloSandboxApi implements SandboxApi {
 
 		const args = ['--output', 'json', 'use', this.name, '--', 'bash', '-lc', remote];
 		// The islo CLI has no cancellation primitive, so `options?.signal` is
-		// deliberately not forwarded here — createSandboxSessionEnv (which
+		// deliberately not forwarded here — sandboxFromDriver (which
 		// this adapter builds on) owns caller-facing abort and rejects
 		// promptly on it. The spawned child becomes an orphan: it keeps
 		// running to completion against the sandbox, and its result below is
@@ -233,10 +233,10 @@ class IsloSandboxApi implements SandboxApi {
 export function islo(name: string, options?: IsloAdapterOptions): SandboxFactory {
 	const cliPath = options?.cliPath ?? 'islo';
 	return {
-		async createSessionEnv(): Promise<SessionEnv> {
+		async createSandbox(): Promise<Sandbox> {
 			const sandboxCwd = options?.cwd ?? '/workspace';
-			const api = new IsloSandboxApi(name, cliPath);
-			return createSandboxSessionEnv(api, sandboxCwd);
+			const driver = new IsloSandboxDriver(name, cliPath);
+			return sandboxFromDriver(driver, sandboxCwd);
 		},
 	};
 }

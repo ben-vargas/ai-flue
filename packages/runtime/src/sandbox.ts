@@ -1,5 +1,5 @@
 /**
- * Sandbox adapters: wraps BashFactory or SandboxApi into SessionEnv.
+ * Sandbox adapters: wraps BashFactory or SandboxDriver into a live Sandbox.
  */
 
 import { abortErrorFor, composeTimeoutSignal } from './abort.ts';
@@ -7,23 +7,23 @@ import type {
 	BashFactory,
 	BashLike,
 	FileStat,
+	Sandbox,
 	SandboxFactory,
-	SessionEnv,
 	ShellResult,
 } from './types.ts';
 
-export type { SessionEnv } from './types.ts';
+export type { Sandbox } from './types.ts';
 
 /**
  * Settlement report for an orphaned command: an `exec` whose caller was
  * released by an abort while the provider call was still in flight. The
- * runtime's `SessionEnv` wrappers reject promptly on abort — never gated on
+ * runtime's `Sandbox` wrappers reject promptly on abort — never gated on
  * the remote command's settlement — so on a provider that cannot cancel
  * mid-flight, the command keeps running until it settles on its own. That
  * settlement is consumed (fulfillment and rejection alike — a late
  * `SandboxDiedError` lands on `error` instead of surfacing anywhere) and is
  * never recorded into the conversation; the `onOrphanSettled` callback on
- * {@link createSandboxSessionEnv} is its only outlet, for adapters that want
+ * {@link sandboxFromDriver} is its only outlet, for adapters that want
  * to log, bill, or reap the orphan out-of-band.
  */
 export interface OrphanedExecSettlement {
@@ -51,7 +51,7 @@ const ORPHANED_EXEC_SUFFIX =
 	' The sandbox command could not be confirmed cancelled and may still be running.';
 
 /**
- * The `SessionEnv.exec` abort race, implemented once for every wrapper-built
+ * The `Sandbox.exec` abort race, implemented once for every wrapper-built
  * adapter: when `signal` aborts mid-flight, reject promptly with an
  * `AbortError` — never gated on the provider promise, which most sandbox
  * SDKs cannot cancel. The provider promise becomes an orphan whose
@@ -137,7 +137,7 @@ function raceExecAbort(
 
 /**
  * Shared implementation of the `FlueFs.writeFile` parent-creation guarantee.
- * Every `SessionEnv` adapter (local, bash factory, SandboxApi wrapper) routes
+ * Every `Sandbox` adapter (local, bash factory, SandboxDriver wrapper) routes
  * writes through here so the cross-mode contract has exactly one
  * implementation.
  *
@@ -194,7 +194,7 @@ function makeResolvePath(cwd: string): (p: string) => string {
 	};
 }
 
-export function createCwdSessionEnv(parentEnv: SessionEnv, cwd: string): SessionEnv {
+export function createCwdSandbox(parentEnv: Sandbox, cwd: string): Sandbox {
 	const scopedCwd = normalizePath(cwd);
 	const resolvePath = makeResolvePath(scopedCwd);
 
@@ -225,17 +225,17 @@ export function createCwdSessionEnv(parentEnv: SessionEnv, cwd: string): Session
  */
 export function bash(factory: BashFactory): SandboxFactory {
 	return {
-		createSessionEnv: () => bashFactoryToSessionEnv(factory),
+		createSandbox: () => bashFactoryToSandbox(factory),
 	};
 }
 
-export async function bashFactoryToSessionEnv(factory: BashFactory): Promise<SessionEnv> {
+export async function bashFactoryToSandbox(factory: BashFactory): Promise<Sandbox> {
 	const bash = await factory();
 	assertBashLike(bash);
-	return createBashSessionEnv(bash);
+	return createBashSandbox(bash);
 }
 
-function createBashSessionEnv(bash: BashLike): SessionEnv {
+function createBashSandbox(bash: BashLike): Sandbox {
 	const fs = bash.fs;
 	const cwd = bash.getCwd();
 	const resolve = (p: string) => (p.startsWith('/') ? p : fs.resolvePath(cwd, p));
@@ -323,7 +323,7 @@ function assertBashLike(value: unknown): asserts value is BashLike {
  *     mid-flight cancellation (Mirage's executor, in-process bash). Lets
  *     Programmatic callers do ad-hoc `abort()`. Sandbox adapters that can't honor it
  *     should ignore it; the deadline is still enforced via `timeoutMs`, and
- *     the {@link createSandboxSessionEnv} wrapper owns caller-facing abort:
+ *     the {@link sandboxFromDriver} wrapper owns caller-facing abort:
  *     on abort it rejects promptly and treats the still-running command as an
  *     orphan ({@link OrphanedExecSettlement}). Adapters must not implement
  *     their own abort race — a second one is redundant and splits the orphan
@@ -345,7 +345,7 @@ function assertBashLike(value: unknown): asserts value is BashLike {
  * `@flue/runtime`), so shell classification reports an infrastructure failure
  * rather than caller cancellation.
  */
-export interface SandboxApi {
+export interface SandboxDriver {
 	readFile(path: string): Promise<string>;
 	readFileBuffer(path: string): Promise<Uint8Array>;
 	writeFile(path: string, content: string | Uint8Array): Promise<void>;
@@ -365,18 +365,22 @@ export interface SandboxApi {
 	): Promise<ShellResult>;
 }
 
+/** @deprecated Renamed to {@link SandboxDriver}. */
+export type SandboxApi = SandboxDriver;
+
 /**
- * Wrap a SandboxApi into SessionEnv. No just-bash, no intermediate filesystem layer.
+ * Wrap a SandboxDriver into a live Sandbox. No just-bash, no intermediate
+ * filesystem layer.
  *
  * `options.onOrphanSettled` observes {@link OrphanedExecSettlement}s: the
  * eventual settlement of commands whose caller was released early by an
  * abort. Adapter-facing only — the runtime never records orphan settlements.
  */
-export function createSandboxSessionEnv(
-	api: SandboxApi,
+export function sandboxFromDriver(
+	driver: SandboxDriver,
 	cwd: string,
 	options?: { onOrphanSettled?: (settlement: OrphanedExecSettlement) => void },
-): SessionEnv {
+): Sandbox {
 	const resolvePath = makeResolvePath(cwd);
 	const onOrphanSettled = options?.onOrphanSettled;
 
@@ -394,14 +398,14 @@ export function createSandboxSessionEnv(
 			// provider SDKs (E2B, Daytona, Modal, Boxd, etc.) don't accept an
 			// AbortSignal, so adapters only wire `signal` into their provider
 			// SDK when one supports it (Mirage, Vercel); the rest get the
-			// `SessionEnv.exec` abort contract for free: a pre-aborted call
+			// `Sandbox.exec` abort contract for free: a pre-aborted call
 			// never executes, and a mid-flight abort rejects promptly —
 			// orphaning the remote command rather than awaiting it.
 			const signal = execOptions?.signal;
 			return raceExecAbort(
 				command,
 				() =>
-					api.exec(command, {
+					driver.exec(command, {
 						cwd: execOptions?.cwd !== undefined ? resolvePath(execOptions.cwd) : cwd,
 						env: execOptions?.env,
 						timeoutMs: execOptions?.timeoutMs,
@@ -413,39 +417,39 @@ export function createSandboxSessionEnv(
 		},
 
 		async readFile(path: string): Promise<string> {
-			return api.readFile(resolvePath(path));
+			return driver.readFile(resolvePath(path));
 		},
 
 		async readFileBuffer(path: string): Promise<Uint8Array> {
-			return api.readFileBuffer(resolvePath(path));
+			return driver.readFileBuffer(resolvePath(path));
 		},
 
 		async writeFile(path: string, content: string | Uint8Array): Promise<void> {
 			const resolved = resolvePath(path);
 			return writeFileCreatingParents(
-				() => api.writeFile(resolved, content),
-				() => api.mkdir(posixParentDir(resolved), { recursive: true }),
+				() => driver.writeFile(resolved, content),
+				() => driver.mkdir(posixParentDir(resolved), { recursive: true }),
 			);
 		},
 
 		async stat(path: string): Promise<FileStat> {
-			return api.stat(resolvePath(path));
+			return driver.stat(resolvePath(path));
 		},
 
 		async readdir(path: string): Promise<string[]> {
-			return api.readdir(resolvePath(path));
+			return driver.readdir(resolvePath(path));
 		},
 
 		async exists(path: string): Promise<boolean> {
-			return api.exists(resolvePath(path));
+			return driver.exists(resolvePath(path));
 		},
 
 		async mkdir(path: string, options?: { recursive?: boolean }): Promise<void> {
-			return api.mkdir(resolvePath(path), options);
+			return driver.mkdir(resolvePath(path), options);
 		},
 
 		async rm(path: string, options?: { recursive?: boolean; force?: boolean }): Promise<void> {
-			return api.rm(resolvePath(path), options);
+			return driver.rm(resolvePath(path), options);
 		},
 
 		cwd,
@@ -453,3 +457,9 @@ export function createSandboxSessionEnv(
 		resolvePath,
 	};
 }
+
+/**
+ * @deprecated Renamed to {@link sandboxFromDriver}. When removing this alias,
+ * also drop the `duplicates` ignore for this file in the repo-root knip.json.
+ */
+export const createSandboxSessionEnv = sandboxFromDriver;

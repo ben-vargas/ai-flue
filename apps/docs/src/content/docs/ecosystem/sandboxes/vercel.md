@@ -20,11 +20,11 @@ The blueprint installs `@vercel/sandbox` when needed and creates `sandboxes/verc
 
 ```ts title="<source-root>/sandboxes/vercel.ts (abridged)"
 // flue-blueprint: sandbox/vercel@1
-import { createSandboxSessionEnv, useModel } from '@flue/runtime';
-import type { SandboxApi, SandboxFactory, SessionEnv, FileStat } from '@flue/runtime';
+import { sandboxFromDriver, useModel } from '@flue/runtime';
+import type { SandboxDriver, SandboxFactory, Sandbox, FileStat } from '@flue/runtime';
 import type { Sandbox as VercelSandbox } from '@vercel/sandbox';
 
-class VercelSandboxApi implements SandboxApi {
+class VercelSandboxDriver implements SandboxDriver {
   constructor(private sandbox: VercelSandbox) {}
 
   /* ... generated filesystem operations using sandbox.fs ... */
@@ -90,10 +90,10 @@ class VercelSandboxApi implements SandboxApi {
 
 export function vercel(sandbox: VercelSandbox): SandboxFactory {
   return {
-    async createSessionEnv(): Promise<SessionEnv> {
+    async createSandbox(): Promise<Sandbox> {
       const sandboxCwd = '/vercel/sandbox';
-      const api = new VercelSandboxApi(sandbox);
-      return createSandboxSessionEnv(api, sandboxCwd);
+      const driver = new VercelSandboxDriver(sandbox);
+      return sandboxFromDriver(driver, sandboxCwd);
     },
   };
 }
@@ -125,10 +125,10 @@ export function Assistant() {
   useSandbox({
     // Lazy, per the SandboxFactory contract: constructing this object is
     // cheap; the expensive Vercel sandbox creation happens once, inside
-    // createSessionEnv(), at initialization — never on a re-render.
-    async createSessionEnv(options) {
+    // createSandbox(), at initialization — never on a re-render.
+    async createSandbox(options) {
       const sandbox = await Sandbox.create({ runtime: 'node24' });
-      return vercel(sandbox).createSessionEnv(options);
+      return vercel(sandbox).createSandbox(options);
     },
   });
 }

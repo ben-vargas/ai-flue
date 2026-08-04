@@ -1,11 +1,11 @@
 'use agent';
 /**
- * Demonstrates hydrating a cf-shell `Workspace` from an R2 bucket and using a
- * skill discovered from the hydrated files. The bucket hydration is one-time
- * setup for the environment, not per-render work, so it lives inside a
- * self-authored `SandboxFactory` passed to `useSandbox` — lazy, per the
- * `SandboxFactory` contract: constructing the factory object is cheap; the
- * expensive R2 read happens once, inside `createSessionEnv()`, at
+ * Demonstrates hydrating a cloudflare-computer `Workspace` from an R2 bucket
+ * and using a skill discovered from the hydrated files. The bucket hydration
+ * is one-time setup for the environment, not per-render work, so it lives
+ * inside a self-authored `SandboxFactory` passed to `useSandbox` — lazy, per
+ * the `SandboxFactory` contract: constructing the factory object is cheap;
+ * the expensive R2 read happens once, inside `createSandbox()`, at
  * initialization. The skill invocation lives in the model-callable
  * `check_spam` tool below (`harness: true` gives its run a child harness
  * whose scratch session discovers the same hydrated skills — the prompt
@@ -18,13 +18,12 @@
  * then read the verdict from the conversation stream: GET /agents/skills-from-r2/<id>
  */
 import { env } from 'cloudflare:workers';
+import type { Workspace } from '@cloudflare/computer';
 import { defineTool, useModel, useSandbox, useTool } from '@flue/runtime';
 import * as v from 'valibot';
-import {
-	getDefaultWorkspace,
-	getShellSandbox,
-	hydrateFromBucket,
-} from '../sandboxes/cloudflare-shell';
+import { getComputerSandbox, getComputerWorkspace } from '../sandboxes/cloudflare-computer';
+
+export { workspaceHost as cloudflare } from '../sandboxes/cloudflare-computer';
 
 interface Env {
 	KNOWLEDGE_BASE: R2Bucket;
@@ -32,6 +31,38 @@ interface Env {
 }
 
 const HYDRATION_SENTINEL = '/.hydrated';
+// The agent's working directory; hydrated skills land at
+// `<HYDRATION_ROOT>/.agents/skills/...` where the harness discovers them.
+const HYDRATION_ROOT = '/workspace';
+
+/**
+ * Copy every object from the bucket into the workspace under `root`. R2
+ * bodies stream straight into the durable filesystem — no full-file
+ * buffering. Read-only data that never changes could use an R2 mount
+ * (`WorkspaceOptions.mounts`) instead; a copy keeps the tree writable.
+ */
+async function hydrateFromBucket(
+	workspace: Workspace,
+	bucket: R2Bucket,
+	root: string,
+): Promise<void> {
+	let cursor: string | undefined;
+	while (true) {
+		const listing = await bucket.list({ cursor });
+		for (const obj of listing.objects) {
+			if (obj.key === '' || obj.key.endsWith('/')) continue;
+			const body = await bucket.get(obj.key);
+			if (!body) continue;
+			await workspace.fs.writeFile(`${root}/${obj.key}`, body.body);
+		}
+
+		if (!listing.truncated) break;
+		if (!listing.cursor) {
+			throw new Error('[flue] R2 listing was truncated but did not include a cursor.');
+		}
+		cursor = listing.cursor;
+	}
+}
 
 const checkSpam = defineTool({
 	name: 'check_spam',
@@ -62,22 +93,23 @@ const checkSpam = defineTool({
 export function SkillsFromR2() {
 	useModel('cloudflare/@cf/moonshotai/kimi-k2.6');
 	// Lazy, per the SandboxFactory contract: constructing this object (and the
-	// inner `getShellSandbox()` factory it wraps) is cheap; the expensive R2
-	// bucket read happens once, inside createSessionEnv(), at initialization —
-	// never on a re-render. `tools` is forwarded from the inner factory so the
-	// model still gets the shell's `code` tool instead of the framework
-	// default (the cf-shell env's `exec()` always throws).
+	// inner `getComputerSandbox()` factory it wraps) is cheap; the expensive R2
+	// bucket read happens once, inside createSandbox(), at initialization —
+	// never on a re-render.
 	const { KNOWLEDGE_BASE, LOADER } = env as unknown as Env;
-	const workspace = getDefaultWorkspace();
-	const shell = getShellSandbox({ workspace, loader: LOADER });
+	const workspace = getComputerWorkspace({ loader: LOADER });
+	const computer = getComputerSandbox({ loader: LOADER });
 	useSandbox({
-		tools: shell.tools,
-		async createSessionEnv(options) {
-			if (!(await workspace.exists(HYDRATION_SENTINEL))) {
-				await hydrateFromBucket(workspace, KNOWLEDGE_BASE);
-				await workspace.writeFile(HYDRATION_SENTINEL, new Date().toISOString());
+		async createSandbox(options) {
+			const hydrated = await workspace.fs.stat(HYDRATION_SENTINEL).then(
+				() => true,
+				() => false,
+			);
+			if (!hydrated) {
+				await hydrateFromBucket(workspace, KNOWLEDGE_BASE, HYDRATION_ROOT);
+				await workspace.fs.writeFile(HYDRATION_SENTINEL, new Date().toISOString());
 			}
-			return shell.createSessionEnv(options);
+			return computer.createSandbox(options);
 		},
 	});
 	useTool(checkSpam);

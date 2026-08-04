@@ -16,11 +16,11 @@
  *   useModel('anthropic/claude-sonnet-4-6');
  *   useSandbox({
  *     // Lazy: the expensive sandbox creation happens once, inside
- *     // createSessionEnv(), at initialization — never on a re-render.
- *     async createSessionEnv(options) {
+ *     // createSandbox(), at initialization — never on a re-render.
+ *     async createSandbox(options) {
  *       const client = new Daytona({ apiKey: process.env.DAYTONA_API_KEY });
  *       const sandbox = await client.create({ image: 'ubuntu:latest' });
- *       return daytona(sandbox).createSessionEnv(options);
+ *       return daytona(sandbox).createSandbox(options);
  *     },
  *   });
  *   return 'You have a Daytona sandbox.';
@@ -29,15 +29,15 @@
  */
 
 import type { Sandbox as DaytonaSandbox } from '@daytona/sdk';
-import type { FileStat, SandboxApi, SandboxFactory, SessionEnv } from '@flue/runtime';
-import { createSandboxSessionEnv, SandboxOperationUnsupportedError } from '@flue/runtime';
+import type { FileStat, SandboxDriver, SandboxFactory, Sandbox } from '@flue/runtime';
+import { sandboxFromDriver, SandboxOperationUnsupportedError } from '@flue/runtime';
 
-// ─── DaytonaSandboxApi ──────────────────────────────────────────────────────
+// ─── DaytonaSandboxDriver ──────────────────────────────────────────────────────
 
 /**
- * Implements SandboxApi by wrapping Daytona's TypeScript SDK.
+ * Implements SandboxDriver by wrapping Daytona's TypeScript SDK.
  */
-class DaytonaSandboxApi implements SandboxApi {
+class DaytonaSandboxDriver implements SandboxDriver {
 	constructor(private sandbox: DaytonaSandbox) {}
 
 	async readFile(path: string): Promise<string> {
@@ -130,16 +130,16 @@ class DaytonaSandboxApi implements SandboxApi {
  * Create a Flue sandbox factory from an initialized Daytona sandbox.
  *
  * The user creates the sandbox using the Daytona SDK directly, then
- * passes it here. Flue wraps it into a SessionEnv for agent use.
+ * passes it here. Flue wraps it into a Sandbox for agent use.
  *
  * @param sandbox - An initialized Daytona Sandbox instance.
  */
 export function daytona(sandbox: DaytonaSandbox): SandboxFactory {
 	return {
-		async createSessionEnv(): Promise<SessionEnv> {
+		async createSandbox(): Promise<Sandbox> {
 			const sandboxCwd = (await sandbox.getWorkDir()) ?? '/home/daytona';
-			const api = new DaytonaSandboxApi(sandbox);
-			return createSandboxSessionEnv(api, sandboxCwd);
+			const driver = new DaytonaSandboxDriver(sandbox);
+			return sandboxFromDriver(driver, sandboxCwd);
 		},
 	};
 }

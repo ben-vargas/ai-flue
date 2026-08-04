@@ -331,7 +331,7 @@ export interface ReducedContextEntry {
  * against from-scratch folds at every batch boundary, so shape drift without
  * a matching codec change fails CI.
  */
-export const REDUCED_STATE_FORMAT = 1;
+export const REDUCED_STATE_FORMAT = 2;
 
 export function createReducedInstanceState(): ReducedInstanceState {
 	return {
@@ -887,6 +887,20 @@ export function applyConversationRecord(
 						? { baseline: state.resources.baseline }
 						: {}),
 			};
+			// Restore the anchoring result's `addedToolNames` so a rehydrated
+			// context is byte-identical to the one the live loop ran with —
+			// deferred-tool-loading providers read the marker off the message.
+			// The anchor's entry always folds first (its commit record precedes
+			// this snapshot in the log); a miss means a foreign or truncated
+			// log, and the tools then simply load in the prefix.
+			if (record.toolAddition) {
+				const entry = conversation.entries.get(
+					toolResultEntryId(record.toolAddition.assistantMessageId, record.toolAddition.toolCallId),
+				);
+				if (entry?.type === 'message' && entry.message.role === 'toolResult') {
+					(entry.message as ToolResultMessage).addedToolNames = record.toolAddition.names.slice();
+				}
+			}
 			break;
 		case 'agent_start_run':
 		case 'agent_finish_cycle':

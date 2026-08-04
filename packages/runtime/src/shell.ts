@@ -13,7 +13,7 @@ import { generateToolCallId } from './runtime/ids.ts';
 import type {
 	FlueEventInput,
 	FlueObservationDetail,
-	SessionEnv,
+	Sandbox,
 	ShellOptions,
 	ShellResult,
 } from './types.ts';
@@ -27,7 +27,7 @@ import type {
  * point in the sequence on both branches.
  */
 export async function execShellWithEvents(
-	env: SessionEnv,
+	env: Sandbox,
 	emit: (event: FlueEventInput, detail?: FlueObservationDetail) => void,
 	command: string,
 	options: ShellOptions | undefined,

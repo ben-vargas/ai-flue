@@ -89,9 +89,11 @@ An agent with a [sandbox](/docs/guide/sandboxes/) gains a standard set of built-
 | `grep`  | Search file contents for a regex pattern                             |
 | `glob`  | Find files by filename pattern                                       |
 
+Each tool's parameters, truncation limits, and error behavior are documented in [Agent Behavior — Built-in tools](/docs/reference/agent-behavior/#built-in-tools).
+
 On top of these, the framework adds its own tools when the capability exists: `task` for [subagent delegation](/docs/guide/subagents/) (always present), `activate_skill` when the agent has [skills](/docs/guide/skills/), and `read_skill_resource` when a skill packages resource files. These names are reserved — a custom tool can't take them.
 
-A sandbox adapter can replace this set with its own — see [Sandbox-provided tools](/docs/guide/sandboxes/#sandbox-provided-tools) and [`SessionToolFactory`](/docs/reference/sandbox-api/#sessiontoolfactory) in the Sandbox API.
+A sandbox adapter can replace this set with its own — see [Sandbox-provided tools](/docs/guide/sandboxes/#sandbox-provided-tools) and [`SandboxToolFactory`](/docs/reference/sandbox-api/#sandboxtoolfactory) in the Sandbox Adapter API.
 
 ## Harness tools
 
@@ -195,7 +197,9 @@ export function ReleaseManager() {
 }
 ```
 
-Until an operator approves, `publish_release` doesn't exist — an unmounted tool can't be called, a stronger guarantee than an instruction not to use it. When the set changes between renders, the runtime announces the delta to the model in a `resources` signal at the next turn boundary ("New tool available: …"), keeping the transcript coherent while preserving the provider's prompt cache. See [Dynamic resources](/docs/reference/agent-api/#dynamic-resources) for exactly how changes are narrated.
+Until an operator approves, `publish_release` doesn't exist — an unmounted tool can't be called, a stronger guarantee than an instruction not to use it. When the set changes between renders, the runtime announces the delta to the model in a `resources` signal at the next turn boundary ("New tool available: …"), keeping the transcript coherent. See [Dynamic resources](/docs/reference/agent-api/#dynamic-resources) for exactly how changes are narrated.
+
+> **Note:** Changing the tool set rewrites the provider's tools array, which invalidates its prompt cache, so gate tools on state that changes rarely. The exception is a tool unlocked by a completed tool call, the way `record_approval` unlocks `publish_release` here: current Anthropic models (except Haiku) load its definition at the point in the conversation where it appeared, and the cache survives.
 
 Tools built this way pair naturally with [custom hooks](/docs/guide/agent-hooks/#custom-hooks): a `useEscalation()` hook that bundles the gate, the tools, and the matching instructions can be shared across every agent that needs the same behavior.
 

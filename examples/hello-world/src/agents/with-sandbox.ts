@@ -8,11 +8,11 @@ export function WithSandbox() {
 	useSandbox({
 		// Lazy, per the SandboxFactory contract: constructing this object is
 		// cheap; the expensive Daytona sandbox creation happens once, inside
-		// createSessionEnv(), at initialization — never on a re-render.
-		async createSessionEnv(options) {
+		// createSandbox(), at initialization — never on a re-render.
+		async createSandbox(options) {
 			const client = new Daytona({ apiKey: process.env.DAYTONA_API_KEY });
 			const sandbox = await client.create();
-			return daytona(sandbox).createSessionEnv(options);
+			return daytona(sandbox).createSandbox(options);
 		},
 	});
 	useTool({

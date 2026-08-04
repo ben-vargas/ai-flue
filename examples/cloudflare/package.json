@@ -8,8 +8,8 @@
 		"deploy": "vite build && wrangler deploy"
 	},
 	"dependencies": {
-		"@cloudflare/codemode": "*",
-		"@cloudflare/shell": "*",
+		"@cloudflare/computer": "^0.1.1",
+		"@platformatic/vfs": "^0.4.0",
 		"@flue/runtime": "workspace:*",
 		"agents": "^0.20.1",
 		"hono": "^4.7.0",

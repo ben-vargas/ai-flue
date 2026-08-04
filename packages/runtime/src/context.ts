@@ -3,7 +3,7 @@
  * working directory. Used at runtime by the session initialisation path.
  */
 import { parseSkillMarkdown } from './skill-frontmatter.ts';
-import type { RegisteredSkill, SessionEnv, Skill, WorkspaceSkill } from './types.ts';
+import type { RegisteredSkill, Sandbox, Skill, WorkspaceSkill } from './types.ts';
 
 export function isWorkspaceSkill(skill: RegisteredSkill): skill is WorkspaceSkill {
 	const candidate = skill as Partial<WorkspaceSkill>;
@@ -17,7 +17,7 @@ export function isWorkspaceSkill(skill: RegisteredSkill): skill is WorkspaceSkil
 // ─── Context Discovery ──────────────────────────────────────────────────────
 
 /** Read AGENTS.md (and CLAUDE.md if present) from a directory. Returns concatenated contents. */
-async function readAgentsMd(env: SessionEnv, basePath: string): Promise<string> {
+async function readAgentsMd(env: Sandbox, basePath: string): Promise<string> {
 	const parts: string[] = [];
 
 	for (const filename of ['AGENTS.md', 'CLAUDE.md']) {
@@ -52,7 +52,7 @@ export function skillsDirIn(basePath: string): string {
  * are validated at build time where a hard error is actionable.
  */
 async function discoverLocalSkills(
-	env: SessionEnv,
+	env: Sandbox,
 	basePath: string,
 ): Promise<Record<string, WorkspaceSkill>> {
 	const skillsDir = skillsDirIn(basePath);
@@ -208,7 +208,7 @@ function composeSystemPrompt(
  * predate the catalog baseline.
  */
 export async function discoverSessionContext(
-	env: SessionEnv | undefined,
+	env: Sandbox | undefined,
 	definitionSkills: readonly Skill[] = [],
 ): Promise<{
 	skills: Record<string, RegisteredSkill>;

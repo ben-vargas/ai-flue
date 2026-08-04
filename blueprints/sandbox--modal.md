@@ -23,7 +23,7 @@ A few things worth knowing about Modal that shape this adapter:
 - Modal's `sandbox.exec()` returns a long-running `ContainerProcess` with
   `stdout`/`stderr` streams, not a `{ stdout, stderr, exitCode }` result.
   The adapter pipes both streams to completion and waits for the exit
-  code so it conforms to Flue's `SandboxApi.exec` shape.
+  code so it conforms to Flue's `SandboxDriver.exec` shape.
 - Modal's filesystem API (`sandbox.filesystem`) exposes whole-file reads
   and writes, which map directly onto Flue's `readFile`/`writeFile`. The
   adapter implements `mkdir`, `rm`, `stat`, `readdir`, and `exists` by
@@ -55,7 +55,7 @@ Create any missing parent directories.
 ## File contents
 
 Write this file verbatim. Do not "improve" it — it conforms to the published
-`SandboxApi` contract.
+`SandboxDriver` contract.
 
 ```ts
 // flue-blueprint: sandbox/modal@1
@@ -78,21 +78,21 @@ Write this file verbatim. Do not "improve" it — it conforms to the published
  *   useSandbox({
  *     // Lazy, per the SandboxFactory contract: constructing this object is
  *     // cheap; the expensive Modal sandbox creation happens once, inside
- *     // createSessionEnv(), at initialization — never on a re-render.
- *     async createSessionEnv(options) {
+ *     // createSandbox(), at initialization — never on a re-render.
+ *     async createSandbox(options) {
  *       const client = new ModalClient();
  *       const app = await client.apps.fromName('my-app', { createIfMissing: true });
  *       const image = client.images.fromRegistry('python:3.13-slim');
  *       const sandbox = await client.sandboxes.create(app, image);
- *       return modal(sandbox).createSessionEnv(options);
+ *       return modal(sandbox).createSandbox(options);
  *     },
  *   });
  *   return 'You are a helpful assistant with a full sandbox.';
  * }
  * ```
  */
-import { createSandboxSessionEnv, SandboxDiedError } from '@flue/runtime';
-import type { SandboxApi, SandboxFactory, SessionEnv, FileStat } from '@flue/runtime';
+import { sandboxFromDriver, SandboxDiedError } from '@flue/runtime';
+import type { SandboxDriver, SandboxFactory, Sandbox, FileStat } from '@flue/runtime';
 import type { Sandbox as ModalSandbox } from 'modal';
 
 export interface ModalAdapterOptions {
@@ -138,7 +138,7 @@ const PROBE_SILENCE_MS = 10_000;
  * command on a healthy sandbox is never interrupted.
  *
  * Liveness only: this never races the caller's abort signal. Caller-facing
- * cancellation is owned one layer up, by `createSandboxSessionEnv`'s `exec`
+ * cancellation is owned one layer up, by `sandboxFromDriver`'s `exec`
  * abort race — it rejects promptly on abort and consumes this promise's
  * eventual settlement once the caller has already been released.
  */
@@ -196,7 +196,7 @@ function raceSandboxDeath<T>(
 }
 
 /**
- * Implements SandboxApi by wrapping the Modal JS SDK's Sandbox class.
+ * Implements SandboxDriver by wrapping the Modal JS SDK's Sandbox class.
  *
  * Modal's surface is intentionally thin: `sandbox.exec()` for processes
  * and `sandbox.filesystem` for whole-file reads and writes. `mkdir`, `rm`,
@@ -208,7 +208,7 @@ function raceSandboxDeath<T>(
  * `raceSandboxDeath` above) so a call that is in flight when the sandbox
  * dies settles instead of hanging forever.
  */
-class ModalSandboxApi implements SandboxApi {
+class ModalSandboxDriver implements SandboxDriver {
 	constructor(private sandbox: ModalSandbox) {}
 
 	private guarded<T>(operation: string, call: Promise<T>): Promise<T> {
@@ -343,7 +343,7 @@ class ModalSandboxApi implements SandboxApi {
 		// accept them. `pipe` for stdout/stderr is required to read them
 		// back; the default `ignore` discards output. Modal's exec options
 		// have no AbortSignal, so `options?.signal` is deliberately not
-		// forwarded here — createSandboxSessionEnv (which this adapter builds
+		// forwarded here — sandboxFromDriver (which this adapter builds
 		// on) owns caller-facing abort and rejects promptly while the
 		// sandbox keeps running the command.
 		const proc = await this.guarded(
@@ -371,15 +371,15 @@ class ModalSandboxApi implements SandboxApi {
 
 /**
  * Create a Flue sandbox factory from an initialized Modal Sandbox.
- * The user owns the Sandbox lifecycle; Flue wraps it into a SessionEnv
+ * The user owns the Sandbox lifecycle; Flue wraps it into a Sandbox
  * for agent use.
  */
 export function modal(sandbox: ModalSandbox, options?: ModalAdapterOptions): SandboxFactory {
 	return {
-		async createSessionEnv(): Promise<SessionEnv> {
+		async createSandbox(): Promise<Sandbox> {
 			const sandboxCwd = options?.cwd ?? '/';
-			const api = new ModalSandboxApi(sandbox);
-			return createSandboxSessionEnv(api, sandboxCwd);
+			const driver = new ModalSandboxDriver(sandbox);
+			return sandboxFromDriver(driver, sandboxCwd);
 		},
 	};
 }
@@ -444,15 +444,15 @@ export function Assistant() {
 	useSandbox({
 		// Lazy, per the SandboxFactory contract: constructing this object is
 		// cheap; the expensive Modal sandbox creation happens once, inside
-		// createSessionEnv(), at initialization — never on a re-render.
-		async createSessionEnv(options) {
+		// createSandbox(), at initialization — never on a re-render.
+		async createSandbox(options) {
 			// ModalClient reads MODAL_TOKEN_ID / MODAL_TOKEN_SECRET (or
 			// ~/.modal.toml) automatically.
 			const client = new ModalClient();
 			const app = await client.apps.fromName('my-flue-app', { createIfMissing: true });
 			const image = client.images.fromRegistry('python:3.13-slim');
 			const sandbox = await client.sandboxes.create(app, image);
-			return modal(sandbox).createSessionEnv(options);
+			return modal(sandbox).createSandbox(options);
 		},
 	});
 	return 'You are a helpful assistant with a full sandbox.';

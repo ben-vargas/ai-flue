@@ -32,7 +32,7 @@ Create any missing parent directories.
 ## File contents
 
 Write this file verbatim. Do not "improve" it — it conforms to the published
-`SandboxApi` contract.
+`SandboxDriver` contract.
 
 ```ts
 // flue-blueprint: sandbox/daytona@1
@@ -55,11 +55,11 @@ Write this file verbatim. Do not "improve" it — it conforms to the published
  *   useSandbox({
  *     // Lazy, per the SandboxFactory contract: constructing this object is
  *     // cheap; the expensive Daytona sandbox creation happens once, inside
- *     // createSessionEnv(), at initialization — never on a re-render.
- *     async createSessionEnv(options) {
+ *     // createSandbox(), at initialization — never on a re-render.
+ *     async createSandbox(options) {
  *       const client = new Daytona({ apiKey: process.env.DAYTONA_API_KEY });
  *       const sandbox = await client.create({ image: 'ubuntu:latest' });
- *       return daytona(sandbox).createSessionEnv(options);
+ *       return daytona(sandbox).createSandbox(options);
  *     },
  *   });
  *   return 'You are a helpful assistant with a full sandbox.';
@@ -67,11 +67,11 @@ Write this file verbatim. Do not "improve" it — it conforms to the published
  * ```
  */
 import {
-	createSandboxSessionEnv,
+	sandboxFromDriver,
 	SandboxDiedError,
 	SandboxOperationUnsupportedError,
 } from '@flue/runtime';
-import type { SandboxApi, SandboxFactory, SessionEnv, FileStat } from '@flue/runtime';
+import type { SandboxDriver, SandboxFactory, Sandbox, FileStat } from '@flue/runtime';
 import { DaytonaNotFoundError } from '@daytona/sdk';
 import type { Sandbox as DaytonaSandbox } from '@daytona/sdk';
 
@@ -111,7 +111,7 @@ const DEAD_STATES: ReadonlySet<string> = new Set([
  * sandbox, which the SDK itself maps to `destroyed`.
  *
  * Liveness only: this never races the caller's abort signal. Caller-facing
- * cancellation is owned one layer up, by `createSandboxSessionEnv`'s `exec`
+ * cancellation is owned one layer up, by `sandboxFromDriver`'s `exec`
  * abort race — it rejects promptly on abort and consumes this promise's
  * eventual settlement once the caller has already been released.
  */
@@ -174,11 +174,11 @@ function raceSandboxDeath<T>(
 }
 
 /**
- * Implements SandboxApi by wrapping Daytona's TypeScript SDK. Every SDK call
+ * Implements SandboxDriver by wrapping Daytona's TypeScript SDK. Every SDK call
  * goes through the death detector so a call that is in flight when the
  * sandbox dies settles instead of hanging.
  */
-class DaytonaSandboxApi implements SandboxApi {
+class DaytonaSandboxDriver implements SandboxDriver {
 	constructor(private sandbox: DaytonaSandbox) {}
 
 	private guarded<T>(operation: string, call: Promise<T>): Promise<T> {
@@ -256,7 +256,7 @@ class DaytonaSandboxApi implements SandboxApi {
 		},
 	): Promise<{ stdout: string; stderr: string; exitCode: number }> {
 		// Daytona's executeCommand does not accept an AbortSignal, so it is
-		// deliberately not forwarded here — createSandboxSessionEnv (which
+		// deliberately not forwarded here — sandboxFromDriver (which
 		// this adapter builds on) owns caller-facing abort and rejects
 		// promptly while the sandbox keeps running the command.
 		const response = await this.guarded(
@@ -280,17 +280,17 @@ class DaytonaSandboxApi implements SandboxApi {
 
 /**
  * Create a Flue sandbox factory from an initialized Daytona sandbox.
- * The user owns the sandbox lifecycle; Flue wraps it into a SessionEnv
+ * The user owns the sandbox lifecycle; Flue wraps it into a Sandbox
  * for agent use.
  */
 export function daytona(sandbox: DaytonaSandbox): SandboxFactory {
 	return {
-		async createSessionEnv(): Promise<SessionEnv> {
+		async createSandbox(): Promise<Sandbox> {
 			const sandboxCwd =
 				(await raceSandboxDeath(sandbox, 'getWorkDir', sandbox.getWorkDir())) ??
 				'/home/daytona';
-			const api = new DaytonaSandboxApi(sandbox);
-			return createSandboxSessionEnv(api, sandboxCwd);
+			const driver = new DaytonaSandboxDriver(sandbox);
+			return sandboxFromDriver(driver, sandboxCwd);
 		},
 	};
 }
@@ -341,11 +341,11 @@ export function Assistant() {
 	useSandbox({
 		// Lazy, per the SandboxFactory contract: constructing this object is
 		// cheap; the expensive Daytona sandbox creation happens once, inside
-		// createSessionEnv(), at initialization — never on a re-render.
-		async createSessionEnv(options) {
+		// createSandbox(), at initialization — never on a re-render.
+		async createSandbox(options) {
 			const client = new Daytona({ apiKey: process.env.DAYTONA_API_KEY });
 			const sandbox = await client.create();
-			return daytona(sandbox).createSessionEnv(options);
+			return daytona(sandbox).createSandbox(options);
 		},
 	});
 	return 'You are a helpful assistant with a full sandbox.';

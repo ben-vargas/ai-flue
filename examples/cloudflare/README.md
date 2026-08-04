@@ -2,8 +2,8 @@
 
 This directory exercises Flue's Cloudflare-specific surfaces. The agents
 here are intentionally minimal — each one demonstrates a single capability
-end-to-end so it's easy to copy the pattern into a real app. The cf-shell
-agents use the project-owned sandbox adapter at `src/sandboxes/cloudflare-shell.ts`, generated conceptually by `flue add sandbox @cloudflare/shell`.
+end-to-end so it's easy to copy the pattern into a real app. The workspace
+agents use the project-owned sandbox adapter at `src/sandboxes/cloudflare-computer.ts`, generated conceptually by `flue add sandbox @cloudflare/computer`.
 
 The app is built with Vite: `flue()` from `@flue/vite` plus the official
 `@cloudflare/vite-plugin` in `vite.config.ts` (flue first — it prepares the
@@ -16,8 +16,8 @@ mounts each agent's routes explicitly.
 | Agent                        | Demonstrates                                                                                                                |
 | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
 | `with-cloudflare-binding.ts` | Routing model traffic through the Workers AI binding (no API keys).                                                         |
-| `skills-from-r2.ts`          | Hydrating a cf-shell `Workspace` from an R2 bucket and using a discovered skill (via a model-callable `check_spam` action). |
-| `skills-from-git.ts`         | Hydrating a cf-shell `Workspace` from a git repo via `createGit`.                                                           |
+| `skills-from-r2.ts`          | Hydrating a cloudflare-computer `Workspace` from an R2 bucket and using a discovered skill (via a model-callable `check_spam` action). |
+| `skills-from-git.ts`         | Hydrating a cloudflare-computer `Workspace` from a git repo via the built-in `workspace.git` client.                        |
 
 ## Setup
 
@@ -41,9 +41,10 @@ matching provider key in `.env` at the project root (see
 
 ## Worker Loader requirement (skills-from-r2, skills-from-git)
 
-Both hydration examples use the project-owned sandbox adapter at `src/sandboxes/cloudflare-shell.ts` and require a `worker_loaders` binding. Worker Loader
+Both hydration examples use the project-owned sandbox adapter at `src/sandboxes/cloudflare-computer.ts` and require a `worker_loaders` binding. Worker Loader
 is **currently in beta** and your Cloudflare account needs access; the
-binding is already declared in `wrangler.jsonc` here.
+binding is already declared in `wrangler.jsonc` here, along with the
+`experimental` compatibility flag the worker-shell backend needs.
 
 ### Local development caveat
 
@@ -59,9 +60,10 @@ hydration smoke, use remote resources. You have two options:
 - **deploy to a preview environment** — `pnpm run deploy`, then exercise
   the agent over HTTP afterward.
 
-The cf-shell sandbox adapter exposes a JavaScript `code` tool over its Workspace,
-not bash or a live R2 mount. If your account doesn't have Worker Loader
-access, or you need Linux tools or bucket paths mounted directly, use
+The cloudflare-computer sandbox runs commands in just-bash (a JavaScript
+shell) over a durable Workspace — coreutils and `grep`/`find` work; native
+binaries and `npm` do not. If your account doesn't have Worker Loader
+access, or you need Linux toolchains or writable bucket mounts, use
 `@cloudflare/sandbox` (Containers + `mountBucket`) instead.
 
 ### Seeding R2 (skills-from-r2 only)

@@ -247,15 +247,16 @@ export interface FileStat {
 	mtime?: Date;
 }
 
-// ─── Session Environment ────────────────────────────────────────────────────
+// ─── Sandbox ─────────────────────────────────────────────────────────────────
 
 /**
- * Universal session environment interface. All sandbox modes (isolate, local, remote)
- * implement this — no mode-specific branching needed in core logic.
+ * The agent's live sandbox: the universal environment interface. All sandbox
+ * modes (isolate, local, remote) implement this — no mode-specific branching
+ * needed in core logic.
  *
  * File methods accept both absolute and relative paths (resolved against `cwd`).
  */
-export interface SessionEnv {
+export interface Sandbox {
 	exec(
 		command: string,
 		options?: {
@@ -308,6 +309,9 @@ export interface SessionEnv {
 	 */
 	resolvePath(p: string): string;
 }
+
+/** @deprecated Renamed to {@link Sandbox}. */
+export type SessionEnv = Sandbox;
 
 /**
  * Filesystem surface for the harness sandbox, exposed on `FlueHarness.fs` and
@@ -702,7 +706,7 @@ export interface FlueLogger {
  * `prompt` drives the harness's own scratch conversation: repeated calls
  * continue it, so a later prompt sees what earlier calls established.
  * `sandbox` is the agent's initialized environment itself — the live
- * {@link SessionEnv} the configured {@link SandboxFactory} produced — touched
+ * {@link Sandbox} the configured {@link SandboxFactory} produced — touched
  * directly, with no conversation record.
  */
 export interface FlueHarness {
@@ -727,7 +731,7 @@ export interface FlueHarness {
 	compact(): Promise<void>;
 
 	/**
-	 * The environment this agent runs in: the live {@link SessionEnv} resolved
+	 * The environment this agent runs in: the live {@link Sandbox} resolved
 	 * from the agent's declared sandbox (`useSandbox()`). One object carries
 	 * the whole surface — `exec`, the file verbs (`readFile`/`writeFile`/
 	 * `stat`/`readdir`/`exists`/`mkdir`/`rm`), `cwd`, `resolvePath` — and
@@ -743,7 +747,7 @@ export interface FlueHarness {
 	 * that narrow to that surface — call the sandbox the way it actually
 	 * works.
 	 */
-	readonly sandbox: SessionEnv;
+	readonly sandbox: Sandbox;
 }
 
 // ─── Flue Session ───────────────────────────────────────────────────────────
@@ -944,7 +948,7 @@ export interface ShellOptions {
 	cwd?: string;
 	/**
 	 * Wall-clock deadline in milliseconds, forwarded to the sandbox
-	 * sandbox adapter. See `SessionEnv.exec`.
+	 * sandbox adapter. See `Sandbox.exec`.
 	 */
 	timeoutMs?: number;
 	/** Cancel this call. See `CallHandle`. */
@@ -958,39 +962,51 @@ export interface ShellResult {
 	exitCode: number;
 }
 
-// ─── Sandbox ────────────────────────────────────────────────────────────────
+// ─── Sandbox factory ─────────────────────────────────────────────────────────
 
-export interface SessionToolFactoryOptions {
+export interface SandboxToolFactoryOptions {
 	subagents: Record<string, SubagentDefinition>;
 }
 
+/** @deprecated Renamed to {@link SandboxToolFactoryOptions}. */
+export type SessionToolFactoryOptions = SandboxToolFactoryOptions;
+
 /** Sandbox adapter-supplied model-facing tools. Flue appends `task` separately. */
-export type SessionToolFactory = (
-	env: SessionEnv,
-	options: SessionToolFactoryOptions,
+export type SandboxToolFactory = (
+	sandbox: Sandbox,
+	options: SandboxToolFactoryOptions,
 ) => AgentTool<any>[];
 
-/** Wraps external sandboxes (Daytona, CF Containers, etc.) into Flue's SessionEnv. */
+/** @deprecated Renamed to {@link SandboxToolFactory}. */
+export type SessionToolFactory = SandboxToolFactory;
+
+/** Wraps external sandboxes (Daytona, CF Containers, etc.) into Flue's {@link Sandbox}. */
 export interface SandboxFactory {
 	/**
 	 * Called once per initialized harness — one call per `init()` — and every
-	 * session and task session of that harness shares the returned env.
+	 * session and task session of that harness shares the returned sandbox.
 	 *
 	 * `id` is the context id (`ctx.id`): the agent instance id. Multiple
 	 * harnesses initialized in the same context receive the same `id`, so a
 	 * sandbox adapter that keys provider resources on `id` must tolerate repeated
 	 * calls with the same value.
 	 */
-	createSessionEnv(options: { id: string }): Promise<SessionEnv>;
+	createSandbox(options: { id: string }): Promise<Sandbox>;
+	/**
+	 * @deprecated Implement {@link SandboxFactory.createSandbox} instead. The
+	 * runtime still calls this when `createSandbox` is absent, so existing
+	 * adapters keep working.
+	 */
+	createSessionEnv?(options: { id: string }): Promise<Sandbox>;
 	/**
 	 * Replaces the framework default tool list for this sandbox. Omit it for
-	 * the standard set over your env. When you do supply one, compose it from
-	 * the exported per-tool factories (`createReadTool`, `createWriteTool`,
+	 * the standard set over your sandbox. When you do supply one, compose it
+	 * from the exported per-tool factories (`createReadTool`, `createWriteTool`,
 	 * `createEditTool`, `createBashTool`, `createGrepTool`, `createGlobTool`)
 	 * plus your own tools, rather than rebuilding from scratch — e.g. an
 	 * exec-less sandbox lists the three file tools and its own executor tool.
 	 */
-	tools?: SessionToolFactory;
+	tools?: SandboxToolFactory;
 }
 
 /**

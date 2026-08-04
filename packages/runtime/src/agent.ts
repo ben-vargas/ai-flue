@@ -2,7 +2,7 @@ import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core';
 import { type Static, Type } from '@earendil-works/pi-ai';
 import { composeTimeoutSignal } from './abort.ts';
 import { decodeBase64 } from './base64.ts';
-import type { PackagedSkillDirectory, SessionEnv } from './types.ts';
+import type { PackagedSkillDirectory, Sandbox } from './types.ts';
 
 const MAX_READ_LINES = 2000;
 const MAX_READ_BYTES = 50 * 1024;
@@ -52,9 +52,9 @@ export interface TaskToolUndeclaredAgentDetails {
  * `useTool` handlers see the real env, never this overlay.
  */
 export function overlayPackagedSkills(
-	env: SessionEnv,
+	env: Sandbox,
 	packagedSkills: Record<string, PackagedSkillDirectory>,
-): SessionEnv {
+): Sandbox {
 	return {
 		...env,
 		async readFile(path: string): Promise<string> {
@@ -93,11 +93,11 @@ export function createPackagedSkillReadTool(
 }
 
 /**
- * The framework's standard `read` tool over a {@link SessionEnv}. Needs only
+ * The framework's standard `read` tool over a {@link Sandbox}. Needs only
  * the file verbs. Use it (with the other `create*Tool` factories) to compose
  * a {@link SandboxFactory}'s `tools` list instead of rebuilding from scratch.
  */
-export function createReadTool(env: SessionEnv): AgentTool<typeof ReadParams> {
+export function createReadTool(env: Sandbox): AgentTool<typeof ReadParams> {
 	return {
 		name: 'read',
 		label: 'Read File',
@@ -133,10 +133,10 @@ export function createReadTool(env: SessionEnv): AgentTool<typeof ReadParams> {
  * listener, so the lock never releases while a filesystem write is in
  * flight.
  */
-const fileMutationLocks = new WeakMap<SessionEnv, Map<string, Promise<void>>>();
+const fileMutationLocks = new WeakMap<Sandbox, Map<string, Promise<void>>>();
 
 function withFileMutationLock<T>(
-	env: SessionEnv,
+	env: Sandbox,
 	path: string,
 	operation: () => Promise<T>,
 ): Promise<T> {
@@ -170,10 +170,10 @@ const WriteParams = Type.Object({
 });
 
 /**
- * The framework's standard `write` tool over a {@link SessionEnv}. Needs only
+ * The framework's standard `write` tool over a {@link Sandbox}. Needs only
  * the file verbs.
  */
-export function createWriteTool(env: SessionEnv): AgentTool<typeof WriteParams> {
+export function createWriteTool(env: Sandbox): AgentTool<typeof WriteParams> {
 	return {
 		name: 'write',
 		label: 'Write File',
@@ -185,7 +185,7 @@ export function createWriteTool(env: SessionEnv): AgentTool<typeof WriteParams> 
 			return withFileMutationLock(env, params.path, async () => {
 				// Re-check after the lock wait; never between write start and end.
 				throwIfAborted(signal);
-				// SessionEnv.writeFile creates missing parent directories itself
+				// Sandbox.writeFile creates missing parent directories itself
 				// (the FlueFs.writeFile guarantee), so no eager mkdir here.
 				await env.writeFile(params.path, params.content);
 				return {
@@ -210,10 +210,10 @@ const EditParams = Type.Object({
 });
 
 /**
- * The framework's standard `edit` tool over a {@link SessionEnv}. Needs only
+ * The framework's standard `edit` tool over a {@link Sandbox}. Needs only
  * the file verbs.
  */
-export function createEditTool(env: SessionEnv): AgentTool<typeof EditParams> {
+export function createEditTool(env: Sandbox): AgentTool<typeof EditParams> {
 	return {
 		name: 'edit',
 		label: 'Edit File',
@@ -276,11 +276,11 @@ const BashParams = Type.Object({
 });
 
 /**
- * The framework's standard `bash` tool over a {@link SessionEnv}. Requires a
+ * The framework's standard `bash` tool over a {@link Sandbox}. Requires a
  * working `env.exec` — leave it out of a `tools` list for sandboxes that
  * don't execute shell commands.
  */
-export function createBashTool(env: SessionEnv): AgentTool<typeof BashParams> {
+export function createBashTool(env: Sandbox): AgentTool<typeof BashParams> {
 	return {
 		name: 'bash',
 		label: 'Run Command',
@@ -307,7 +307,7 @@ export function createBashTool(env: SessionEnv): AgentTool<typeof BashParams> {
 			// On timeout we return a 124-shaped ShellResult so the model
 			// can recover. On host abort we rethrow so the outer call
 			// cancels. This timeout-as-recoverable-result behavior lives
-			// here in the LLM-facing tool, not in SessionEnv/SandboxApi:
+			// here in the LLM-facing tool, not in Sandbox/SandboxDriver:
 			// Programmatic callers express timeouts via AbortSignal.timeout(...) and
 			// accept abort semantics; the model can only emit JSON, so it
 			// needs `params.timeout` and a recoverable shape on timeout.
@@ -482,9 +482,9 @@ const GrepParams = Type.Object({
 // factories a fresh per-call overlay env (packaged-skill routing), but the
 // exec function reference is stable across overlays — so the probe still
 // runs once per underlying sandbox.
-const grepBackends = new WeakMap<SessionEnv['exec'], Promise<'rg' | 'grep'>>();
+const grepBackends = new WeakMap<Sandbox['exec'], Promise<'rg' | 'grep'>>();
 
-function resolveGrepBackend(env: SessionEnv): Promise<'rg' | 'grep'> {
+function resolveGrepBackend(env: Sandbox): Promise<'rg' | 'grep'> {
 	let backend = grepBackends.get(env.exec);
 	if (!backend) {
 		// No caller signal here: the probe result is cached per-env, so an
@@ -511,10 +511,10 @@ function resolveGrepBackend(env: SessionEnv): Promise<'rg' | 'grep'> {
 }
 
 /**
- * The framework's standard `grep` tool over a {@link SessionEnv}. Requires a
+ * The framework's standard `grep` tool over a {@link Sandbox}. Requires a
  * working `env.exec` (searches via `rg` or `grep` in the sandbox).
  */
-export function createGrepTool(env: SessionEnv): AgentTool<typeof GrepParams> {
+export function createGrepTool(env: Sandbox): AgentTool<typeof GrepParams> {
 	return {
 		name: 'grep',
 		label: 'Search Files',
@@ -576,10 +576,10 @@ const GlobParams = Type.Object({
 });
 
 /**
- * The framework's standard `glob` tool over a {@link SessionEnv}. Requires a
+ * The framework's standard `glob` tool over a {@link Sandbox}. Requires a
  * working `env.exec` (finds files via `find` in the sandbox).
  */
-export function createGlobTool(env: SessionEnv): AgentTool<typeof GlobParams> {
+export function createGlobTool(env: Sandbox): AgentTool<typeof GlobParams> {
 	return {
 		name: 'glob',
 		label: 'Find Files',

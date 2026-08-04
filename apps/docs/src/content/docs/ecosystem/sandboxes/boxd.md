@@ -20,8 +20,8 @@ The boxd blueprint installs `@boxd-sh/sdk` when needed and creates `sandboxes/bo
 
 ```ts title="<source-root>/sandboxes/boxd.ts (abridged)"
 // flue-blueprint: sandbox/boxd@1
-import { createSandboxSessionEnv } from '@flue/runtime';
-import type { SandboxApi, SandboxFactory, SessionEnv, FileStat } from '@flue/runtime';
+import { sandboxFromDriver } from '@flue/runtime';
+import type { SandboxDriver, SandboxFactory, Sandbox, FileStat } from '@flue/runtime';
 import type { Box as BoxdBox } from '@boxd-sh/sdk';
 
 export interface BoxdAdapterOptions {
@@ -37,7 +37,7 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-class BoxdSandboxApi implements SandboxApi {
+class BoxdSandboxDriver implements SandboxDriver {
   constructor(private box: BoxdBox) {}
 
   /* Adapts direct boxd file reads and writes. */
@@ -50,12 +50,12 @@ class BoxdSandboxApi implements SandboxApi {
 export function boxd(box: BoxdBox, options?: BoxdAdapterOptions): SandboxFactory {
   let readyPromise: Promise<void> | undefined;
   return {
-    async createSessionEnv(): Promise<SessionEnv> {
+    async createSandbox(): Promise<Sandbox> {
       const sandboxCwd = options?.cwd ?? '/home/boxd';
       readyPromise ??= waitForReady(box, options?.readyTimeoutMs ?? 30_000);
       await readyPromise;
-      const api = new BoxdSandboxApi(box);
-      return createSandboxSessionEnv(api, sandboxCwd);
+      const driver = new BoxdSandboxDriver(box);
+      return sandboxFromDriver(driver, sandboxCwd);
     },
   };
 }

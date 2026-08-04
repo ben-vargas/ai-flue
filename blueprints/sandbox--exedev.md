@@ -41,7 +41,7 @@ Create any missing parent directories.
 ## File contents
 
 Write this file verbatim. Do not "improve" it — it conforms to the published
-`SandboxApi` contract.
+`SandboxDriver` contract.
 
 ```ts
 // flue-blueprint: sandbox/exedev@1
@@ -62,7 +62,7 @@ Write this file verbatim. Do not "improve" it — it conforms to the published
  * The SSH connection doubles as the liveness channel: SSH-level keepalives
  * surface a silently dead VM as a connection close, and every in-flight
  * operation settles with SandboxDiedError instead of hanging. See the
- * death watcher in ExeDevSandboxApi.
+ * death watcher in ExeDevSandboxDriver.
  *
  * @example Existing VM (most common)
  * ```typescript
@@ -88,10 +88,10 @@ Write this file verbatim. Do not "improve" it — it conforms to the published
  *   useSandbox({
  *     // Lazy, per the SandboxFactory contract: constructing this object is
  *     // cheap; the expensive VM creation happens once, inside
- *     // createSessionEnv(), at initialization — never on a re-render.
- *     async createSessionEnv(options) {
+ *     // createSandbox(), at initialization — never on a re-render.
+ *     async createSandbox(options) {
  *       const vm = await createExeVm({ apiToken: process.env.EXE_API_TOKEN });
- *       return exedev(vm).createSessionEnv(options);
+ *       return exedev(vm).createSandbox(options);
  *     },
  *   });
  *   return 'You are a helpful assistant with a full sandbox.';
@@ -99,15 +99,15 @@ Write this file verbatim. Do not "improve" it — it conforms to the published
  * ```
  */
 import {
-  createSandboxSessionEnv,
+  sandboxFromDriver,
   SandboxDiedError,
   SandboxOperationUnsupportedError,
 } from "@flue/runtime";
 import type {
   FileStat,
-  SandboxApi,
+  SandboxDriver,
   SandboxFactory,
-  SessionEnv,
+  Sandbox,
 } from "@flue/runtime";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -417,7 +417,7 @@ async function sshConnect(
     // socket established and every pending call hanging. SSH-level
     // keepalives turn that silence into a socket teardown after
     // SSH_KEEPALIVE_COUNT_MAX unanswered probes, which settles every
-    // in-flight operation (see the death watcher in ExeDevSandboxApi).
+    // in-flight operation (see the death watcher in ExeDevSandboxDriver).
     // sshd answers keepalives regardless of how long a command runs, so a
     // legitimately slow command on a healthy VM never trips them.
     keepaliveInterval: SSH_KEEPALIVE_INTERVAL_MS,
@@ -456,7 +456,7 @@ export interface SshExecStream {
   close(): void;
 }
 
-export class ExeDevSandboxApi implements SandboxApi {
+export class ExeDevSandboxDriver implements SandboxDriver {
   private sftpInstance: SFTPWrapper | null = null;
   private sftpPromise: Promise<SFTPWrapper> | null = null;
   /** Set once the SSH connection is gone; guarded calls reject after that. */
@@ -506,7 +506,7 @@ export class ExeDevSandboxApi implements SandboxApi {
    * command is never interrupted.
    *
    * Liveness only: this never races the caller's abort signal. Caller-facing
-   * cancellation is owned one layer up, by `createSandboxSessionEnv`'s `exec`
+   * cancellation is owned one layer up, by `sandboxFromDriver`'s `exec`
    * abort race — it rejects promptly on abort and consumes this promise's
    * eventual settlement once the caller has already been released.
    *
@@ -696,7 +696,7 @@ export class ExeDevSandboxApi implements SandboxApi {
     }
 
     // ssh2 cannot cancel a remote command mid-flight, so `options?.signal`
-    // is deliberately not forwarded here — createSandboxSessionEnv (which
+    // is deliberately not forwarded here — sandboxFromDriver (which
     // this adapter builds on) owns caller-facing abort and rejects promptly
     // while the VM keeps running the command. The remote command becomes an
     // orphan: it runs to completion, and its result is discarded.
@@ -751,20 +751,20 @@ export class ExeDevSandboxApi implements SandboxApi {
 export function exedev(vm: ExeDevVm | string, options?: ExeDevAdapterOptions): SandboxFactory {
   const resolvedVm = typeof vm === "string" ? { host: vm } : vm;
   return {
-    async createSessionEnv(): Promise<SessionEnv> {
+    async createSandbox(): Promise<Sandbox> {
       const { ssh } = await sshConnect(resolvedVm, options ?? {});
-      const api = new ExeDevSandboxApi(ssh);
+      const driver = new ExeDevSandboxDriver(ssh);
 
       let sandboxCwd = "/home/user";
       try {
-        const { stdout } = await api.exec("echo $HOME");
+        const { stdout } = await driver.exec("echo $HOME");
         const detected = stdout.trim();
         if (detected) sandboxCwd = detected;
       } catch {
         // Fall back to /home/user.
       }
 
-      return createSandboxSessionEnv(api, sandboxCwd);
+      return sandboxFromDriver(driver, sandboxCwd);
     },
   };
 }
@@ -868,7 +868,7 @@ an HTTP endpoint — `flue run` and `dispatch()` work without a mount.
 ### Fresh VM
 
 Only use this when the user explicitly asks to create a VM and provides an
-API token with `new` permission. The `createSessionEnv` closure creates the
+API token with `new` permission. The `createSandbox` closure creates the
 VM and passes it to `exedev(...)`.
 
 ```ts
@@ -879,9 +879,9 @@ import { createExeVm, exedev } from "../sandboxes/exedev";
 export function Assistant() {
 	useModel("anthropic/claude-sonnet-4-6");
 	useSandbox({
-		async createSessionEnv(options) {
+		async createSandbox(options) {
 			const vm = await createExeVm({ apiToken: process.env.EXE_API_TOKEN });
-			return exedev(vm).createSessionEnv(options);
+			return exedev(vm).createSandbox(options);
 		},
 	});
 	return "You are a helpful assistant with a full sandbox.";
@@ -902,12 +902,12 @@ import { cloneExeVm, exedev } from "../sandboxes/exedev";
 export function Assistant() {
 	useModel("anthropic/claude-sonnet-4-6");
 	useSandbox({
-		async createSessionEnv(options) {
+		async createSandbox(options) {
 			const vm = await cloneExeVm({
 				apiToken: process.env.EXE_API_TOKEN,
 				source: "my-dev-vm",
 			});
-			return exedev(vm).createSessionEnv(options);
+			return exedev(vm).createSandbox(options);
 		},
 	});
 	return "You are a helpful assistant with a full sandbox.";

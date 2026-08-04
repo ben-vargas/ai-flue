@@ -10,13 +10,13 @@ import type { McpUnavailableConnection } from './mcp-types.ts';
 import type { AgentOutputChannel } from './message-output.ts';
 import type { AttachmentStore } from './runtime/attachment-store.ts';
 import { createConversationIdentity } from './runtime/ids.ts';
-import { createCwdSessionEnv } from './sandbox.ts';
+import { createCwdSandbox } from './sandbox.ts';
 import {
 	type CreateTaskSessionOptions,
 	createPublicSession,
 	Session,
-	type SessionEnvRuntime,
-	type SessionEnvSlot,
+	type SandboxRuntime,
+	type SandboxSlot,
 	type SessionRerender,
 	type SessionResourceRuntime,
 } from './session.ts';
@@ -36,8 +36,8 @@ import type {
 	PromptResponse,
 	PromptResultResponse,
 	ResolvedSubagent,
-	SessionEnv,
-	SessionToolFactory,
+	Sandbox,
+	SandboxToolFactory,
 	ToolDefinition,
 } from './types.ts';
 
@@ -48,12 +48,12 @@ export interface HarnessOptions {
 	name: string;
 	config: AgentConfig;
 	/** Initial environment (or none); wrapped in a fresh env slot unless `envSlot` is provided. */
-	env: SessionEnv | undefined;
+	env: Sandbox | undefined;
 	eventCallback?: FlueEventInputCallback;
 	agentTools: ToolDefinition[];
 	/** Optional MCP connections that failed to resolve at initialization. */
 	mcpUnavailable?: McpUnavailableConnection[];
-	toolFactory?: SessionToolFactory;
+	toolFactory?: SandboxToolFactory;
 	conversationWriter: ConversationRecordWriter;
 	attachmentStore: AttachmentStore;
 	executionContext?: FlueExecutionContext;
@@ -91,14 +91,14 @@ export interface HarnessOptions {
 	 * only). When absent, a fresh slot wraps `env`/`toolFactory` — same
 	 * behavior as before, nothing ever swaps it.
 	 */
-	envSlot?: SessionEnvSlot;
+	envSlot?: SandboxSlot;
 	/** Environment-swap wiring (function agents only); same routing as hookState. */
-	envRuntime?: SessionEnvRuntime;
+	envRuntime?: SandboxRuntime;
 }
 
 export class Harness implements FlueHarness {
 	/**
-	 * The agent's CURRENT environment — the live {@link SessionEnv} behind the
+	 * The agent's CURRENT environment — the live {@link Sandbox} behind the
 	 * shared env slot. A live getter, not a snapshot: a conditional
 	 * `useSandbox()` may swap the environment at a turn boundary, and this
 	 * surface follows. Code doing conditional swaps owns not caching the
@@ -106,7 +106,7 @@ export class Harness implements FlueHarness {
 	 * surface. THROWS when the agent declared no sandbox — there is no
 	 * default environment.
 	 */
-	get sandbox(): SessionEnv {
+	get sandbox(): Sandbox {
 		const env = this.envSlot.env;
 		if (!env) {
 			throw new Error(
@@ -122,7 +122,7 @@ export class Harness implements FlueHarness {
 	 * and to sessions opened later. Fresh per harness when the constructor
 	 * receives none (action harnesses, task-less legacy paths).
 	 */
-	private envSlot: SessionEnvSlot;
+	private envSlot: SandboxSlot;
 
 	private openSessions = new Map<string, Session>();
 	private pendingSessionOperations = new Map<string, Promise<void>>();
@@ -145,7 +145,7 @@ export class Harness implements FlueHarness {
 	private output: AgentOutputChannel | undefined;
 	private advanceDelivery: ((message: DeliveredMessage) => void) | undefined;
 	private resources: SessionResourceRuntime | undefined;
-	private envRuntime: SessionEnvRuntime | undefined;
+	private envRuntime: SandboxRuntime | undefined;
 
 	constructor(options: HarnessOptions) {
 		this.name = options.name;
@@ -322,7 +322,7 @@ export class Harness implements FlueHarness {
 		const sessionName = createTaskSessionName(options.parentSession, options.taskId);
 		const taskEnv =
 			options.parentEnv && options.cwd
-				? createCwdSessionEnv(options.parentEnv, options.parentEnv.resolvePath(options.cwd))
+				? createCwdSandbox(options.parentEnv, options.parentEnv.resolvePath(options.cwd))
 				: options.parentEnv;
 		const taskAgent = options.agent;
 		// Task children are self-contained: behavior/identity fields

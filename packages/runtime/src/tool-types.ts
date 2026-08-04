@@ -102,7 +102,7 @@ export interface ToolDefinition<
 	/**
 	 * Connect this tool to the agent's runtime: `run` receives `harness`,
 	 * the one interface to the agent's environment (`harness.sandbox`, the
-	 * live SessionEnv) and to models (`harness.prompt()`). Harness
+	 * live Sandbox) and to models (`harness.prompt()`). Harness
 	 * invocations are scoped to the tool call, count against the
 	 * delegation-depth cap, and retain any child conversations they open.
 	 * Harness tools only run inside an agent session — never standalone.

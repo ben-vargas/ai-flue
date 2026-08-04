@@ -32,7 +32,7 @@ Create any missing parent directories.
 ## File contents
 
 Write this file verbatim. Do not "improve" it — it conforms to the published
-`SandboxApi` contract.
+`SandboxDriver` contract.
 
 ```ts
 // flue-blueprint: sandbox/vercel@1
@@ -55,24 +55,24 @@ Write this file verbatim. Do not "improve" it — it conforms to the published
  *   useSandbox({
  *     // Lazy, per the SandboxFactory contract: constructing this object is
  *     // cheap; the expensive Vercel sandbox creation happens once, inside
- *     // createSessionEnv(), at initialization — never on a re-render.
- *     async createSessionEnv(options) {
+ *     // createSandbox(), at initialization — never on a re-render.
+ *     async createSandbox(options) {
  *       const sandbox = await Sandbox.create({ runtime: 'node24' });
- *       return vercel(sandbox).createSessionEnv(options);
+ *       return vercel(sandbox).createSandbox(options);
  *     },
  *   });
  *   return 'You are a helpful assistant with a full sandbox.';
  * }
  * ```
  */
-import { createSandboxSessionEnv } from '@flue/runtime';
-import type { SandboxApi, SandboxFactory, SessionEnv, FileStat } from '@flue/runtime';
+import { sandboxFromDriver } from '@flue/runtime';
+import type { SandboxDriver, SandboxFactory, Sandbox, FileStat } from '@flue/runtime';
 import type { Sandbox as VercelSandbox } from '@vercel/sandbox';
 
 /**
- * Implements SandboxApi by wrapping the Vercel Sandbox SDK.
+ * Implements SandboxDriver by wrapping the Vercel Sandbox SDK.
  */
-class VercelSandboxApi implements SandboxApi {
+class VercelSandboxDriver implements SandboxDriver {
 	constructor(private sandbox: VercelSandbox) {}
 
 	async readFile(path: string): Promise<string> {
@@ -175,15 +175,15 @@ class VercelSandboxApi implements SandboxApi {
 
 /**
  * Create a Flue sandbox factory from an initialized Vercel Sandbox.
- * The user owns the sandbox lifecycle; Flue wraps it into a SessionEnv
+ * The user owns the sandbox lifecycle; Flue wraps it into a Sandbox
  * for agent use.
  */
 export function vercel(sandbox: VercelSandbox): SandboxFactory {
 	return {
-		async createSessionEnv(): Promise<SessionEnv> {
+		async createSandbox(): Promise<Sandbox> {
 			const sandboxCwd = '/vercel/sandbox';
-			const api = new VercelSandboxApi(sandbox);
-			return createSandboxSessionEnv(api, sandboxCwd);
+			const driver = new VercelSandboxDriver(sandbox);
+			return sandboxFromDriver(driver, sandboxCwd);
 		},
 	};
 }
@@ -250,10 +250,10 @@ export function Assistant() {
 	useSandbox({
 		// Lazy, per the SandboxFactory contract: constructing this object is
 		// cheap; the expensive Vercel sandbox creation happens once, inside
-		// createSessionEnv(), at initialization — never on a re-render.
-		async createSessionEnv(options) {
+		// createSandbox(), at initialization — never on a re-render.
+		async createSandbox(options) {
 			const sandbox = await Sandbox.create({ runtime: 'node24' });
-			return vercel(sandbox).createSessionEnv(options);
+			return vercel(sandbox).createSandbox(options);
 		},
 	});
 	return 'You are a helpful assistant with a full sandbox.';

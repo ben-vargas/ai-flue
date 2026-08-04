@@ -189,25 +189,25 @@ export function Assistant({ id }: AgentProps) {
 
 See [Cloudflare Sandbox](/docs/ecosystem/sandboxes/cloudflare/) for container configuration and lifecycle guidance.
 
-## Codemode
+## Cloudflare Computer
 
-By default, Flue agents use a lightweight in-memory virtual sandbox. This is fast and sufficient for prompt-and-response agents or agents that only need tools and structured results. When an agent needs a durable workspace with structured code execution instead of a full Linux container, use Cloudflare Shell with Codemode.
+By default, Flue agents use a lightweight in-memory virtual sandbox. This is fast and sufficient for prompt-and-response agents or agents that only need tools and structured results. When an agent needs a filesystem that survives Durable Object restarts — without provisioning a container — use Cloudflare Computer.
 
-[Cloudflare Shell](https://developers.cloudflare.com/agents/api-reference/cloudflare-shell/) provides a durable `Workspace` with a model-facing `code` tool backed by [`@cloudflare/codemode`](https://developers.cloudflare.com/agents/api-reference/codemode/). The agent interacts with files through structured code operations rather than shell commands. This means `harness.sandbox.exec(...)` does not run arbitrary Linux commands through this sandbox adapter — it throws, since the Workspace has no shell.
+[`@cloudflare/computer`](https://github.com/cloudflare/computer) provides a durable, SQLite-backed `Workspace` in the agent's own Durable Object, with shell execution through a just-bash Dynamic Worker. Agents keep Flue's standard tool set (`bash`/`grep`/`glob`/`read`/`write`/`edit`); commands run in a JavaScript shell, so coreutils and text tools work while native binaries and package managers do not.
 
 Add the sandbox adapter to your project:
 
 ```bash
-pnpm exec flue add sandbox cloudflare-shell
+pnpm exec flue add sandbox cloudflare-computer
 ```
 
 Then import its helpers from your generated sandbox adapter file, not from `@flue/runtime/cloudflare`:
 
 ```ts
-import { getDefaultWorkspace, getShellSandbox } from '../sandboxes/cloudflare-shell';
+import { getComputerSandbox, getComputerWorkspace } from '../sandboxes/cloudflare-computer';
 ```
 
-Use Cloudflare Shell when a durable Workspace and structured code operations are enough. Use Cloudflare Sandbox when you need a full Linux environment with arbitrary shell access. See [Cloudflare Shell](/docs/ecosystem/sandboxes/cloudflare-shell/) for setup details.
+Use Cloudflare Computer when a durable workspace and shell-expressible work are enough. Use Cloudflare Sandbox when you need a full Linux environment with native binaries. See [Cloudflare Computer](/docs/ecosystem/sandboxes/cloudflare-computer/) for setup details.
 
 ## Extending Agents on Cloudflare
 

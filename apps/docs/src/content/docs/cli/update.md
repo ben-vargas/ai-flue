@@ -34,6 +34,6 @@ flue update <kind> <name|url> [--print]
 ```bash
 flue update channel slack --print | claude
 flue update database mysql --print | codex
-flue update sandbox @cloudflare/shell --print | opencode
+flue update sandbox @cloudflare/computer --print | opencode
 flue update channel https://developers.notion.com/reference/webhooks --print | claude
 ```

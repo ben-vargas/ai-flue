@@ -436,6 +436,7 @@ interface ResourceSnapshotRecord extends ConversationRecordEnvelope {
 	type: 'resource_snapshot';
 	baseline: boolean;
 	snapshot: ResourceSnapshot;
+	toolAddition?: { assistantMessageId: string; toolCallId: string; names: string[] };
 }
 
 export type ConversationRecord =

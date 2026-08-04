@@ -21,8 +21,8 @@ The islo blueprint creates `sandboxes/islo.ts` in your source-root without addin
 ```ts title="<source-root>/sandboxes/islo.ts (abridged)"
 // flue-blueprint: sandbox/islo@1
 import { spawn } from 'node:child_process';
-import { createSandboxSessionEnv } from '@flue/runtime';
-import type { SandboxApi, SandboxFactory, SessionEnv, FileStat } from '@flue/runtime';
+import { sandboxFromDriver } from '@flue/runtime';
+import type { SandboxDriver, SandboxFactory, Sandbox, FileStat } from '@flue/runtime';
 
 export interface IsloAdapterOptions {
   cwd?: string;
@@ -31,7 +31,7 @@ export interface IsloAdapterOptions {
 
 const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 
-class IsloSandboxApi implements SandboxApi {
+class IsloSandboxDriver implements SandboxDriver {
   constructor(
     private name: string,
     private cliPath: string,
@@ -66,10 +66,10 @@ class IsloSandboxApi implements SandboxApi {
 export function islo(name: string, options?: IsloAdapterOptions): SandboxFactory {
   const cliPath = options?.cliPath ?? 'islo';
   return {
-    async createSessionEnv(): Promise<SessionEnv> {
+    async createSandbox(): Promise<Sandbox> {
       const sandboxCwd = options?.cwd ?? '/workspace';
-      const api = new IsloSandboxApi(name, cliPath);
-      return createSandboxSessionEnv(api, sandboxCwd);
+      const driver = new IsloSandboxDriver(name, cliPath);
+      return sandboxFromDriver(driver, sandboxCwd);
     },
   };
 }

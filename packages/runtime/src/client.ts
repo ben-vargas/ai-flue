@@ -19,11 +19,11 @@ import { InMemoryConversationStreamStore } from './runtime/conversation-stream-s
 import { dispatchGlobalEvent } from './runtime/events.ts';
 import { resolveAgentDurability } from './runtime/registration.ts';
 import { agentStreamPath } from './runtime/stream-offsets.ts';
-import { createCwdSessionEnv } from './sandbox.ts';
+import { createCwdSandbox } from './sandbox.ts';
 import type {
 	RenderedResources,
-	SessionEnvRuntime,
-	SessionEnvSlot,
+	SandboxRuntime,
+	SandboxSlot,
 	SessionRerender,
 	SessionResourceRuntime,
 } from './session.ts';
@@ -38,9 +38,9 @@ import type {
 	FlueEventContext,
 	FlueEventInput,
 	FlueObservationDetail,
+	Sandbox,
 	SandboxFactory,
-	SessionEnv,
-	SessionToolFactory,
+	SandboxToolFactory,
 	ToolDefinition,
 } from './types.ts';
 
@@ -356,7 +356,7 @@ async function initializeRootHarness(
 	const [{ tools: mcpTools, unavailable: mcpUnavailable }, { env: baseEnv, toolFactory }] =
 		await Promise.all([
 			resolveMcpTools(config, definition.mcpConnections),
-			resolveSessionEnv(config.id, definition.sandbox),
+			resolveSandbox(config.id, definition.sandbox),
 		]);
 	for (const entry of mcpUnavailable) {
 		emitEvent({
@@ -369,13 +369,13 @@ async function initializeRootHarness(
 	const mcpResourceEntries = mcpTools.map((tool) => mcpToolResourceEntry(tool));
 	const env =
 		baseEnv && definition.cwd
-			? createCwdSessionEnv(baseEnv, baseEnv.resolvePath(definition.cwd))
+			? createCwdSandbox(baseEnv, baseEnv.resolvePath(definition.cwd))
 			: baseEnv;
 	// The harness's mutable environment. A conditional useSandbox() whose
 	// presence flips mid-submission swaps it at a turn boundary; every env
 	// consumer reads through this slot. `undefined` when the render declared
 	// no sandbox — there is no default environment.
-	const envSlot: SessionEnvSlot = {
+	const envSlot: SandboxSlot = {
 		env,
 		toolFactory,
 		rediscoverNeeded: false,
@@ -388,8 +388,8 @@ async function initializeRootHarness(
 	// follows the current environment immediately.
 	let promptContext = await discoverSessionContext(env, definition.skills);
 	let workspaceContext = promptContext;
-	const envRuntime: SessionEnvRuntime = {
-		resolve: (sandbox) => resolveSessionEnv(config.id, sandbox),
+	const envRuntime: SandboxRuntime = {
+		resolve: (sandbox) => resolveSandbox(config.id, sandbox),
 		swapDiscovery: async (nextEnv) => {
 			workspaceContext = await discoverSessionContext(nextEnv, definition.skills);
 		},
@@ -557,25 +557,42 @@ function isSandboxFactory(value: unknown): value is SandboxFactory {
 	return (
 		typeof value === 'object' &&
 		value !== null &&
-		'createSessionEnv' in value &&
-		typeof (value as any).createSessionEnv === 'function'
+		(typeof (value as any).createSandbox === 'function' ||
+			// @deprecated Accepts the legacy method name; remove together with
+			// SandboxFactory.createSessionEnv.
+			typeof (value as any).createSessionEnv === 'function')
 	);
 }
 
+// @deprecated Part of the legacy createSessionEnv fallback below; remove
+// together with SandboxFactory.createSessionEnv.
+let warnedLegacyCreateSessionEnv = false;
+
 /**
- * Resolve the sandbox option to its session environment and optional tool
- * factory. No `useSandbox()` means no environment: the built-in shell and
- * filesystem tools aren't added, and sandbox-backed operations throw.
+ * Resolve the sandbox option to its live sandbox and optional tool factory.
+ * No `useSandbox()` means no environment: the built-in shell and filesystem
+ * tools aren't added, and sandbox-backed operations throw.
  */
-async function resolveSessionEnv(
+async function resolveSandbox(
 	id: string,
 	sandbox: AgentRuntimeConfig['sandbox'],
-): Promise<{ env: SessionEnv | undefined; toolFactory?: SessionToolFactory }> {
+): Promise<{ env: Sandbox | undefined; toolFactory?: SandboxToolFactory }> {
 	if (sandbox === undefined) {
 		return { env: undefined };
 	}
 	if (isSandboxFactory(sandbox)) {
-		const env = await sandbox.createSessionEnv({ id });
+		// Factories predating the createSandbox rename — compiled adapter
+		// packages, un-regenerated blueprint files — still work through the
+		// legacy member. @deprecated: the `?? createSessionEnv` fallback and
+		// the warning go away together with SandboxFactory.createSessionEnv.
+		const create = sandbox.createSandbox ?? sandbox.createSessionEnv;
+		if (!sandbox.createSandbox && !warnedLegacyCreateSessionEnv) {
+			warnedLegacyCreateSessionEnv = true;
+			console.warn(
+				'[flue] SandboxFactory.createSessionEnv is deprecated; rename the method to createSandbox.',
+			);
+		}
+		const env = await create!.call(sandbox, { id });
 		return { env, toolFactory: sandbox.tools };
 	}
 	throw new Error('[flue] Invalid sandbox option composed by the agent function.');

@@ -25,7 +25,7 @@ export function abortErrorFor(signal: AbortSignal): Error {
  * Translate a millisecond deadline into an `AbortSignal` and compose it with
  * the caller's signal. Single implementation of the timeout-to-signal
  * cancellation composition shared by the LLM bash tool and the
- * signal-translating `SessionEnv` adapters (bash factory, local).
+ * signal-translating `Sandbox` adapters (bash factory, local).
  *
  * Returns both signals: callers that distinguish a recoverable timeout from
  * a host abort (the bash tool's 124-shaped result) need `timeoutSignal` on

@@ -13,9 +13,22 @@
  * *observe* subscriber closes them, because the rich finish data (usage,
  * response model, finish reason) arrives in terminal events that fire after
  * the intercepted promise settles. `startActiveSpan` spans are caller-owned
- * (explicit, idempotent `span.end()`), which is what makes that split legal;
- * a span that never sees its terminal event is force-closed by the platform
- * at invocation end.
+ * (explicit, idempotent `span.end()`), which is what makes that split legal —
+ * and what makes closure a hard obligation: the platform only stores spans
+ * explicitly ended inside a live invocation. There is no invocation-end
+ * flush, and this adapter's registries pin the span objects, so an entry
+ * whose terminal event never lands would otherwise be lost while its
+ * already-ended children survive — the one failure that breaks whole-trace
+ * assembly downstream. Closure is therefore backstopped at two scopes: an
+ * operation's terminal event sweeps children whose own terminal event never
+ * fired, and `submission_settled` — emitted while an invocation is still
+ * live, from the attempt fiber's settle path or a supervisor pass —
+ * force-closes anything the submission leaves behind (operations orphaned by
+ * deadline force-settlement or recovery), stamped `flue.span.forced_close`
+ * so lost primary closes stay measurable. A fiber that outlives its
+ * invocation entirely (isolate replacement, platform teardown mid-run) is
+ * beyond in-process repair: spans still open at that boundary cannot be
+ * stored, and trace consumers must tolerate the orphaned children.
  *
  * Platform traces carry conversation content by default — input/output
  * messages, system instructions, tool definitions/arguments/results — via the
@@ -97,6 +110,12 @@ interface PendingSpan {
 	 * the child task's id, so the parent operation's key cannot be derived.
 	 */
 	owner?: string;
+	/**
+	 * Owning submission, for the settlement sweep. Present on every stash of
+	 * submission-scoped work — including task stashes, whose operation owner
+	 * cannot be derived — so settlement drops entries no interception claimed.
+	 */
+	submissionId?: string;
 }
 
 interface TrackedSpan {
@@ -106,6 +125,8 @@ interface TrackedSpan {
 	ledger: ContentLedger;
 	/** Owning operation, for the operation-end sweep of leaked children. */
 	operationKey?: string;
+	/** Owning submission, for the settlement sweep of orphaned spans. */
+	submissionId?: string;
 }
 
 const noopSpan: PlatformSpan = {
@@ -156,6 +177,7 @@ export function createCloudflareTracing(
 				ended: false,
 				ledger: createContentLedger(),
 				operationKey: owner,
+				submissionId: span.submissionId,
 			};
 			active.set(key, tracked);
 			// Attribute (and content-projection) work only on sampled invocations.
@@ -196,7 +218,13 @@ export function createCloudflareTracing(
 		tracked.ended = true;
 		try {
 			tracked.span.end();
-		} catch {}
+		} catch (error) {
+			// A failed end() means the platform will never store this span (the
+			// registries pin the object, so no destruction backstop applies) —
+			// report it; tracing must never alter execution, but a silent loss
+			// here is undiagnosable downstream.
+			console.error('[flue:tracing] Failed to end span:', error);
+		}
 		active.delete(key);
 	}
 
@@ -251,6 +279,32 @@ export function createCloudflareTracing(
 			recordRecoveryEvent(event);
 			return;
 		}
+		if (event.type === 'submission_settled') {
+			// The settlement backstop: by settle time every span the submission
+			// produced has been closed by its terminal event, so anything still
+			// open or stashed belongs to work whose terminal event will never
+			// arrive — an operation orphaned by deadline force-settlement or
+			// recovery. Settlement is emitted while an invocation is live (the
+			// attempt fiber's settle path, or a supervisor pass), which is the
+			// last moment the platform can still store the span; without this
+			// close the run's root would vanish while its ended children
+			// survive, breaking whole-trace assembly downstream.
+			let swept = 0;
+			for (const [key, tracked] of active) {
+				if (tracked.submissionId !== event.submissionId) continue;
+				settleSpan(key, tracked, { [FLUE_ATTR.forcedClose]: 'settlement' });
+				swept++;
+			}
+			for (const [key, stash] of pending) {
+				if (stash.submissionId === event.submissionId) pending.delete(key);
+			}
+			if (swept > 0) {
+				console.warn(
+					`[flue:tracing] Submission ${event.submissionId} settled with ${swept} span(s) still open — force-closed.`,
+				);
+			}
+			return;
+		}
 		if (event.type === 'operation_start') {
 			if (event.operationKind !== 'prompt' && event.operationKind !== 'skill') return;
 			// A prompt inside a task context is the task's own model loop; the
@@ -258,6 +312,7 @@ export function createCloudflareTracing(
 			if (event.taskId && event.operationKind === 'prompt') return;
 			pending.set(operationKey(event), {
 				name: spanName('invoke_agent', event.agentName),
+				submissionId: event.submissionId,
 				attributes: () => ({
 					[ATTR.operationName]: 'invoke_agent',
 					[ATTR.agentName]: event.agentName,
@@ -272,6 +327,7 @@ export function createCloudflareTracing(
 		if (event.type === 'task_start') {
 			pending.set(taskKey(event), {
 				name: spanName('invoke_agent', event.agent),
+				submissionId: event.submissionId,
 				attributes: (ledger) => ({
 					[ATTR.operationName]: 'invoke_agent',
 					[ATTR.agentName]: event.agent,
@@ -295,6 +351,7 @@ export function createCloudflareTracing(
 			pending.set(turnKey(event), {
 				name: spanName('chat', request.requestedModel),
 				owner: ownerKey(event),
+				submissionId: event.submissionId,
 				attributes: (ledger) => ({
 					[ATTR.operationName]: 'chat',
 					[ATTR.providerName]: request.providerName,
@@ -362,6 +419,7 @@ export function createCloudflareTracing(
 				pending.set(toolKey(event), {
 					name: 'flue.operation shell',
 					owner: ownerKey(event),
+					submissionId: event.submissionId,
 					attributes: () => ({
 						[FLUE_ATTR.toolOrigin]: event.origin,
 					}),
@@ -371,6 +429,7 @@ export function createCloudflareTracing(
 			pending.set(toolKey(event), {
 				name: spanName('execute_tool', event.toolName),
 				owner: ownerKey(event),
+				submissionId: event.submissionId,
 				attributes: (ledger) => ({
 					[ATTR.operationName]: 'execute_tool',
 					[ATTR.toolName]: event.toolName,

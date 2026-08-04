@@ -1,12 +1,13 @@
 'use agent';
 /**
- * Demonstrates hydrating a cf-shell `Workspace` from a git repository via
- * `createGit`, then letting the model explore it with the sandbox's `code`
- * tool. The clone hydration is one-time setup for the environment, not
- * per-render work, so it lives inside a self-authored `SandboxFactory`
- * passed to `useSandbox` — lazy, per the `SandboxFactory` contract:
- * constructing the factory object is cheap; the expensive clone happens
- * once, inside `createSessionEnv()`, at initialization.
+ * Demonstrates hydrating a cloudflare-computer `Workspace` from a git
+ * repository via the workspace's built-in git client, then letting the model
+ * explore it with the standard shell and file tools. The clone hydration is
+ * one-time setup for the environment, not per-render work, so it lives
+ * inside a self-authored `SandboxFactory` passed to `useSandbox` — lazy, per
+ * the `SandboxFactory` contract: constructing the factory object is cheap;
+ * the expensive git clone happens once, inside `createSandbox()`, at
+ * initialization.
  *
  *   curl -X POST /agents/skills-from-git/<id> \
  *     -H 'Content-Type: application/json' \
@@ -15,10 +16,10 @@
  * then read the reply from the conversation stream: GET /agents/skills-from-git/<id>
  */
 import { env } from 'cloudflare:workers';
-import { WorkspaceFileSystem } from '@cloudflare/shell';
-import { createGit } from '@cloudflare/shell/git';
 import { useModel, useSandbox } from '@flue/runtime';
-import { getDefaultWorkspace, getShellSandbox } from '../sandboxes/cloudflare-shell';
+import { getComputerSandbox, getComputerWorkspace } from '../sandboxes/cloudflare-computer';
+
+export { workspaceHost as cloudflare } from '../sandboxes/cloudflare-computer';
 
 interface Env {
 	LOADER: WorkerLoader;
@@ -26,36 +27,36 @@ interface Env {
 
 const HYDRATION_SENTINEL = '/.hydrated';
 const TARGET_REPO = 'https://github.com/FredKSchott/vinext-starter';
-const CLONE_DIR = '/repo';
+const CLONE_DIR = '/workspace/repo';
 
 export function SkillsFromGit() {
 	useModel('cloudflare/@cf/moonshotai/kimi-k2.6');
 	// Lazy, per the SandboxFactory contract: constructing this object (and the
-	// inner `getShellSandbox()` factory it wraps) is cheap; the expensive git
-	// clone happens once, inside createSessionEnv(), at initialization — never
-	// on a re-render. `tools` is forwarded from the inner factory so the
-	// model still gets the shell's `code` tool instead of the framework
-	// default (the cf-shell env's `exec()` always throws).
+	// inner `getComputerSandbox()` factory it wraps) is cheap; the expensive
+	// git clone happens once, inside createSandbox(), at initialization —
+	// never on a re-render.
 	const { LOADER } = env as unknown as Env;
-	const workspace = getDefaultWorkspace();
-	const shell = getShellSandbox({ workspace, loader: LOADER });
+	const workspace = getComputerWorkspace({ loader: LOADER });
+	const computer = getComputerSandbox({ loader: LOADER });
 	useSandbox(
 		{
-			tools: shell.tools,
-			async createSessionEnv(options) {
-				if (!(await workspace.exists(HYDRATION_SENTINEL))) {
-					const git = createGit(new WorkspaceFileSystem(workspace));
-					await git.clone({ url: TARGET_REPO, dir: CLONE_DIR, singleBranch: true, depth: 1 });
-					await workspace.writeFile(HYDRATION_SENTINEL, new Date().toISOString());
+			async createSandbox(options) {
+				const hydrated = await workspace.fs.stat(HYDRATION_SENTINEL).then(
+					() => true,
+					() => false,
+				);
+				if (!hydrated) {
+					await workspace.git.clone({ url: TARGET_REPO, dir: CLONE_DIR });
+					await workspace.fs.writeFile(HYDRATION_SENTINEL, new Date().toISOString());
 				}
-				return shell.createSessionEnv(options);
+				return computer.createSandbox(options);
 			},
 		},
 		{ cwd: CLONE_DIR },
 	);
 	return (
 		`You operate inside a clone of ${TARGET_REPO} at ${CLONE_DIR}. ` +
-		'When asked about the repository, use the code tool to actually inspect the files ' +
+		'When asked about the repository, use the shell and file tools to actually inspect the files ' +
 		'before answering — never answer from assumption.'
 	);
 }

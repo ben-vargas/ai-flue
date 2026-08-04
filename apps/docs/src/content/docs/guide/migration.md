@@ -141,7 +141,7 @@ Field-by-field:
 - `description` (config) — deleted, no replacement.
 - initializer `ctx.id` — now `AgentProps`: the root agent function receives `{ id }`.
 - initializer `ctx.env` — now platform imports (`import { env } from 'cloudflare:workers'`) or `process.env`; the initializer context is gone.
-- `async` initializer — the agent function **must be synchronous**; async work moves into tools, lifecycle hooks (`useAgentStart`/`useAgentFinish`), or resource factories such as the sandbox factory's `createSessionEnv()`.
+- `async` initializer — the agent function **must be synchronous**; async work moves into tools, lifecycle hooks (`useAgentStart`/`useAgentFinish`), or resource factories such as the sandbox factory's `createSandbox()`.
 
 Rules that have no beta equivalent, because renders repeat:
 
@@ -162,7 +162,7 @@ The tool contract keeps `defineTool({ name, description, input, output, run })`,
 
 [MCP servers](/docs/guide/mcp/) are new in this release — `useMcpConnection(...)` mounts a remote server's tools; nothing migrates.
 
-`harness.fs` is also gone: the harness exposes [`harness.sandbox`](/docs/reference/agent-api/#harnesssandbox), a `SessionEnv` carrying `exec`, the file verbs, `cwd`, and `resolvePath`. Adapters may not support every verb and may expose native accessors (for example Cloudflare Shell's `shellWorkspace(harness.sandbox)`).
+`harness.fs` is also gone: the harness exposes [`harness.sandbox`](/docs/reference/agent-api/#harnesssandbox), a `Sandbox` carrying `exec`, the file verbs, `cwd`, and `resolvePath`. Adapters may not support every verb and may expose native accessors (for example Cloudflare Computer's `computerWorkspace(harness.sandbox)`).
 
 ## Skills and markdown imports
 
@@ -178,7 +178,7 @@ Manual invocation (`session.skill(...)`) is gone with the session surface; steer
 
 - **There is no implicit environment.** The beta gave every agent an in-memory virtual sandbox by default; now an agent without `useSandbox()` has no filesystem and no `read`/`write`/`edit`/`bash`/`grep`/`glob` tools, and `harness.sandbox` throws. Agents that relied on the implicit workspace attach one explicitly — add `just-bash` to your dependencies and declare `useSandbox(bash(() => new Bash({ fs: new InMemoryFs() })))`. Agents that never touched files need nothing.
 - `sandbox:` and `cwd:` config become `useSandbox(factory, { cwd })`, as above.
-- Create remote providers lazily inside the factory's `createSessionEnv(options)`, not at module top level — `options.id` carries the conversation id there, which is also how durable per-conversation workspaces work. The beta's eager `await Sandbox.create()` at module scope must move inside.
+- Create remote providers lazily inside the factory's `createSandbox(options)`, not at module top level — `options.id` carries the conversation id there, which is also how durable per-conversation workspaces work. The beta's eager `await Sandbox.create()` at module scope must move inside.
 - The standard tool set is composable: a `SandboxFactory` may pass `tools: [createReadTool(), createBashTool(), ...]` to swap or drop the sandbox-backed set, and `bash(factory)` wraps a just-bash instance into the virtual sandbox.
 
 See [Sandboxes](/docs/guide/sandboxes/).

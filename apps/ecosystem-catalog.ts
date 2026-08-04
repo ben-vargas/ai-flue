@@ -241,17 +241,17 @@ export const deploy: EcosystemItem[] = [
 export const sandboxes: EcosystemItem[] = [
 	{ name: 'boxd', href: '/docs/ecosystem/sandboxes/boxd/', background: '#2563eb' },
 	{
+		name: 'Cloudflare Computer',
+		href: '/docs/ecosystem/sandboxes/cloudflare-computer/',
+		icon: 'https://svgl.app/library/cloudflare.svg',
+		background: '#ffffff',
+		keywords: '@cloudflare/computer cloudflare computer workspace shell',
+	},
+	{
 		name: 'Cloudflare Sandbox',
 		href: '/docs/ecosystem/sandboxes/cloudflare/',
 		icon: 'https://svgl.app/library/cloudflare.svg',
 		background: '#ffffff',
-	},
-	{
-		name: 'Cloudflare Shell',
-		href: '/docs/ecosystem/sandboxes/cloudflare-shell/',
-		icon: 'https://svgl.app/library/cloudflare.svg',
-		background: '#ffffff',
-		keywords: '@cloudflare/shell cloudflare shell',
 	},
 	{
 		name: 'Daytona',

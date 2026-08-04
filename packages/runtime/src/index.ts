@@ -98,9 +98,13 @@ export type { AgentIdentityBinding } from './runtime/registration.ts';
 export { __flueBindAgentModule } from './runtime/registration.ts';
 export {
 	bash,
+	// Deprecated alias for sandboxFromDriver.
 	createSandboxSessionEnv,
 	type OrphanedExecSettlement,
+	// Deprecated alias for SandboxDriver.
 	type SandboxApi,
+	type SandboxDriver,
+	sandboxFromDriver,
 } from './sandbox.ts';
 export { defineSkill } from './skill-definition.ts';
 export { defineTool } from './tool.ts';
@@ -150,7 +154,12 @@ export type {
 	PromptResponse,
 	PromptResultResponse,
 	PromptUsage,
+	Sandbox,
 	SandboxFactory,
+	SandboxToolFactory,
+	SandboxToolFactoryOptions,
+	// Deprecated aliases for Sandbox, SandboxToolFactory, and
+	// SandboxToolFactoryOptions.
 	SessionEnv,
 	SessionToolFactory,
 	SessionToolFactoryOptions,
@@ -176,7 +185,7 @@ export type {
 // Note: the `Fetchable` interface for user-authored `app.ts` entries lives at
 // `@flue/runtime/routing`, not on the root barrel.
 //
-// Note: createFlueContext, bashFactoryToSessionEnv, and the
+// Note: createFlueContext, bashFactoryToSandbox, and the
 // FlueContextConfig/FlueContextInternal types are intentionally NOT re-exported
 // here. They are internal runtime helpers consumed exclusively by the generated
 // server entry point — see `@flue/runtime/internal`. User agent code should not

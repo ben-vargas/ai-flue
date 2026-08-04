@@ -10,6 +10,7 @@ import type {
 	AgentMessage,
 	AgentTool,
 	AgentToolResult,
+	PrepareNextTurnContext,
 	StreamFn,
 } from '@earendil-works/pi-agent-core';
 import { Agent } from '@earendil-works/pi-agent-core';
@@ -165,7 +166,7 @@ import {
 	generateTurnId,
 } from './runtime/ids.ts';
 import { getRuntimeModels, providerTelemetryName } from './runtime/providers.ts';
-import { createCwdSessionEnv } from './sandbox.ts';
+import { createCwdSandbox } from './sandbox.ts';
 import { valibotToJsonSchema } from './schema.ts';
 import { execShellWithEvents, getErrorMessage } from './shell.ts';
 import { isSkillDefinition, packageSkillDefinition } from './skill-definition.ts';
@@ -205,9 +206,9 @@ import type {
 	PromptUsage,
 	RegisteredSkill,
 	ResolvedSubagent,
+	Sandbox,
 	SandboxFactory,
-	SessionEnv,
-	SessionToolFactory,
+	SandboxToolFactory,
 	ShellOptions,
 	ShellResult,
 	Skill,
@@ -344,7 +345,7 @@ export interface CreateTaskSessionOptions {
 	parentConversationId: string;
 	taskId: string;
 	/** The parent's live environment, or `undefined` when it has no sandbox. */
-	parentEnv: SessionEnv | undefined;
+	parentEnv: Sandbox | undefined;
 	cwd?: string;
 	agent?: ResolvedSubagent;
 	depth: number;
@@ -376,7 +377,7 @@ interface CreateActionHarnessOptions {
 	executionContext: FlueExecutionContext;
 	eventCallback?: FlueEventInputCallback;
 	config: AgentConfig;
-	env: SessionEnv | undefined;
+	env: Sandbox | undefined;
 	tools: ToolDefinition[];
 	retainSession(
 		session: string,
@@ -453,9 +454,9 @@ interface SessionInitOptions {
 	 * later-opened sessions, new task children). Task sessions get a fresh
 	 * detached slot instead — their environment is captured at creation.
 	 */
-	envSlot: SessionEnvSlot;
+	envSlot: SandboxSlot;
 	/** Environment-swap wiring (function agents only); same routing as hookState. */
-	envRuntime?: SessionEnvRuntime;
+	envRuntime?: SandboxRuntime;
 }
 
 /** One re-render's session-facing output: what the next turn runs with. */
@@ -474,14 +475,14 @@ export type SessionRerender = () => {
 };
 
 /**
- * The mutable environment of one root harness: the live `SessionEnv`, the
+ * The mutable environment of one root harness: the live `Sandbox`, the
  * sandbox's tool factory, and the swap bookkeeping. One slot per harness,
  * shared by reference with every session the harness opens.
  */
-export interface SessionEnvSlot {
+export interface SandboxSlot {
 	/** The live environment, or `undefined` when no sandbox is declared. */
-	env: SessionEnv | undefined;
-	toolFactory: SessionToolFactory | undefined;
+	env: Sandbox | undefined;
+	toolFactory: SandboxToolFactory | undefined;
 	/**
 	 * True when the environment swapped after the prompt-composition context
 	 * last discovered the workspace. The prompt stays frozen mid-submission
@@ -497,11 +498,11 @@ export interface SessionEnvSlot {
  * `recompose`/`mergeSkills` — so the session can swap environments without
  * owning any of that.
  */
-export interface SessionEnvRuntime {
+export interface SandboxRuntime {
 	/** Resolve a render-declared sandbox — or no environment when undefined. */
 	resolve: (
 		sandbox: SandboxFactory | undefined,
-	) => Promise<{ env: SessionEnv | undefined; toolFactory?: SessionToolFactory }>;
+	) => Promise<{ env: Sandbox | undefined; toolFactory?: SandboxToolFactory }>;
 	/**
 	 * Re-run workspace discovery against the just-swapped env for the LIVE
 	 * sets only (skill merge). The prompt-composition context is untouched —
@@ -509,14 +510,14 @@ export interface SessionEnvRuntime {
 	 * compaction rebaseline, so the transcript stays coherent with the
 	 * prompt the earlier turns actually ran under.
 	 */
-	swapDiscovery: (env: SessionEnv | undefined) => Promise<void>;
+	swapDiscovery: (env: Sandbox | undefined) => Promise<void>;
 	/**
 	 * Full re-discovery against the current env: rebuilds the
 	 * prompt-composition context too. Called at compaction rebaseline when
 	 * `rediscoverNeeded` is set — the post-compaction prompt must describe
 	 * the environment the agent is actually in.
 	 */
-	rediscover: (env: SessionEnv | undefined) => Promise<void>;
+	rediscover: (env: Sandbox | undefined) => Promise<void>;
 }
 
 /**
@@ -672,13 +673,13 @@ export class Session implements FlueSession, AgentSubmissionSession {
 	 * a turn-boundary swap is visible to every consumer at its next call —
 	 * tool-group rebuilds, `session.shell()`, task creation, the fs facade.
 	 */
-	private envSlot: SessionEnvSlot;
+	private envSlot: SandboxSlot;
 	/**
 	 * The live environment when a sandbox is attached, else `undefined`.
 	 * Consumers that degrade gracefully (tool assembly, narration, discovery)
 	 * read this one.
 	 */
-	private get attachedEnv(): SessionEnv | undefined {
+	private get attachedEnv(): Sandbox | undefined {
 		return this.envSlot.env;
 	}
 
@@ -687,7 +688,7 @@ export class Session implements FlueSession, AgentSubmissionSession {
 	 * `fs`, workspace-skill reads) throw here when the agent declared no
 	 * sandbox — there is no default environment.
 	 */
-	private get env(): SessionEnv {
+	private get env(): Sandbox {
 		const env = this.envSlot.env;
 		if (!env) {
 			throw new Error(
@@ -696,10 +697,10 @@ export class Session implements FlueSession, AgentSubmissionSession {
 		}
 		return env;
 	}
-	private get toolFactory(): SessionToolFactory | undefined {
+	private get toolFactory(): SandboxToolFactory | undefined {
 		return this.envSlot.toolFactory;
 	}
-	private envRuntime: SessionEnvRuntime | undefined;
+	private envRuntime: SandboxRuntime | undefined;
 	private compactionAbortController: AbortController | undefined;
 	private modelRetryAbortController: AbortController | undefined;
 	private eventCallback: FlueEventInputCallback | undefined;
@@ -745,6 +746,12 @@ export class Session implements FlueSession, AgentSubmissionSession {
 		  }
 		| undefined;
 	private canonicalToolRequestMessageId: string | undefined;
+	/**
+	 * The just-committed tool batch, stashed by the `turn_end` handler for the
+	 * `prepareNextTurn` rerender that runs immediately after it — tool
+	 * additions that rerender unlocks anchor to this batch's final result.
+	 */
+	private lastCommittedToolBatch: { assistantMessageId: string; toolCallId: string } | undefined;
 	private pendingCanonicalWrites = new Set<Promise<void>>();
 	private pendingToolPublications = new Map<string, () => void>();
 	private executionIdentity: FlueExecutionContext;
@@ -893,7 +900,9 @@ export class Session implements FlueSession, AgentSubmissionSession {
 	 * wrapper state so later runs snapshot the fresh values. An invariance
 	 * violation (conditional use()/hook) throws here and fails the run.
 	 */
-	private async prepareRerenderTurn(): Promise<AgentLoopTurnUpdate | undefined> {
+	private async prepareRerenderTurn(
+		turn?: PrepareNextTurnContext,
+	): Promise<AgentLoopTurnUpdate | undefined> {
 		if (!this.rerender) return undefined;
 		let next = this.rerender();
 		// Environment swap: a conditional useSandbox() whose presence flipped
@@ -932,8 +941,20 @@ export class Session implements FlueSession, AgentSubmissionSession {
 		// The steered signal injects before the next provider request (the
 		// loop polls steering after this returns). A swap turn narrates ONE
 		// unconditional full environment snapshot instead of deltas.
+		// Tool additions this rerender unlocked anchor to the just-committed
+		// batch's final result, IF that batch is the one the loop handed us —
+		// the stash comparison rejects out-of-band rerenders (joins), whose
+		// additions have no anchoring tool call.
+		const anchorResult = turn?.toolResults.at(-1);
+		const anchor =
+			anchorResult && this.lastCommittedToolBatch?.toolCallId === anchorResult.toolCallId
+				? {
+						assistantMessageId: this.lastCommittedToolBatch.assistantMessageId,
+						toolResult: anchorResult,
+					}
+				: undefined;
 		if (swapped) await this.narrateEnvironmentSnapshot(next.resources.snapshot);
-		else await this.narrateResourceDelta();
+		else await this.narrateResourceDelta(anchor);
 		return {
 			context: {
 				systemPrompt: next.systemPrompt,
@@ -960,7 +981,7 @@ export class Session implements FlueSession, AgentSubmissionSession {
 		const { env: baseEnv, toolFactory } = await this.envRuntime.resolve(next.sandbox);
 		const env =
 			baseEnv && next.cwd !== undefined
-				? createCwdSessionEnv(baseEnv, baseEnv.resolvePath(next.cwd))
+				? createCwdSandbox(baseEnv, baseEnv.resolvePath(next.cwd))
 				: baseEnv;
 		this.envSlot.env = env;
 		this.envSlot.toolFactory = toolFactory;
@@ -1048,7 +1069,10 @@ export class Session implements FlueSession, AgentSubmissionSession {
 	 * silent baseline — it IS what the frozen presentation surfaces were
 	 * composed from.
 	 */
-	private async narrateResourceDelta(): Promise<void> {
+	private async narrateResourceDelta(anchor?: {
+		assistantMessageId: string;
+		toolResult: ToolResultMessage;
+	}): Promise<void> {
 		const rendered = this.lastRenderedResources;
 		if (!this.resourceRuntime || !rendered || !this.activeSubmissionId) return;
 		const current = rendered.snapshot;
@@ -1081,8 +1105,29 @@ export class Session implements FlueSession, AgentSubmissionSession {
 				{ advance: false },
 			);
 		}
+		// Additions unlocked by the anchoring tool batch ride its final result
+		// as `addedToolNames` — set live here, made durable on the snapshot
+		// record so replay rebuilds the same message. Providers with deferred
+		// tool loading use the marker to keep the added definitions out of the
+		// cached prompt prefix; removals and updates have no cache-safe
+		// channel and reach the model through the rewritten tools array.
+		const addedToolNames = anchor
+			? (deltas.find((delta) => delta.kind === 'tool')?.added.map((entry) => entry.name) ?? [])
+			: [];
+		const toolAddition =
+			anchor && addedToolNames.length > 0
+				? {
+						assistantMessageId: anchor.assistantMessageId,
+						toolCallId: anchor.toolResult.toolCallId,
+						names: addedToolNames,
+					}
+				: undefined;
+		if (toolAddition && anchor) anchor.toolResult.addedToolNames = toolAddition.names;
 		const { records } = this.drainSignalAppendRecords(parentId);
-		await this.appendCanonical([...records, this.resourceSnapshotRecord(current, false)]);
+		await this.appendCanonical([
+			...records,
+			this.resourceSnapshotRecord(current, false, toolAddition),
+		]);
 		this.lastNarratedResources = current;
 	}
 
@@ -1125,12 +1170,14 @@ export class Session implements FlueSession, AgentSubmissionSession {
 	private resourceSnapshotRecord(
 		snapshot: ResourceSnapshot,
 		baseline: boolean,
+		toolAddition?: { assistantMessageId: string; toolCallId: string; names: string[] },
 	): ConversationRecord {
 		return {
 			...this.canonicalEnvelope('resource_snapshot'),
 			type: 'resource_snapshot',
 			baseline,
 			snapshot,
+			...(toolAddition ? { toolAddition } : {}),
 		};
 	}
 
@@ -2184,7 +2231,9 @@ export class Session implements FlueSession, AgentSubmissionSession {
 			// Render-per-turn (function agents): runs after the turn_end handler
 			// has committed the tool batch (state writes durable), so the next
 			// provider request gets fresh tool closures and a recomposed prompt.
-			...(options.rerender ? { prepareNextTurn: () => this.prepareRerenderTurn() } : {}),
+			...(options.rerender
+				? { prepareNextTurnWithContext: (turn) => this.prepareRerenderTurn(turn) }
+				: {}),
 		});
 
 		this.eventCallback = options.onAgentEvent;
@@ -2599,12 +2648,17 @@ export class Session implements FlueSession, AgentSubmissionSession {
 							this.pendingToolPublications.get(toolResult.toolCallId)?.();
 							this.pendingToolPublications.delete(toolResult.toolCallId);
 						}
+						this.lastCommittedToolBatch = {
+							assistantMessageId,
+							toolCallId: finalToolResult.toolCallId,
+						};
 						this.canonicalToolRequestMessageId = undefined;
 					} else {
 						// No tool batch this turn: persist any stray buffered writes on
 						// their own so nothing sits in memory past the turn boundary.
 						const stateWrites = this.drainHookStateRecords();
 						if (stateWrites.length > 0) await this.appendCanonical(stateWrites);
+						this.lastCommittedToolBatch = undefined;
 					}
 					// Turn boundary: absorb queued dispatch deliveries into this live
 					// response (dispatch-while-busy). The turn batch above committed,
@@ -3958,7 +4012,7 @@ export class Session implements FlueSession, AgentSubmissionSession {
 
 	/** Build built-in tools from the sandbox adapter or the framework defaults. */
 	private createBuiltinToolGroups(
-		env: SessionEnv | undefined,
+		env: Sandbox | undefined,
 		model?: string,
 		thinkingLevel?: ThinkingLevel,
 		activePackagedSkills?: Record<string, PackagedSkillDirectory>,

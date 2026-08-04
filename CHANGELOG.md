@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.0.2 - 2026-08-04
+
+### Fixes & Other Changes
+
+- **Conditional tool additions are now cache-safe on models with deferred tool loading.** A tool mounted by the rerender that follows a settled tool batch is anchored to that batch's final tool result, so current first-party Anthropic models (Claude 4.5 and later, excluding Haiku) keep the added definition out of the cached prompt prefix instead of invalidating it; other providers ignore the anchor and their requests are unchanged. The anchor persists with the run and is restored on rehydration, so a rehydrated context matches the live loop exactly (the internal reduced-state format counter bumps to 2). The [Tools guide](https://flueframework.com/docs/guide/tools/) now states the actual cache contract: tool-set changes rewrite the native tools array and invalidate the provider prompt cache, except additions unlocked by a completed tool call on the models above (#545).
+- **The `cloudflare-shell` blueprint is replaced by `cloudflare-computer`**, built on `@cloudflare/computer` — the successor to `@cloudflare/shell` that hosts a durable SQLite-backed workspace in the agent's own Durable Object with a `just-bash` shell backend, and can escalate to a container backend where a JavaScript shell isn't enough. The adapter provides a real `exec()` and keeps the framework's standard tool set instead of substituting a code tool. `flue add cloudflare-shell` and the old docs URLs redirect to the successor.
+- Cloudflare trace spans whose terminal event never arrives (their operation orphaned by deadline force-settlement or recovery) are force-closed when the submission settles, so the run's `invoke_agent` root span no longer vanishes from the trace. Forced closes carry a `flue.span.forced_close` attribute, and span-close failures are reported instead of swallowed.
+- **The sandbox types are renamed to match their roles; the old names remain as deprecated aliases.** `SessionEnv` → `Sandbox` (the live environment handle behind `harness.sandbox` and the standard tools), `SandboxApi` → `SandboxDriver` (the per-provider interface a sandbox adapter implements), `createSandboxSessionEnv()` → `sandboxFromDriver()`, `SessionToolFactory`/`SessionToolFactoryOptions` → `SandboxToolFactory`/`SandboxToolFactoryOptions`, and `SandboxFactory.createSessionEnv()` → `createSandbox()`. No action is required: the old type names and `createSandboxSessionEnv` are exported as deprecated aliases, and a factory implementing only the legacy `createSessionEnv()` method still initializes (with a one-time deprecation warning). Blueprints, examples, and docs emit the new names.
+- **New docs reference page: [Agent Behavior](https://flueframework.com/docs/reference/agent-behavior/)** — the out-of-the-box runtime contract in one place: the built-in tools' parameters and truncation limits, environment defaults, message admission and turn-boundary joining, context composition and compaction, and the enforced limits.
+
 ## 2.0.1 - 2026-08-01
 
 ### Fixes & Other Changes

@@ -20,8 +20,8 @@ The blueprint installs `ssh2` and its TypeScript declarations, then creates `san
 
 ```ts title="<source-root>/sandboxes/exedev.ts (abridged)"
 // flue-blueprint: sandbox/exedev@1
-import { createSandboxSessionEnv } from '@flue/runtime';
-import type { FileStat, SandboxApi, SandboxFactory, SessionEnv } from '@flue/runtime';
+import { sandboxFromDriver } from '@flue/runtime';
+import type { FileStat, SandboxDriver, SandboxFactory, Sandbox } from '@flue/runtime';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -31,7 +31,7 @@ import type { ConnectConfig, SFTPWrapper } from 'ssh2';
 /* ... generated VM and option interfaces, error type, and HTTPS lifecycle helpers ... */
 /* ... generated SSH authentication, retry, connection, and stream interfaces ... */
 
-export class ExeDevSandboxApi implements SandboxApi {
+export class ExeDevSandboxDriver implements SandboxDriver {
   /* ... generated SFTP connection and file operations ... */
 
   async exec(
@@ -52,20 +52,20 @@ export class ExeDevSandboxApi implements SandboxApi {
 export function exedev(vm: ExeDevVm | string, options?: ExeDevAdapterOptions): SandboxFactory {
   const resolvedVm = typeof vm === 'string' ? { host: vm } : vm;
   return {
-    async createSessionEnv(): Promise<SessionEnv> {
+    async createSandbox(): Promise<Sandbox> {
       const { ssh } = await sshConnect(resolvedVm, options ?? {});
-      const api = new ExeDevSandboxApi(ssh);
+      const driver = new ExeDevSandboxDriver(ssh);
 
       let sandboxCwd = '/home/user';
       try {
-        const { stdout } = await api.exec('echo $HOME');
+        const { stdout } = await driver.exec('echo $HOME');
         const detected = stdout.trim();
         if (detected) sandboxCwd = detected;
       } catch {
         /* ... retain /home/user when home-directory detection fails ... */
       }
 
-      return createSandboxSessionEnv(api, sandboxCwd);
+      return sandboxFromDriver(driver, sandboxCwd);
     },
   };
 }

@@ -1,5 +1,5 @@
 /**
- * Pure-Node `SessionEnv` backed by the host filesystem and `child_process`.
+ * Pure-Node `Sandbox` backed by the host filesystem and `child_process`.
  *
  * Internal implementation behind the `local()` sandbox factory (see
  * `./local.ts`). Not exported from `@flue/runtime/node` — user code reaches
@@ -12,7 +12,7 @@ import * as path from 'node:path';
 
 import { abortErrorFor, composeTimeoutSignal } from '../abort.ts';
 import { writeFileCreatingParents } from '../sandbox.ts';
-import type { FileStat, SessionEnv, ShellResult } from '../types.ts';
+import type { FileStat, Sandbox, ShellResult } from '../types.ts';
 
 const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
 
@@ -178,7 +178,7 @@ const DEFAULT_LOCAL_ENV_ALLOWLIST = [
 	'TEMP',
 ] as const;
 
-export interface LocalSessionEnvOptions {
+export interface LocalSandboxOptions {
 	/** Working directory. Defaults to `process.cwd()`. */
 	cwd?: string;
 	/**
@@ -206,7 +206,7 @@ export interface LocalSessionEnvOptions {
  * is stable for the sandbox's lifetime (host mutations to `process.env`
  * after construction are NOT picked up).
  */
-function resolveBaseEnv(userEnv: LocalSessionEnvOptions['env']): NodeJS.ProcessEnv {
+function resolveBaseEnv(userEnv: LocalSandboxOptions['env']): NodeJS.ProcessEnv {
 	// Reject non-record shapes (notably `true` and arrays) at runtime so
 	// we keep the option's shape open for future shorthands like
 	// `env: true` meaning "pass through all of process.env". The TS type
@@ -235,7 +235,7 @@ function resolveBaseEnv(userEnv: LocalSessionEnvOptions['env']): NodeJS.ProcessE
 	return base;
 }
 
-export function createLocalSessionEnv(options: LocalSessionEnvOptions = {}): SessionEnv {
+export function createLocalSandbox(options: LocalSandboxOptions = {}): Sandbox {
 	const cwd = path.resolve(options.cwd ?? process.cwd());
 	const baseEnv = resolveBaseEnv(options.env);
 

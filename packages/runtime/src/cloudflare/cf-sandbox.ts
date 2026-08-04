@@ -1,9 +1,9 @@
-/** Wraps a @cloudflare/sandbox instance (from getSandbox()) into SessionEnv. */
+/** Wraps a @cloudflare/sandbox instance (from getSandbox()) into Sandbox. */
 import { decodeBase64, encodeBase64 } from '../base64.ts';
 import { SandboxDiedError } from '../errors.ts';
-import type { SandboxApi } from '../sandbox.ts';
-import { createSandboxSessionEnv } from '../sandbox.ts';
-import type { SandboxFactory, SessionEnv } from '../types.ts';
+import type { SandboxDriver } from '../sandbox.ts';
+import { sandboxFromDriver } from '../sandbox.ts';
+import type { SandboxFactory, Sandbox } from '../types.ts';
 
 /**
  * Minimal structural surface of a `@cloudflare/sandbox` Durable Object stub
@@ -60,7 +60,7 @@ export function cloudflareSandbox(
 	options?: CloudflareSandboxOptions,
 ): SandboxFactory {
 	return {
-		createSessionEnv: async () => cfSandboxToSessionEnv(sandbox, options?.cwd),
+		createSandbox: async () => cfSandboxToSandbox(sandbox, options?.cwd),
 	};
 }
 
@@ -113,7 +113,7 @@ export function setContainerDeathCadenceForTests(override?: DeathDetectorCadence
  * command on a healthy container is never interrupted.
  *
  * Liveness only: caller aborts are owned one layer up by
- * `createSandboxSessionEnv`'s exec abort race, which also consumes this
+ * `sandboxFromDriver`'s exec abort race, which also consumes this
  * promise's eventual settlement when the caller has already been released.
  */
 function raceContainerDeath<T>(
@@ -171,16 +171,16 @@ function raceContainerDeath<T>(
 
 // Module-private: only cloudflareSandbox() above uses it, and the entry-point
 // tests assert it stays off the cloudflare and internal barrels.
-function cfSandboxToSessionEnv(
+function cfSandboxToSandbox(
 	sandbox: CloudflareSandboxStub,
 	cwd: string = '/workspace',
-): SessionEnv {
+): Sandbox {
 	// Every container call goes through the death detector so a call that is
 	// in flight when the container dies settles instead of hanging forever.
 	const guarded = <T>(operation: string, rpc: Promise<T>): Promise<T> =>
 		raceContainerDeath(sandbox, operation, rpc);
 
-	const api: SandboxApi = {
+	const api: SandboxDriver = {
 		async readFile(path: string): Promise<string> {
 			const file = await guarded('readFile', sandbox.readFile(path));
 			return file.content;
@@ -279,7 +279,7 @@ function cfSandboxToSessionEnv(
 		): Promise<{ stdout: string; stderr: string; exitCode: number }> {
 			// Cloudflare Sandbox does not currently accept AbortSignal across
 			// the getSandbox(...).exec(...) RPC boundary, so `execOpts.signal`
-			// is deliberately not forwarded — `createSandboxSessionEnv` (which
+			// is deliberately not forwarded — `sandboxFromDriver` (which
 			// this adapter builds on) owns caller-facing abort and rejects
 			// promptly while the container keeps running the command. Only
 			// cloneable execution options cross the RPC boundary.
@@ -301,5 +301,5 @@ function cfSandboxToSessionEnv(
 		},
 	};
 
-	return createSandboxSessionEnv(api, cwd);
+	return sandboxFromDriver(api, cwd);
 }
