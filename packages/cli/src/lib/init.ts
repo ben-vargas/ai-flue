@@ -36,13 +36,12 @@ export interface ScaffoldFile {
  * Kept in sync with the ranges the repo's own examples use.
  */
 const DEPENDENCY_VERSIONS = {
-	agents: '^0.14.2',
 	cloudflareVitePlugin: '^1.39.2',
 	hono: '^4.7.0',
 	typescript: '^7.0.2',
 	typesNode: '^22.10.10',
 	vite: '^8.0.14',
-	wrangler: '^4.97.0',
+	wrangler: '^4.113.0',
 } as const;
 
 /** `npm` unless the invoking package manager identifies itself otherwise. */
@@ -112,7 +111,6 @@ function renderPackageJson(opts: InitPlanOptions): string {
 		devDependencies['@flue/vite'] = flueRange;
 		devDependencies.vite = DEPENDENCY_VERSIONS.vite;
 		if (cloudflare) {
-			dependencies.agents = DEPENDENCY_VERSIONS.agents;
 			devDependencies['@cloudflare/vite-plugin'] = DEPENDENCY_VERSIONS.cloudflareVitePlugin;
 			devDependencies.wrangler = DEPENDENCY_VERSIONS.wrangler;
 		}

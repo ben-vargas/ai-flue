@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.0.3 - 2026-08-04
+
+### Fixes & Other Changes
+
+- **The Cloudflare Agents SDK (`agents`) is now a dependency of `@flue/vite` — projects no longer declare it.** The generated Worker entry is the only code that imports the SDK, so the package that generates it ships it, and every project runs the SDK version Flue was tested against instead of whatever a scaffolded range resolves to on install day; `flue init --target cloudflare` stops writing the dependency, and existing projects can delete theirs. A project that declares its own `agents` dependency still wins — the plugin only falls back to its bundled copy when the project's `node_modules` chain has none. This also unbreaks fresh installs, which failed on an `ai` peer conflict internal to `agents@0.14.5`, the newest version the scaffolded `^0.14.2` range had come to resolve (reported by Ben Buzbee). The scaffolded `wrangler` range moves to `^4.113.0`.
+
 ## 2.0.2 - 2026-08-04
 
 ### Fixes & Other Changes

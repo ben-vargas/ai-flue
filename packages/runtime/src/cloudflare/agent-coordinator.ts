@@ -579,7 +579,7 @@ class CloudflareAgentCoordinator {
 	private assertAgentsDurabilityApi(method: 'runFiber' | 'schedule'): void {
 		if (typeof this.instance[method] !== 'function') {
 			throw new Error(
-				`[flue] The installed "agents" package does not provide the required Cloudflare Agents SDK method "${method}". Install or upgrade the "agents" package in your project.`,
+				`[flue] The installed "agents" package does not provide the required Cloudflare Agents SDK method "${method}". Upgrade @flue/vite (which supplies the Cloudflare Agents SDK), or remove the "agents" dependency from your project if it declares an older one.`,
 			);
 		}
 	}

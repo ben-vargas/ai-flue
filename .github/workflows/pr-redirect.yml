@@ -1,78 +1,140 @@
 name: PR Redirect
 
-# SECURITY: This workflow runs on `pull_request_target`, which executes
-# in the base-repo context with full secrets. The agent here is safe
-# ONLY because we check out the base ref (never the PR head), and the
-# agent reads PR data exclusively through `gh pr view --json` rather
-# than executing fork-controlled code or interpolating PR strings into
-# shell scripts.
+# Nightly sweep that redirects open non-maintainer PRs into issues or
+# discussions. Running on a schedule (rather than on PR open) gives
+# contributors time to share their PR and gives maintainers a veto
+# window: a 👀 (eyes) reaction from a maintainer on the PR description
+# means "handle this one specially" and excludes it from the sweep.
 #
-# Do NOT add `ref: ${{ github.event.pull_request.head.sha }}` to the
-# checkout step. Do NOT add steps that build, test, or otherwise execute
-# code from the PR. Either change makes a fork PR author able to
-# exfiltrate FREDKBOT_GITHUB_TOKEN.
+# SECURITY: This workflow processes untrusted fork PRs. The agent here
+# is safe ONLY because we check out the default branch (never a PR
+# head), and the agent reads PR data exclusively through `gh pr view
+# --json` rather than executing fork-controlled code or interpolating
+# PR strings into shell scripts.
+#
+# Do NOT add steps that check out, build, test, or otherwise execute
+# code from a PR. Doing so makes a fork PR author able to exfiltrate
+# FREDKBOT_GITHUB_TOKEN.
 
 on:
-  pull_request_target:
-    # `opened` is the primary trigger. `labeled` is a manual re-trigger:
-    # a maintainer adds the `triage` label to re-run the agent (useful if
-    # the original run failed or the workflow was disabled at the time).
-    # The agent removes the label on success so re-adding it re-runs.
-    types: [opened, labeled]
+  schedule:
+    # Nightly at 09:43 UTC (~2:40am US Pacific). Off the :00/:30 marks
+    # to dodge GitHub's top-of-hour scheduler congestion.
+    - cron: '43 9 * * *'
+  # Manual re-run of the full sweep (useful if the scheduled run failed
+  # or a PR needs redirecting before tonight).
+  workflow_dispatch:
 
-# Concurrency keyed by PR. Queued (not cancelled) so an in-flight write
-# can finish before the next run starts.
+# One sweep at a time. Queued (not cancelled) so an in-flight write can
+# finish before the next run starts.
 concurrency:
-  group: pr-redirect-${{ github.event.pull_request.number }}
+  group: pr-redirect
   cancel-in-progress: false
 
 permissions: {}
 
 jobs:
-  check-contributor:
-    if: >-
-      (github.event.action != 'labeled' || github.event.label.name == 'triage') &&
-      github.event.pull_request.author_association != 'OWNER' &&
-      github.event.pull_request.author_association != 'MEMBER'
+  collect:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      pull-requests: read
+      issues: read
     outputs:
-      approved: ${{ steps.check.outputs.approved }}
+      pr-numbers: ${{ steps.collect.outputs.pr-numbers }}
     steps:
-      - name: Check approved contributors
-        id: check
+      - name: Collect redirectable PRs
+        id: collect
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
-            const path = '.github/APPROVED_CONTRIBUTORS';
-            const author = context.payload.pull_request.user.login.toLowerCase();
-            const ref = context.payload.repository.default_branch;
-            const { data } = await github.rest.repos.getContent({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              path,
-              ref,
-            });
+            const { owner, repo } = context.repo;
 
+            // Approved contributors keep normal PR privileges.
+            const path = '.github/APPROVED_CONTRIBUTORS';
+            const { data } = await github.rest.repos.getContent({ owner, repo, path });
             if (!('content' in data) || typeof data.content !== 'string') {
               throw new Error(`Expected file content for ${path}`);
             }
-
             const approved = Buffer.from(data.content, 'base64')
               .toString('utf8')
               .split('\n')
               .map((line) => line.trim().toLowerCase())
-              .filter((line) => line && !line.startsWith('#'))
-              .includes(author);
+              .filter((line) => line && !line.startsWith('#'));
 
-            core.setOutput('approved', approved ? 'true' : 'false');
+            // A maintainer reacting with 👀 on the PR description vetoes
+            // the redirect ("handle this one specially"). Same role bar
+            // as the `lgtm+` command in approve-contributor.yml.
+            const VETO_REACTION = 'eyes';
+            const maintainerCache = new Map();
+            async function isMaintainer(username) {
+              if (!maintainerCache.has(username)) {
+                let role = 'none';
+                try {
+                  const { data: access } = await github.rest.repos.getCollaboratorPermissionLevel({
+                    owner,
+                    repo,
+                    username,
+                  });
+                  role = access.role_name;
+                } catch {
+                  // 404 = not a collaborator.
+                }
+                maintainerCache.set(username, ['admin', 'maintain'].includes(role));
+              }
+              return maintainerCache.get(username);
+            }
+
+            const prs = await github.paginate(github.rest.pulls.list, {
+              owner,
+              repo,
+              state: 'open',
+              per_page: 100,
+            });
+
+            // Guarantee a veto window even for PRs opened just before the
+            // sweep: anything younger than this is left for the next night.
+            const MIN_AGE_MS = 3 * 60 * 60 * 1000;
+
+            const numbers = [];
+            for (const pr of prs) {
+              if (['OWNER', 'MEMBER'].includes(pr.author_association)) continue;
+              if (approved.includes(pr.user.login.toLowerCase())) continue;
+              if (Date.now() - Date.parse(pr.created_at) < MIN_AGE_MS) {
+                core.info(`Skipping #${pr.number}: opened less than 3 hours ago`);
+                continue;
+              }
+
+              const reactions = await github.paginate(github.rest.reactions.listForIssue, {
+                owner,
+                repo,
+                issue_number: pr.number,
+                per_page: 100,
+              });
+              let vetoed = false;
+              for (const reaction of reactions) {
+                if (reaction.content !== VETO_REACTION) continue;
+                if (reaction.user && (await isMaintainer(reaction.user.login))) {
+                  vetoed = true;
+                  break;
+                }
+              }
+              if (vetoed) {
+                core.info(`Skipping #${pr.number}: maintainer 👀 veto`);
+                continue;
+              }
+
+              numbers.push(pr.number);
+            }
+
+            core.info(`Redirecting ${numbers.length} PR(s): ${numbers.join(', ') || '(none)'}`);
+            core.setOutput('pr-numbers', JSON.stringify(numbers));
 
   redirect:
-    needs: check-contributor
-    if: needs.check-contributor.outputs.approved != 'true'
+    needs: collect
+    if: needs.collect.outputs.pr-numbers != '[]'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 60
 
     permissions:
       contents: read
@@ -81,7 +143,7 @@ jobs:
       discussions: write
 
     steps:
-      - name: Checkout (base ref only — never the PR head)
+      - name: Checkout (default branch only — never a PR head)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -98,10 +160,11 @@ jobs:
       - name: Install deps
         run: pnpm install --frozen-lockfile
 
-      - name: Build Flue runtime + SDK + CLI
-        # Only the packages the agent imports from. Other workspaces
-        # don't need to build.
-        run: pnpm --filter @flue/runtime --filter @flue/sdk --filter @flue/cli build
+      - name: Build Flue CLI + workspace dependencies
+        # `...` includes the CLI's workspace dependencies (runtime, sdk,
+        # vite). The built CLI imports @flue/vite/internal at runtime, so
+        # listing packages by hand under-builds when its deps change.
+        run: pnpm --filter "@flue/cli..." build
 
       - name: Run pr-redirect agent
         env:
@@ -111,11 +174,24 @@ jobs:
           # deterministic phase. Must not be exposed to the sandbox.
           FREDKBOT_GITHUB_TOKEN: ${{ secrets.FREDKBOT_GITHUB_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.CI_ANTHROPIC_API_KEY }}
-          # A GitHub-assigned integer (never PR-author-controlled text),
-          # so interpolating it below cannot smuggle data into the shell.
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          # A JSON array of GitHub-assigned integers built by the collect
+          # job (never PR-author-controlled text), so interpolating it
+          # below cannot smuggle data into the shell.
+          PR_NUMBERS: ${{ needs.collect.outputs.pr-numbers }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+        # One agent run per PR, sequentially. A failed PR doesn't stop
+        # the rest of the sweep; the job fails at the end so the failure
+        # is visible and the PR is retried on the next sweep.
         run: |
-          node packages/cli/bin/flue.mjs run .flue/agents/pr-redirect.ts \
-            --id "pr-redirect-$PR_NUMBER" \
-            --message "Redirect PR #$PR_NUMBER"
+          failed=0
+          for pr in $(echo "$PR_NUMBERS" | jq '.[]'); do
+            echo "::group::PR #$pr"
+            node packages/cli/bin/flue.mjs run .flue/agents/pr-redirect.ts \
+              --id "pr-redirect-$pr" \
+              --message "Redirect PR #$pr" || {
+                echo "::error::pr-redirect failed for PR #$pr"
+                failed=1
+              }
+            echo "::endgroup::"
+          done
+          exit $failed

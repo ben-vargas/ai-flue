@@ -12,7 +12,6 @@
 		"@chat-adapter/state-memory": "*",
 		"@earendil-works/pi-ai": "^0.83.0",
 		"@flue/runtime": "workspace:*",
-		"agents": "^0.20.1",
 		"chat": "*",
 		"hono": "^4.8.3",
 		"just-bash": "^3.0.1",

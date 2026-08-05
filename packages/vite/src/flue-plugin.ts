@@ -56,6 +56,7 @@ import {
 	isAgentModulePath,
 	scanAgents,
 } from './agent-scan.ts';
+import { cloudflareAgentsResolverPlugin } from './cloudflare-agents-resolver.ts';
 import { generateCloudflareEntry } from './cloudflare-entry.ts';
 import {
 	cloudflareOrderingError,
@@ -354,8 +355,10 @@ export function flue(config: FlueConfig = {}): Plugin[] {
 				// The dependency resolver stays inert (root unset): the Worker
 				// entry is a virtual module resolved against the user's project
 				// root, so its bare imports resolve from the user's node_modules
-				// natively, and externalization would break the workerd module
-				// graph. Dev CORS matches the Node target: workerd requests flow
+				// natively (the Agents SDK additionally falls back to this
+				// package's pinned copy — see cloudflare-agents-resolver.ts),
+				// and externalization would break the workerd module graph. Dev
+				// CORS matches the Node target: workerd requests flow
 				// through Vite's middleware stack, and separate-origin local
 				// clients need the durable-stream coordination headers exposed.
 				return {
@@ -714,6 +717,7 @@ export function flue(config: FlueConfig = {}): Plugin[] {
 		markdownImportPlugin(),
 		importTrace.plugin,
 		flueDependencyResolverPlugin(resolverState),
+		cloudflareAgentsResolverPlugin(state),
 	];
 }
 

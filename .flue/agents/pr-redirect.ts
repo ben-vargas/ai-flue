@@ -2,12 +2,17 @@
 /**
  * pr-redirect — redirect non-maintainer PRs into issues or discussions.
  *
- * Invoked from `.github/workflows/pr-redirect.yml` as a one-shot CLI run:
+ * Invoked from `.github/workflows/pr-redirect.yml`, a nightly sweep
+ * that collects open non-maintainer PRs and starts a one-shot CLI run
+ * per PR:
  *
  *   flue run .flue/agents/pr-redirect.ts --id pr-redirect-<n> \
  *     --message "Redirect PR #<n>"
  *
- * No HTTP trigger.
+ * No HTTP trigger. The sweep's filters (maintainer authors, approved
+ * contributors, and the maintainer 👀-reaction veto that marks a PR
+ * "handle this one specially") run in the workflow's collect job — by
+ * the time this agent sees a PR number, the redirect decision is made.
  *
  * Pipeline (all of it inside the `redirect_pr` harness tool)
  * --------
@@ -42,7 +47,6 @@ import {
 	commentOnPullRequest,
 	createDiscussion,
 	createIssue,
-	removeLabelIfPresent,
 } from '../lib/github.ts';
 
 // Subset of FlueLogger; declared locally so helpers can take a logger
@@ -54,12 +58,6 @@ type Logger = {
 };
 
 const FEATURE_REQUEST_CATEGORY = 'Feature Request';
-
-// Label that, when added to a PR, manually triggers this agent. The
-// GitHub workflow listens for `pull_request_target` with `action:
-// labeled` filtered to this name. The agent removes it on success so
-// re-adding it re-runs the workflow.
-const TRIAGE_LABEL = 'triage';
 
 // ─── Agent ──────────────────────────────────────────────────────────────────
 
@@ -190,10 +188,6 @@ export function PrRedirect() {
 
 			await commentOnPullRequest(prNumber, closePrComment(destinationUrl, destinationKind));
 			await closePullRequest(prNumber);
-
-			// Done last so that a partial-failure run leaves the label in place
-			// and a maintainer can re-trigger by removing-and-re-adding it.
-			await removeLabelIfPresent(prNumber, TRIAGE_LABEL);
 
 			log.info('pr-redirect: done', { prNumber, action: decision.action, destinationUrl });
 			return { output: { action: decision.action, destinationUrl, prNumber } };

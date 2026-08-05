@@ -11,7 +11,6 @@
 		"@cloudflare/computer": "^0.1.1",
 		"@platformatic/vfs": "^0.4.0",
 		"@flue/runtime": "workspace:*",
-		"agents": "^0.20.1",
 		"hono": "^4.7.0",
 		"valibot": "^1.0.0"
 	},

@@ -9,7 +9,7 @@
  *
  * Keeping this module unreachable from inside `session.shell` is what
  * makes the agent's prompt injection blast radius bounded. See the
- * security note in `.flue/workflows/pr-redirect.ts`.
+ * security note in `.flue/agents/pr-redirect.ts`.
  */
 
 const REPO = process.env.GITHUB_REPOSITORY ?? 'withastro/flue';
@@ -103,20 +103,6 @@ export async function commentOnPullRequest(prNumber: number, body: string): Prom
 
 export async function closePullRequest(prNumber: number): Promise<void> {
 	await rest('PATCH', `/repos/${REPO}/pulls/${prNumber}`, { state: 'closed' });
-}
-
-/**
- * Remove a label from an issue or PR. No-op if the label isn't applied
- * (GitHub returns 404, which we swallow). Other errors throw.
- */
-export async function removeLabelIfPresent(issueOrPrNumber: number, label: string): Promise<void> {
-	const res = await fetch(
-		`https://api.github.com/repos/${REPO}/issues/${issueOrPrNumber}/labels/${encodeURIComponent(label)}`,
-		{ method: 'DELETE', headers: headers() },
-	);
-	if (!res.ok && res.status !== 404) {
-		throw new Error(`GitHub REST DELETE label failed (HTTP ${res.status}): ${await res.text()}`);
-	}
 }
 
 // ─── GraphQL: discussions ───────────────────────────────────────────────────
